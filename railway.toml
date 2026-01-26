@@ -1,6 +1,8 @@
 [build]
 builder = "dockerfile"
 dockerfilePath = "Dockerfile"
+# Increase build timeout for Swift compilation (in seconds)
+buildCommand = ""
 
 [deploy]
 healthcheckPath = "/health"

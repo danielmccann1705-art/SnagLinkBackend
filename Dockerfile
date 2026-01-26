@@ -6,28 +6,30 @@ WORKDIR /app
 # Copy package files first for better caching
 COPY Package.swift Package.resolved* ./
 
-# Resolve dependencies
+# Resolve and fetch dependencies
 RUN swift package resolve
 
-# Copy source code only (not tests)
+# Pre-build dependencies in a cached layer
+RUN mkdir -p Sources/App && \
+    echo 'import Vapor; @main struct Placeholder { static func main() async throws { print("x") } }' > Sources/App/main.swift && \
+    (swift build -c release --product App -j 2 || true) && \
+    rm -rf Sources
+
+# Copy actual source code
 COPY Sources ./Sources
 
-# Build release binary (only the App product, skip tests)
-RUN swift build -c release --product App
+# Build release binary with limited parallelism
+RUN swift build -c release --product App -j 2
 
 # Runtime stage
 FROM swift:5.9-jammy-slim
 
-# Install required runtime libraries
-RUN apt-get update && apt-get install -y \
-    libcurl4 \
-    libxml2 \
-    tzdata \
-    ca-certificates \
-    curl \
+# Install minimal runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user for security
+# Create non-root user
 RUN useradd --create-home --user-group vapor
 
 WORKDIR /app
@@ -35,18 +37,13 @@ WORKDIR /app
 # Copy built executable
 COPY --from=builder /app/.build/release/App ./
 
-# Set ownership
 RUN chown -R vapor:vapor /app
-
 USER vapor
 
-# Expose port
 EXPOSE 8080
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-# Run the application
 ENTRYPOINT ["./App"]
 CMD ["serve", "--env", "production", "--hostname", "0.0.0.0", "--port", "8080"]
