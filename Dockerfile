@@ -9,15 +9,14 @@ COPY Package.swift Package.resolved* ./
 # Resolve dependencies
 RUN swift package resolve
 
-# Copy source code
+# Copy source code only (not tests)
 COPY Sources ./Sources
-COPY Tests ./Tests
 
-# Build with optimizations
-RUN swift build -c release --static-swift-stdlib
+# Build release binary (only the App product, skip tests)
+RUN swift build -c release --product App
 
 # Runtime stage
-FROM ubuntu:22.04
+FROM swift:5.9-jammy-slim
 
 # Install required runtime libraries
 RUN apt-get update && apt-get install -y \
@@ -25,6 +24,7 @@ RUN apt-get update && apt-get install -y \
     libxml2 \
     tzdata \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
