@@ -11,6 +11,7 @@ RUN swift package resolve
 
 # Copy source code
 COPY Sources ./Sources
+COPY Tests ./Tests
 
 # Build with optimizations
 RUN swift build -c release --static-swift-stdlib
