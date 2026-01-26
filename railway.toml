@@ -1,8 +1,7 @@
 [build]
-builder = "dockerfile"
+# Use pre-built image from GitHub Container Registry
+# This avoids Railway's build timeout issues with Swift
 dockerfilePath = "Dockerfile"
-# Increase build timeout for Swift compilation (in seconds)
-buildCommand = ""
 
 [deploy]
 healthcheckPath = "/health"
