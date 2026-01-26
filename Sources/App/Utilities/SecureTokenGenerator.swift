@@ -3,14 +3,16 @@ import Vapor
 
 struct SecureTokenGenerator {
     /// Generates a cryptographically secure random token
+    /// Uses SystemRandomNumberGenerator which is backed by the OS's secure random source
+    /// (getrandom/urandom on Linux, Security framework on macOS)
     /// - Parameter byteCount: Number of random bytes (default 32)
     /// - Returns: URL-safe base64 encoded token
     static func generate(byteCount: Int = 32) throws -> String {
         var bytes = [UInt8](repeating: 0, count: byteCount)
-        let status = SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes)
+        var generator = SystemRandomNumberGenerator()
 
-        guard status == errSecSuccess else {
-            throw Abort(.internalServerError, reason: "Failed to generate secure random bytes")
+        for i in 0..<byteCount {
+            bytes[i] = UInt8.random(in: 0...255, using: &generator)
         }
 
         // Convert to URL-safe base64
@@ -26,10 +28,10 @@ struct SecureTokenGenerator {
     /// - Returns: Hex-encoded salt string
     static func generateSalt(byteCount: Int = 16) throws -> String {
         var bytes = [UInt8](repeating: 0, count: byteCount)
-        let status = SecRandomCopyBytes(kSecRandomDefault, byteCount, &bytes)
+        var generator = SystemRandomNumberGenerator()
 
-        guard status == errSecSuccess else {
-            throw Abort(.internalServerError, reason: "Failed to generate secure salt")
+        for i in 0..<byteCount {
+            bytes[i] = UInt8.random(in: 0...255, using: &generator)
         }
 
         return bytes.map { String(format: "%02x", $0) }.joined()
