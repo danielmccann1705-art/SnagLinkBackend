@@ -1,4 +1,5 @@
 import Fluent
+import FluentSQL
 
 struct CreateTeamInvite: AsyncMigration {
     func prepare(on database: Database) async throws {
@@ -18,17 +19,10 @@ struct CreateTeamInvite: AsyncMigration {
             .create()
 
         // Create indices for common queries
-        try await database.schema("team_invites")
-            .constraint(.custom("CREATE INDEX IF NOT EXISTS idx_team_invites_token ON team_invites(token)"))
-            .update()
-
-        try await database.schema("team_invites")
-            .constraint(.custom("CREATE INDEX IF NOT EXISTS idx_team_invites_email ON team_invites(email)"))
-            .update()
-
-        try await database.schema("team_invites")
-            .constraint(.custom("CREATE INDEX IF NOT EXISTS idx_team_invites_team_id ON team_invites(team_id)"))
-            .update()
+        let sql = database as! SQLDatabase
+        try await sql.raw("CREATE INDEX IF NOT EXISTS idx_team_invites_token ON team_invites(token)").run()
+        try await sql.raw("CREATE INDEX IF NOT EXISTS idx_team_invites_email ON team_invites(email)").run()
+        try await sql.raw("CREATE INDEX IF NOT EXISTS idx_team_invites_team_id ON team_invites(team_id)").run()
     }
 
     func revert(on database: Database) async throws {

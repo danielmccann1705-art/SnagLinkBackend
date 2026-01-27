@@ -1,4 +1,5 @@
 import Fluent
+import FluentSQL
 
 struct CreateMagicLinkAccess: AsyncMigration {
     func prepare(on database: Database) async throws {
@@ -14,9 +15,8 @@ struct CreateMagicLinkAccess: AsyncMigration {
             .create()
 
         // Create index on magic_link_id for fast lookups
-        try await database.schema("magic_link_accesses")
-            .constraint(.custom("CREATE INDEX IF NOT EXISTS idx_magic_link_accesses_magic_link_id ON magic_link_accesses(magic_link_id)"))
-            .update()
+        let sql = database as! SQLDatabase
+        try await sql.raw("CREATE INDEX IF NOT EXISTS idx_magic_link_accesses_magic_link_id ON magic_link_accesses(magic_link_id)").run()
     }
 
     func revert(on database: Database) async throws {

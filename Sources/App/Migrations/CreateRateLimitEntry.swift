@@ -1,4 +1,5 @@
 import Fluent
+import FluentSQL
 
 struct CreateRateLimitEntry: AsyncMigration {
     func prepare(on database: Database) async throws {
@@ -14,14 +15,11 @@ struct CreateRateLimitEntry: AsyncMigration {
             .create()
 
         // Create composite index for fast lookups
-        try await database.schema("rate_limit_entries")
-            .constraint(.custom("CREATE INDEX IF NOT EXISTS idx_rate_limit_entries_key_action ON rate_limit_entries(key, action)"))
-            .update()
+        let sql = database as! SQLDatabase
+        try await sql.raw("CREATE INDEX IF NOT EXISTS idx_rate_limit_entries_key_action ON rate_limit_entries(key, action)").run()
 
         // Create index on window_end for cleanup queries
-        try await database.schema("rate_limit_entries")
-            .constraint(.custom("CREATE INDEX IF NOT EXISTS idx_rate_limit_entries_window_end ON rate_limit_entries(window_end)"))
-            .update()
+        try await sql.raw("CREATE INDEX IF NOT EXISTS idx_rate_limit_entries_window_end ON rate_limit_entries(window_end)").run()
     }
 
     func revert(on database: Database) async throws {
