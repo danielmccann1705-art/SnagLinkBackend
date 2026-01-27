@@ -10,13 +10,12 @@ COPY Package.swift Package.resolved* ./
 RUN swift package resolve
 
 # Pre-build dependencies in a cached layer
-# Use baseline x86-64 CPU target and disable AVX to avoid SIGILL on Render's machines
+# Use baseline x86-64 CPU target and disable AVX via LLVM backend to avoid SIGILL on Render's machines
 RUN mkdir -p Sources/App && \
     echo 'import Vapor; @main struct Placeholder { static func main() async throws { print("x") } }' > Sources/App/main.swift && \
     (swift build -c release --product App -j 2 \
         -Xswiftc -target-cpu -Xswiftc x86-64 \
-        -Xswiftc -target-feature -Xswiftc -avx \
-        -Xswiftc -target-feature -Xswiftc -avx2 \
+        -Xswiftc -Xllvm -Xswiftc -mattr=-avx,-avx2,-avx512f \
         -Xcc -march=x86-64 -Xcc -mno-avx -Xcc -mno-avx2 || true) && \
     rm -rf Sources
 
@@ -24,11 +23,10 @@ RUN mkdir -p Sources/App && \
 COPY Sources ./Sources
 
 # Build release binary with limited parallelism
-# Target baseline x86-64 and disable AVX instructions for Render compatibility
+# Target baseline x86-64 and disable AVX instructions via LLVM backend for Render compatibility
 RUN swift build -c release --product App -j 2 \
     -Xswiftc -target-cpu -Xswiftc x86-64 \
-    -Xswiftc -target-feature -Xswiftc -avx \
-    -Xswiftc -target-feature -Xswiftc -avx2 \
+    -Xswiftc -Xllvm -Xswiftc -mattr=-avx,-avx2,-avx512f \
     -Xcc -march=x86-64 -Xcc -mno-avx -Xcc -mno-avx2
 
 # Runtime stage
