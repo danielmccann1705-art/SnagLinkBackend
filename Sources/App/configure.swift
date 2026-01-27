@@ -11,7 +11,7 @@ public func configure(_ app: Application) async throws {
 
     // MARK: - Database Configuration
     if let databaseURL = Environment.get("DATABASE_URL"),
-       var config = SQLPostgresConfiguration(url: databaseURL) {
+       var config = try? SQLPostgresConfiguration(url: databaseURL) {
         // For Render internal connections, disable SSL certificate verification
         // Internal connections use self-signed certificates
         config.coreConfiguration.tls = .disable
