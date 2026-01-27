@@ -3,19 +3,23 @@ import FluentSQL
 
 struct CreateRateLimitEntry: AsyncMigration {
     func prepare(on database: Database) async throws {
-        try await database.schema("rate_limit_entries")
-            .id()
-            .field("key", .string, .required)
-            .field("action", .string, .required)
-            .field("count", .int, .required, .custom("DEFAULT 1"))
-            .field("window_start", .datetime, .required)
-            .field("window_end", .datetime, .required)
-            .field("created_at", .datetime)
-            .field("updated_at", .datetime)
-            .create()
+        let sql = database as! SQLDatabase
+
+        // Use raw SQL with IF NOT EXISTS to handle partial migration state
+        try await sql.raw("""
+            CREATE TABLE IF NOT EXISTS rate_limit_entries (
+                id UUID PRIMARY KEY,
+                key TEXT NOT NULL,
+                action TEXT NOT NULL,
+                count BIGINT NOT NULL DEFAULT 1,
+                window_start TIMESTAMPTZ NOT NULL,
+                window_end TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ
+            )
+            """).run()
 
         // Create composite index for fast lookups
-        let sql = database as! SQLDatabase
         try await sql.raw("CREATE INDEX IF NOT EXISTS idx_rate_limit_entries_key_action ON rate_limit_entries(key, action)").run()
 
         // Create index on window_end for cleanup queries
