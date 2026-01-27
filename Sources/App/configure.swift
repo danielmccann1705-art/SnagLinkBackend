@@ -2,6 +2,7 @@ import Fluent
 import FluentPostgresDriver
 import Vapor
 import JWT
+import NIOSSL
 
 public func configure(_ app: Application) async throws {
     // MARK: - Server Configuration
@@ -9,7 +10,14 @@ public func configure(_ app: Application) async throws {
     app.http.server.configuration.port = Environment.get("PORT").flatMap(Int.init) ?? 8080
 
     // MARK: - Database Configuration
-    if let databaseURL = Environment.get("DATABASE_URL") {
+    if let databaseURL = Environment.get("DATABASE_URL"),
+       var config = SQLPostgresConfiguration(url: databaseURL) {
+        // For Render internal connections, disable SSL certificate verification
+        // Internal connections use self-signed certificates
+        config.coreConfiguration.tls = .disable
+        app.databases.use(.postgres(configuration: config), as: .psql)
+    } else if let databaseURL = Environment.get("DATABASE_URL") {
+        // Fallback to URL-based config if parsing fails
         try app.databases.use(.postgres(url: databaseURL), as: .psql)
     } else {
         // Local development fallback
