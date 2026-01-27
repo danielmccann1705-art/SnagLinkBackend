@@ -10,18 +10,16 @@ COPY Package.swift Package.resolved* ./
 RUN swift package resolve
 
 # Pre-build dependencies in a cached layer
-# Use x86-64 baseline CPU target for compatibility with Render's VMs
 RUN mkdir -p Sources/App && \
     echo 'import Vapor; @main struct Placeholder { static func main() async throws { print("x") } }' > Sources/App/main.swift && \
-    (swift build -c release --product App -j 2 -Xswiftc -target-cpu=x86-64 || true) && \
+    (swift build -c release --product App -j 2 || true) && \
     rm -rf Sources
 
 # Copy actual source code
 COPY Sources ./Sources
 
 # Build release binary with limited parallelism
-# Use x86-64 baseline CPU target to avoid SIGILL on Render's free tier
-RUN swift build -c release --product App -j 2 -Xswiftc -target-cpu=x86-64
+RUN swift build -c release --product App -j 2
 
 # Runtime stage
 FROM swift:5.9-jammy-slim

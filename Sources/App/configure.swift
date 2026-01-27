@@ -49,10 +49,8 @@ private func configureRest(_ app: Application) async throws {
     app.migrations.add(CreateAuditLog())
     app.migrations.add(CreateRateLimitEntry())
 
-    // Auto-migrate in development
-    if app.environment == .development {
-        try await app.autoMigrate()
-    }
+    // Auto-migrate database tables
+    try await app.autoMigrate()
 
     // MARK: - Middleware
     app.middleware.use(ErrorMiddleware.default(environment: app.environment))
