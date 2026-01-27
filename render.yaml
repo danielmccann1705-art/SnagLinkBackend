@@ -3,7 +3,7 @@ services:
   - type: web
     name: snaglink-backend
     env: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./Dockerfile.build
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
