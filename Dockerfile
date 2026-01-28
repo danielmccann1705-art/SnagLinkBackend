@@ -10,12 +10,14 @@ COPY Package.swift Package.resolved* ./
 RUN swift package resolve
 
 # Pre-build dependencies in a cached layer
-# Use baseline x86-64 CPU target to avoid SIGILL on Render's older CPU infrastructure
-# The -target-cpu x86-64 flag sets the baseline without AVX/AVX2 requirements
+# CRITICAL: Use static-swift-stdlib to include stdlib in binary (compiled with our flags)
+# Disable ALL vectorization to prevent ANY AVX/AVX2 instructions
 RUN mkdir -p Sources/App && \
     echo 'import Vapor; @main struct Placeholder { static func main() async throws { print("x") } }' > Sources/App/main.swift && \
-    (swift build -c release --product App -j 2 \
+    (swift build -c release --product App -j 2 --static-swift-stdlib \
         -Xswiftc -target-cpu -Xswiftc x86-64 \
+        -Xswiftc -Xllvm -Xswiftc -vectorize-loops=false \
+        -Xswiftc -Xllvm -Xswiftc -vectorize-slp=false \
         -Xcc -march=x86-64 -Xcc -mtune=generic -Xcc -mno-avx -Xcc -mno-avx2 -Xcc -mno-avx512f || true) && \
     rm -rf Sources
 
@@ -23,13 +25,20 @@ RUN mkdir -p Sources/App && \
 COPY Sources ./Sources
 
 # Build release binary with limited parallelism
-# Target baseline x86-64 CPU without AVX extensions for Render compatibility
-RUN swift build -c release --product App -j 2 \
+# CRITICAL FLAGS FOR RENDER COMPATIBILITY:
+# --static-swift-stdlib: Statically link Swift stdlib (uses OUR compilation flags)
+# -target-cpu x86-64: Target baseline x86-64 without AVX
+# -vectorize-loops=false: Disable loop vectorization (prevents AVX auto-generation)
+# -vectorize-slp=false: Disable SLP vectorization (prevents AVX auto-generation)
+# -Xcc flags: Ensure C code also avoids AVX
+RUN swift build -c release --product App -j 2 --static-swift-stdlib \
     -Xswiftc -target-cpu -Xswiftc x86-64 \
+    -Xswiftc -Xllvm -Xswiftc -vectorize-loops=false \
+    -Xswiftc -Xllvm -Xswiftc -vectorize-slp=false \
     -Xcc -march=x86-64 -Xcc -mtune=generic -Xcc -mno-avx -Xcc -mno-avx2 -Xcc -mno-avx512f
 
-# Runtime stage
-FROM swift:5.9-jammy-slim
+# Runtime stage - using Ubuntu base since we statically linked Swift
+FROM ubuntu:22.04
 
 # Install minimal runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
