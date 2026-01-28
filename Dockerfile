@@ -53,6 +53,15 @@ WORKDIR /app
 # Copy built executable
 COPY --from=builder /app/.build/release/App ./
 
+# CRITICAL: Force BoringSSL/OpenSSL to NOT use AVX instructions at runtime
+# The hand-written assembly in BoringSSL (aes-gcm-avx2-x86_64.S, etc.) uses AVX
+# This env var tells BoringSSL to disable AVX/AVX2/AVX512 feature detection
+# Format: ~bit_mask clears those bits from CPUID detection
+# Bit 28 (0x10000000) = AVX in CPUID(1).ECX
+# Bit 5 (0x20) = AVX2 in CPUID(7).EBX
+# We clear all AVX-related bits to force fallback to SSE implementations
+ENV OPENSSL_ia32cap="~0x200000000000000:~0x20"
+
 RUN chown -R vapor:vapor /app
 USER vapor
 
