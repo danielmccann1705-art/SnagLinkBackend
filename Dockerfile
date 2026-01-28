@@ -1,6 +1,5 @@
-# Build stage - using Swift 5.7 which has less aggressive AVX usage in stdlib
-# Swift 5.9's string operations use AVX2 which crashes on Render's older CPUs
-FROM swift:5.7-jammy as builder
+# Build stage
+FROM swift:5.9-jammy as builder
 
 WORKDIR /app
 
