@@ -1,7 +1,7 @@
 # Render.com deployment configuration
 services:
   - type: web
-    name: snaglink-backend
+    name: snaglist-backend
     env: docker
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health

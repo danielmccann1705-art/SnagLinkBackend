@@ -5,18 +5,14 @@ struct MagicLinkController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
         let magicLinks = routes.grouped("api", "v1", "magic-links")
 
-        // Public endpoints (with rate limiting)
-        let publicRoutes = magicLinks.grouped(RateLimitMiddleware(action: .tokenLookup))
-        publicRoutes.get(":token", "validate", use: validateToken)
-        publicRoutes.grouped(RateLimitMiddleware(action: .pinAttempt))
-            .post(":token", "verify-pin", use: verifyPIN)
-
-        // Authenticated endpoints
-        let authRoutes = magicLinks.grouped(JWTAuthMiddleware())
-        authRoutes.post(use: create)
-        authRoutes.get(use: list)
-        authRoutes.delete(":id", use: revoke)
-        authRoutes.get(":id", "analytics", use: getAnalytics)
+        // Routes with consistent parameter name ":linkId"
+        // Note: Using same param name at each route level is required by Vapor's TrieRouter
+        magicLinks.get(":linkId", "validate", use: validateToken)
+        magicLinks.post(":linkId", "verify-pin", use: verifyPIN)
+        magicLinks.post(use: create)
+        magicLinks.get(use: list)
+        magicLinks.delete(":linkId", use: revoke)
+        magicLinks.get(":linkId", "analytics", use: getAnalytics)
     }
 
     // MARK: - Public Endpoints
@@ -25,7 +21,7 @@ struct MagicLinkController: RouteCollection {
     /// GET /api/v1/magic-links/:token/validate
     @Sendable
     func validateToken(req: Request) async throws -> MagicLinkValidationResponse {
-        guard let token = req.parameters.get("token") else {
+        guard let token = req.parameters.get("linkId") else {
             throw Abort(.badRequest, reason: "Token is required")
         }
 
@@ -63,7 +59,7 @@ struct MagicLinkController: RouteCollection {
     /// POST /api/v1/magic-links/:token/verify-pin
     @Sendable
     func verifyPIN(req: Request) async throws -> PINVerificationResponse {
-        guard let token = req.parameters.get("token") else {
+        guard let token = req.parameters.get("linkId") else {
             throw Abort(.badRequest, reason: "Token is required")
         }
 
@@ -209,7 +205,7 @@ struct MagicLinkController: RouteCollection {
     func revoke(req: Request) async throws -> HTTPStatus {
         let userId = try req.requireAuthenticatedUserId()
 
-        guard let idString = req.parameters.get("id"),
+        guard let idString = req.parameters.get("linkId"),
               let id = UUID(uuidString: idString) else {
             throw Abort(.badRequest, reason: "Invalid magic link ID")
         }
@@ -251,7 +247,7 @@ struct MagicLinkController: RouteCollection {
     func getAnalytics(req: Request) async throws -> MagicLinkAnalyticsResponse {
         let userId = try req.requireAuthenticatedUserId()
 
-        guard let idString = req.parameters.get("id"),
+        guard let idString = req.parameters.get("linkId"),
               let id = UUID(uuidString: idString) else {
             throw Abort(.badRequest, reason: "Invalid magic link ID")
         }

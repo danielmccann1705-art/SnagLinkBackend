@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "SnagLinkBackend",
+    name: "SnaglistBackend",
     platforms: [
         .macOS(.v13)
     ],

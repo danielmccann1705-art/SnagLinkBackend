@@ -5,17 +5,14 @@ struct TeamInviteController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
         let teamInvites = routes.grouped("api", "v1", "team-invites")
 
-        // Public endpoints (with rate limiting)
-        let publicRoutes = teamInvites.grouped(RateLimitMiddleware(action: .tokenLookup))
-        publicRoutes.get(":token", "validate", use: validateToken)
-
-        // Authenticated endpoints
-        let authRoutes = teamInvites.grouped(JWTAuthMiddleware())
-        authRoutes.post(use: create)
-        authRoutes.get("pending", use: listPending)
-        authRoutes.post(":token", "accept", use: accept)
-        authRoutes.post(":token", "decline", use: decline)
-        authRoutes.delete(":id", use: revoke)
+        // Routes with consistent parameter name ":inviteId"
+        // Note: Using same param name at each route level is required by Vapor's TrieRouter
+        teamInvites.get(":inviteId", "validate", use: validateToken)
+        teamInvites.post(use: create)
+        teamInvites.get("pending", use: listPending)
+        teamInvites.post(":inviteId", "accept", use: accept)
+        teamInvites.post(":inviteId", "decline", use: decline)
+        teamInvites.delete(":inviteId", use: revoke)
     }
 
     // MARK: - Public Endpoints
@@ -24,7 +21,7 @@ struct TeamInviteController: RouteCollection {
     /// GET /api/v1/team-invites/:token/validate
     @Sendable
     func validateToken(req: Request) async throws -> TeamInviteValidationResponse {
-        guard let token = req.parameters.get("token") else {
+        guard let token = req.parameters.get("inviteId") else {
             throw Abort(.badRequest, reason: "Token is required")
         }
 
@@ -116,12 +113,12 @@ struct TeamInviteController: RouteCollection {
     }
 
     /// Accepts a team invite
-    /// POST /api/v1/team-invites/:token/accept
+    /// POST /api/v1/team-invites/:inviteId/accept
     @Sendable
     func accept(req: Request) async throws -> TeamInviteActionResponse {
         let userId = try req.requireAuthenticatedUserId()
 
-        guard let token = req.parameters.get("token") else {
+        guard let token = req.parameters.get("inviteId") else {
             throw Abort(.badRequest, reason: "Token is required")
         }
 
@@ -153,12 +150,12 @@ struct TeamInviteController: RouteCollection {
     }
 
     /// Declines a team invite
-    /// POST /api/v1/team-invites/:token/decline
+    /// POST /api/v1/team-invites/:inviteId/decline
     @Sendable
     func decline(req: Request) async throws -> TeamInviteActionResponse {
         let userId = try req.requireAuthenticatedUserId()
 
-        guard let token = req.parameters.get("token") else {
+        guard let token = req.parameters.get("inviteId") else {
             throw Abort(.badRequest, reason: "Token is required")
         }
 
@@ -190,12 +187,12 @@ struct TeamInviteController: RouteCollection {
     }
 
     /// Revokes a team invite
-    /// DELETE /api/v1/team-invites/:id
+    /// DELETE /api/v1/team-invites/:inviteId
     @Sendable
     func revoke(req: Request) async throws -> HTTPStatus {
         let userId = try req.requireAuthenticatedUserId()
 
-        guard let idString = req.parameters.get("id"),
+        guard let idString = req.parameters.get("inviteId"),
               let id = UUID(uuidString: idString) else {
             throw Abort(.badRequest, reason: "Invalid team invite ID")
         }
