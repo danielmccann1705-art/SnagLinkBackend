@@ -55,6 +55,9 @@ final class MagicLink: Model, Content, @unchecked Sendable {
     @Field(key: "created_by_id")
     var createdById: UUID
 
+    @OptionalField(key: "slug")
+    var slug: String?
+
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
 
@@ -73,7 +76,8 @@ final class MagicLink: Model, Content, @unchecked Sendable {
         snagIds: [UUID],
         projectId: UUID,
         contractorId: UUID? = nil,
-        createdById: UUID
+        createdById: UUID,
+        slug: String? = nil
     ) {
         self.id = id
         self.token = token
@@ -87,6 +91,7 @@ final class MagicLink: Model, Content, @unchecked Sendable {
         self.projectId = projectId
         self.contractorId = contractorId
         self.createdById = createdById
+        self.slug = slug
     }
 
     var isExpired: Bool {

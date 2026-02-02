@@ -26,6 +26,8 @@ func routes(_ app: Application) throws {
         - GET /api/v1/magic-links - List your magic links (auth required)
         - DELETE /api/v1/magic-links/:linkId - Revoke a magic link (auth required)
         - GET /api/v1/magic-links/:linkId/analytics - Get magic link analytics (auth required)
+        - GET /api/v1/magic-links/:linkId/pdf - Download PDF report of snags
+        - GET /api/v1/magic-links/:linkId/qr - Generate QR code image (PNG)
 
         Team Invites:
         - GET /api/v1/team-invites/:inviteId/validate - Validate a team invite token
@@ -34,12 +36,27 @@ func routes(_ app: Application) throws {
         - POST /api/v1/team-invites/:inviteId/accept - Accept a team invite (auth required)
         - POST /api/v1/team-invites/:inviteId/decline - Decline a team invite (auth required)
         - DELETE /api/v1/team-invites/:inviteId - Revoke a team invite (auth required)
+
+        Completions:
+        - POST /api/v1/magic-links/:linkId/snags/:snagId/complete - Submit completion (magic link)
+        - GET /api/v1/completions/pending - List pending completions (auth required)
+        - GET /api/v1/completions/:completionId - Get completion details (auth required)
+        - POST /api/v1/completions/:completionId/approve - Approve completion (auth required)
+        - POST /api/v1/completions/:completionId/reject - Reject completion (auth required)
+
+        Snags:
+        - GET /api/v1/magic-links/:linkId/snags - List snags for a magic link
+
+        Uploads:
+        - POST /api/v1/uploads/photo - Upload a photo (multipart form data)
         """
     }
 
     // MARK: - Controllers
     try app.register(collection: MagicLinkController())
     try app.register(collection: TeamInviteController())
+    try app.register(collection: CompletionController())
+    try app.register(collection: UploadController())
 }
 
 // MARK: - Response Models

@@ -20,6 +20,9 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateTeamInvite())
         app.migrations.add(CreateAuditLog())
         app.migrations.add(CreateRateLimitEntry())
+        app.migrations.add(CreateCompletion())
+        app.migrations.add(CreateCompletionPhoto())
+        app.migrations.add(AddSlugToMagicLink())
 
         try await app.autoMigrate()
     } else {
@@ -30,8 +33,21 @@ public func configure(_ app: Application) async throws {
     let jwtSecret = Environment.get("JWT_SECRET") ?? "development-secret-key-change-me!!"
     app.jwt.signers.use(.hs256(key: jwtSecret))
 
+    // MARK: - CORS Configuration
+    let corsConfiguration = CORSMiddleware.Configuration(
+        allowedOrigin: .any(["http://localhost:3004", "https://snaglist.app"]),
+        allowedMethods: [.GET, .POST, .PUT, .DELETE, .OPTIONS],
+        allowedHeaders: [.accept, .authorization, .contentType, .origin, .xRequestedWith]
+    )
+    let corsMiddleware = CORSMiddleware(configuration: corsConfiguration)
+
     // MARK: - Middleware
+    // CORS must be added before other middleware
+    app.middleware.use(corsMiddleware)
     app.middleware.use(ErrorMiddleware.default(environment: app.environment))
+
+    // File middleware for serving uploaded photos
+    app.middleware.use(FileMiddleware(publicDirectory: app.directory.publicDirectory))
 
     // MARK: - Routes
     try routes(app)

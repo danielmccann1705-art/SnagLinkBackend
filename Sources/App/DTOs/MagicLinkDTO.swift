@@ -1,5 +1,51 @@
 import Vapor
 
+// MARK: - Snag DTOs
+
+/// DTO representing a snag item accessible via magic link
+struct SnagDTO: Content {
+    let id: UUID
+    let title: String
+    let description: String?
+    let status: String
+    let priority: String
+    let photos: [SnagPhotoDTO]
+    let location: String?           // Human-readable location string
+    let floorPlanName: String?      // Name of floor plan if associated
+    let floorPlanId: UUID?          // UUID of the associated floor plan
+    let floorPlanImageURL: String?  // URL to the floor plan image
+    let pinX: Double?               // 0-1 normalized X coordinate on floor plan
+    let pinY: Double?               // 0-1 normalized Y coordinate on floor plan
+    let dueDate: String?            // ISO8601 date string
+    let assignedTo: String?         // Contractor/assignee name
+    let createdAt: String?          // ISO8601 date string
+    let createdByName: String?      // Name of person who created the snag
+    let projectId: UUID
+}
+
+struct SnagPhotoDTO: Content {
+    let id: UUID
+    let url: String
+    let thumbnailUrl: String?
+}
+
+// Note: SnagLocationDTO removed - location is now a human-readable string in SnagDTO
+
+/// Response for listing snags via magic link
+struct SnagListResponse: Content {
+    let snags: [SnagDTO]
+    let totalCount: Int
+    let projectId: UUID
+    let projectName: String         // Name of the project
+    let projectAddress: String?     // Project address/location
+    let contractorName: String      // Contractor who received the magic link
+    let accessLevel: String
+    // Summary stats for quick display
+    let openCount: Int
+    let inProgressCount: Int
+    let completedCount: Int
+}
+
 // MARK: - Request DTOs
 
 struct CreateMagicLinkRequest: Content {
@@ -9,6 +55,13 @@ struct CreateMagicLinkRequest: Content {
     let snagIds: [UUID]
     let projectId: UUID
     let contractorId: UUID?
+    // Optional fields for email notification
+    let contractorEmail: String?
+    let contractorName: String?
+    let projectName: String?
+    let projectAddress: String?
+    let createdByName: String?
+    let createdByEmail: String?
 
     func validate() throws {
         guard AccessLevel(rawValue: accessLevel) != nil else {
@@ -30,6 +83,14 @@ struct CreateMagicLinkRequest: Content {
 
         guard !snagIds.isEmpty else {
             throw Abort(.badRequest, reason: "At least one snag ID is required")
+        }
+
+        // Validate email format if provided
+        if let email = contractorEmail, !email.isEmpty {
+            let emailRegex = #"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"#
+            guard email.range(of: emailRegex, options: .regularExpression) != nil else {
+                throw Abort(.badRequest, reason: "Invalid contractor email format")
+            }
         }
     }
 }
@@ -59,8 +120,11 @@ struct MagicLinkResponse: Content {
     let projectId: UUID
     let contractorId: UUID?
     let createdAt: Date?
+    let slug: String?
+    let shortUrl: String
+    let qrCodeUrl: String
 
-    init(from magicLink: MagicLink, includeToken: Bool = false) {
+    init(from magicLink: MagicLink, includeToken: Bool = false, baseURL: String? = nil) {
         self.id = magicLink.id!
         self.token = includeToken ? magicLink.token : "***"
         self.accessLevel = magicLink.accessLevel
@@ -73,6 +137,12 @@ struct MagicLinkResponse: Content {
         self.projectId = magicLink.projectId
         self.contractorId = magicLink.contractorId
         self.createdAt = magicLink.createdAt
+        self.slug = magicLink.slug
+
+        let base = baseURL ?? Environment.get("BASE_URL") ?? "https://snaglist.app"
+        let slugOrToken = magicLink.slug ?? magicLink.token
+        self.shortUrl = "\(base)/m/\(slugOrToken)"
+        self.qrCodeUrl = "\(base)/api/v1/magic-links/\(magicLink.id!)/qr"
     }
 }
 
@@ -84,8 +154,11 @@ struct MagicLinkValidationResponse: Content {
     let snagIds: [UUID]?
     let projectId: UUID?
     let message: String?
+    let contractorName: String?     // Contractor who received the link
+    let projectName: String?        // Project name for display
+    let projectAddress: String?     // Project address for display
 
-    static func valid(magicLink: MagicLink) -> MagicLinkValidationResponse {
+    static func valid(magicLink: MagicLink, contractorName: String? = nil, projectName: String? = nil, projectAddress: String? = nil) -> MagicLinkValidationResponse {
         return MagicLinkValidationResponse(
             valid: true,
             accessLevel: magicLink.accessLevel,
@@ -93,7 +166,10 @@ struct MagicLinkValidationResponse: Content {
             expiresAt: magicLink.expiresAt,
             snagIds: magicLink.snagIds,
             projectId: magicLink.projectId,
-            message: nil
+            message: nil,
+            contractorName: contractorName,
+            projectName: projectName,
+            projectAddress: projectAddress
         )
     }
 
@@ -105,7 +181,10 @@ struct MagicLinkValidationResponse: Content {
             expiresAt: nil,
             snagIds: nil,
             projectId: nil,
-            message: reason
+            message: reason,
+            contractorName: nil,
+            projectName: nil,
+            projectAddress: nil
         )
     }
 }
