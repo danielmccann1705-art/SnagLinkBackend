@@ -1,8 +1,12 @@
 # Xcode
 .DS_Store
+**/.DS_Store
+Thumbs.db
 xcuserdata/
 *.xcscmblueprint
 *.xccheckout
+*.xcodeproj/
+*.xcworkspace/
 DerivedData/
 .swiftpm/
 *.moved-aside
@@ -25,8 +29,18 @@ Package.resolved
 .env.local
 .env.*.local
 
+# Secret keys (APNs, TLS, etc.)
+*.p8
+*.pem
+*.key
+
+# Uploads (stored on Fly volume, not in repo)
+uploads/
+Public/uploads/
+
 # IDE
 .idea/
+.vscode/
 *.swp
 *.swo
 *~

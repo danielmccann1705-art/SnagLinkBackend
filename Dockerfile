@@ -32,6 +32,9 @@ WORKDIR /app
 # Copy built executable
 COPY --from=builder /app/.build/release/App ./
 
+# Create Public directory for uploads and static file serving
+RUN mkdir -p Public/uploads/synced-photos Public/uploads/synced-drawings
+
 RUN chown -R vapor:vapor /app
 USER vapor
 

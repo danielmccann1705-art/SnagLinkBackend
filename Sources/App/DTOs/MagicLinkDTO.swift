@@ -217,6 +217,31 @@ struct PINVerificationResponse: Content {
     }
 }
 
+// MARK: - Sync DTOs
+
+struct SyncMagicLinkRequest: Content {
+    let token: String
+    let accessLevel: String
+    let hasPIN: Bool
+    let expiresAt: Date
+    let snagIds: [UUID]
+    let projectId: UUID
+    let contractorId: UUID?
+    let contractorName: String?
+    let persona: String?
+    let permissions: [String: Bool]?
+    let recipientName: String?
+    let recipientEmail: String?
+    let customBrandingEnabled: Bool?
+    let brandColor: String?
+}
+
+struct MagicLinkSyncResponse: Content {
+    let success: Bool
+    let token: String
+    let shortUrl: String
+}
+
 struct MagicLinkAnalyticsResponse: Content {
     let id: UUID
     let totalAccesses: Int

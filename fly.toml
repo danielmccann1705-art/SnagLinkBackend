@@ -16,6 +16,10 @@ primary_region = 'ord'
   min_machines_running = 0
   processes = ['app']
 
+[mounts]
+  source = "snaglist_data"
+  destination = "/app/Public/uploads"
+
 [[vm]]
   memory = '2gb'
   cpu_kind = 'performance'

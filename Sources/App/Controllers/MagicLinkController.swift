@@ -54,6 +54,13 @@ struct MagicLinkController: RouteCollection {
         magicLinks.get(":linkId", "snags", use: getSnags)
         magicLinks.get(":linkId", "pdf", use: downloadPDF)
         magicLinks.get(":linkId", "qr", use: generateQRCode)
+
+        // Authenticated sync routes for iOS app
+        let authenticated = magicLinks.grouped(JWTAuthMiddleware())
+        authenticated.post("sync", use: syncFromiOS)
+        authenticated.post(":linkId", "report", use: syncReportData)
+        authenticated.on(.POST, ":linkId", "photos", body: .collect(maxSize: "10mb"), use: syncPhoto)
+        authenticated.on(.POST, ":linkId", "drawings", body: .collect(maxSize: "50mb"), use: syncDrawing)
     }
 
     // MARK: - Public Endpoints
@@ -331,10 +338,6 @@ struct MagicLinkController: RouteCollection {
             on: req.db
         )
 
-        // Check PIN verification if required
-        // For now, we allow fetching snags without PIN as the web frontend
-        // will handle PIN verification separately via the verify-pin endpoint
-
         // Record access
         try await TokenValidationService.recordAccess(
             magicLink: magicLink,
@@ -346,207 +349,96 @@ struct MagicLinkController: RouteCollection {
         // Get optional status filter
         let statusFilter = try? req.query.get(String.self, at: "status")
 
-        // Build realistic test snag data for the demo
-        // In production, this would fetch from the main snag database
-
-        // Floor plan IDs for demo (Ground, First, Second floor)
-        let groundFloorPlanId = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
-        let firstFloorPlanId = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
-        let secondFloorPlanId = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
-
-        // Sample floor plan image (placeholder - in production these would be actual uploaded floor plans)
-        let floorPlanImageURL = "https://images.unsplash.com/photo-1503387762-592deb58ef4e?w=1200"
-
-        struct TestSnagData {
-            let title: String
-            let description: String?
-            let status: String
-            let priority: String
-            let location: String?
-            let floorPlanName: String?
-            let floorPlanId: UUID?
-            let pinX: Double?
-            let pinY: Double?
-            let dueDate: String?
-            let photoUrl: String?
+        // Look up synced report data for this magic link
+        guard let syncedReport = try await SyncedReport.query(on: req.db)
+            .filter(\.$magicLinkToken == token)
+            .first() else {
+            // No synced report yet — return empty response
+            return SnagListResponse(
+                snags: [],
+                totalCount: 0,
+                projectId: magicLink.projectId,
+                projectName: "Project",
+                projectAddress: nil,
+                contractorName: "Contractor",
+                accessLevel: magicLink.accessLevel,
+                openCount: 0,
+                inProgressCount: 0,
+                completedCount: 0
+            )
         }
 
-        let testSnagData: [TestSnagData] = [
-            TestSnagData(
-                title: "Kitchen tap leaking",
-                description: "Hot water tap in kitchen area is dripping constantly. Washer may need replacement. Water pooling under sink cabinet.",
-                status: "open",
-                priority: "high",
-                location: "Unit 4B, Kitchen",
-                floorPlanName: "Ground Floor Plan",
-                floorPlanId: groundFloorPlanId,
-                pinX: 0.35,
-                pinY: 0.42,
-                dueDate: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3 * 24 * 60 * 60)),
-                photoUrl: "https://images.unsplash.com/photo-1585704032915-c3400ca199e7?w=800"
-            ),
-            TestSnagData(
-                title: "Shower seal incomplete",
-                description: "Silicone sealant around shower tray is peeling away in corners. Potential water damage risk to floor below.",
-                status: "open",
-                priority: "critical",
-                location: "Unit 2A, Bathroom",
-                floorPlanName: "First Floor Plan",
-                floorPlanId: firstFloorPlanId,
-                pinX: 0.72,
-                pinY: 0.28,
-                dueDate: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-1 * 24 * 60 * 60)),
-                photoUrl: "https://images.unsplash.com/photo-1552321554-5fefe8c9ef14?w=800"
-            ),
-            TestSnagData(
-                title: "Radiator not heating",
-                description: "Bedroom radiator stays cold even when heating is on. May need bleeding or valve replacement.",
-                status: "in_progress",
-                priority: "medium",
-                location: "Unit 3C, Master Bedroom",
-                floorPlanName: "First Floor Plan",
-                floorPlanId: firstFloorPlanId,
-                pinX: 0.15,
-                pinY: 0.65,
-                dueDate: ISO8601DateFormatter().string(from: Date().addingTimeInterval(2 * 24 * 60 * 60)),
-                photoUrl: "https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=800"
-            ),
-            TestSnagData(
-                title: "Socket cover plate missing",
-                description: "Electrical socket in living room missing cover plate. Currently taped over for safety but needs proper cover installed.",
-                status: "open",
-                priority: "high",
-                location: "Unit 1A, Living Room",
-                floorPlanName: "Ground Floor Plan",
-                floorPlanId: groundFloorPlanId,
-                pinX: 0.58,
-                pinY: 0.75,
-                dueDate: ISO8601DateFormatter().string(from: Date().addingTimeInterval(1 * 24 * 60 * 60)),
-                photoUrl: nil
-            ),
-            TestSnagData(
-                title: "Window latch broken",
-                description: "Latch mechanism on bedroom window doesn't secure properly. Window can be pushed open from outside.",
-                status: "open",
-                priority: "critical",
-                location: "Unit 5D, Bedroom 2",
-                floorPlanName: "Second Floor Plan",
-                floorPlanId: secondFloorPlanId,
-                pinX: 0.82,
-                pinY: 0.35,
-                dueDate: ISO8601DateFormatter().string(from: Date().addingTimeInterval(5 * 24 * 60 * 60)),
-                photoUrl: "https://images.unsplash.com/photo-1509644851169-2acc08aa25b5?w=800"
-            ),
-            TestSnagData(
-                title: "Paint touch-up needed",
-                description: "Scuff marks and minor damage to hallway walls from furniture moving. Needs repainting in matching colour.",
-                status: "open",
-                priority: "low",
-                location: "Unit 4B, Hallway",
-                floorPlanName: "Ground Floor Plan",
-                floorPlanId: groundFloorPlanId,
-                pinX: 0.45,
-                pinY: 0.55,
-                dueDate: nil,
-                photoUrl: nil
-            ),
-            TestSnagData(
-                title: "Door hinge squeaking",
-                description: "Entrance door hinge making loud squeaking noise when opened. Needs lubrication.",
-                status: "resolved",
-                priority: "low",
-                location: "Unit 2A, Front Door",
-                floorPlanName: "Ground Floor Plan",
-                floorPlanId: groundFloorPlanId,
-                pinX: 0.25,
-                pinY: 0.12,
-                dueDate: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5 * 24 * 60 * 60)),
-                photoUrl: nil
-            ),
-            TestSnagData(
-                title: "Extractor fan noisy",
-                description: "Bathroom extractor fan making rattling noise when running. May need cleaning or bearing replacement.",
-                status: "open",
-                priority: "medium",
-                location: "Unit 3C, En-suite",
-                floorPlanName: "First Floor Plan",
-                floorPlanId: firstFloorPlanId,
-                pinX: 0.68,
-                pinY: 0.58,
-                dueDate: ISO8601DateFormatter().string(from: Date().addingTimeInterval(7 * 24 * 60 * 60)),
-                photoUrl: "https://images.unsplash.com/photo-1585771724684-38269d6639fd?w=800"
-            )
-        ]
+        // Parse the stored report JSON
+        guard let jsonData = syncedReport.reportJSON.data(using: .utf8) else {
+            throw Abort(.internalServerError, reason: "Failed to read report data")
+        }
 
-        let contractorName = "ABC Plumbing"
-        let projectName = "Riverside Apartments"
-        let projectAddress = "123 River Road, London SE1 2AB"
-        let createdByName = "John Smith"
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
 
-        // Create snag DTOs - use actual snagIds from magic link if available, otherwise generate
-        var snags: [SnagDTO] = []
-        for (index, data) in testSnagData.prefix(magicLink.snagIds.count).enumerated() {
-            let snagId = index < magicLink.snagIds.count ? magicLink.snagIds[index] : UUID()
-            let photos: [SnagPhotoDTO] = data.photoUrl.map { url in
-                [SnagPhotoDTO(id: UUID(), url: url, thumbnailUrl: url)]
+        let report: SyncedReportJSON
+        do {
+            report = try decoder.decode(SyncedReportJSON.self, from: jsonData)
+        } catch {
+            req.logger.error("Failed to parse synced report JSON: \(error)")
+            throw Abort(.internalServerError, reason: "Failed to parse report data")
+        }
+
+        // Fetch synced photos for this magic link, grouped by snagId
+        let syncedPhotos = try await SyncedPhoto.query(on: req.db)
+            .filter(\.$magicLinkToken == token)
+            .sort(\.$sortOrder)
+            .all()
+
+        let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.app"
+        var photosBySnagId: [UUID: [SnagPhotoDTO]] = [:]
+        for photo in syncedPhotos {
+            let url = "\(baseURL)\(photo.filePath)"
+            let dto = SnagPhotoDTO(id: photo.id!, url: url, thumbnailUrl: url)
+            photosBySnagId[photo.snagId, default: []].append(dto)
+        }
+
+        // Build SnagDTOs from the report JSON
+        let projectName = report.projectName ?? "Project"
+        let contractorName = report.contractorName ?? "Contractor"
+        let projectAddress = report.projectAddress
+
+        var snags: [SnagDTO] = (report.snags ?? []).map { snag in
+            let snagId = snag.id ?? UUID()
+            let photos = photosBySnagId[snagId] ?? snag.photos?.map { p in
+                SnagPhotoDTO(id: p.id ?? UUID(), url: p.url ?? "", thumbnailUrl: p.thumbnailUrl ?? p.url)
             } ?? []
 
-            snags.append(SnagDTO(
+            return SnagDTO(
                 id: snagId,
-                title: data.title,
-                description: data.description,
-                status: data.status,
-                priority: data.priority,
+                title: snag.title ?? "Untitled",
+                description: snag.description,
+                status: snag.status ?? "open",
+                priority: snag.priority ?? "medium",
                 photos: photos,
-                location: data.location,
-                floorPlanName: data.floorPlanName,
-                floorPlanId: data.floorPlanId,
-                floorPlanImageURL: data.floorPlanId != nil ? floorPlanImageURL : nil,
-                pinX: data.pinX,
-                pinY: data.pinY,
-                dueDate: data.dueDate,
-                assignedTo: contractorName,
-                createdAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-14 * 24 * 60 * 60)), // 2 weeks ago
-                createdByName: createdByName,
+                location: snag.location,
+                floorPlanName: snag.floorPlanName,
+                floorPlanId: snag.floorPlanId,
+                floorPlanImageURL: snag.floorPlanImageURL,
+                pinX: snag.pinX,
+                pinY: snag.pinY,
+                dueDate: snag.dueDate,
+                assignedTo: snag.assignedTo ?? contractorName,
+                createdAt: snag.createdAt,
+                createdByName: snag.createdByName ?? report.createdByName,
                 projectId: magicLink.projectId
-            ))
+            )
         }
 
-        // If we have more snagIds than test data, generate simple snags for the rest
-        if magicLink.snagIds.count > testSnagData.count {
-            for i in testSnagData.count..<magicLink.snagIds.count {
-                snags.append(SnagDTO(
-                    id: magicLink.snagIds[i],
-                    title: "Snag Item #\(i + 1)",
-                    description: "Additional snag item requiring attention.",
-                    status: "open",
-                    priority: "medium",
-                    photos: [],
-                    location: "TBD",
-                    floorPlanName: nil,
-                    floorPlanId: nil,
-                    floorPlanImageURL: nil,
-                    pinX: nil,
-                    pinY: nil,
-                    dueDate: nil,
-                    assignedTo: contractorName,
-                    createdAt: ISO8601DateFormatter().string(from: Date().addingTimeInterval(-7 * 24 * 60 * 60)),
-                    createdByName: createdByName,
-                    projectId: magicLink.projectId
-                ))
-            }
-        }
+        // Calculate status counts before filtering
+        let openCount = snags.filter { $0.status == "open" }.count
+        let inProgressCount = snags.filter { $0.status == "in_progress" }.count
+        let completedCount = snags.filter { $0.status == "resolved" || $0.status == "verified" || $0.status == "closed" }.count
 
         // Filter by status if provided
         if let status = statusFilter {
             snags = snags.filter { $0.status == status }
         }
-
-        // Calculate status counts from unfiltered data
-        let allSnags = snags
-        let openCount = allSnags.filter { $0.status == "open" }.count
-        let inProgressCount = allSnags.filter { $0.status == "in_progress" }.count
-        let completedCount = allSnags.filter { $0.status == "resolved" || $0.status == "verified" || $0.status == "closed" }.count
 
         return SnagListResponse(
             snags: snags,
@@ -813,4 +705,345 @@ struct MagicLinkController: RouteCollection {
 
         return response
     }
+
+    // MARK: - iOS Sync
+
+    /// Syncs a locally-created magic link from the iOS app
+    /// POST /api/v1/magic-links/sync
+    @Sendable
+    func syncFromiOS(req: Request) async throws -> MagicLinkSyncResponse {
+        let userId = try req.requireAuthenticatedUserId()
+        let syncRequest = try req.content.decode(SyncMagicLinkRequest.self)
+
+        let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.app"
+
+        // Check if a magic link with this token already exists (upsert)
+        if let existing = try await MagicLink.query(on: req.db)
+            .filter(\.$token == syncRequest.token)
+            .first() {
+            // Update existing fields
+            existing.accessLevel = syncRequest.accessLevel
+            existing.expiresAt = syncRequest.expiresAt
+            existing.snagIds = syncRequest.snagIds
+            existing.projectId = syncRequest.projectId
+            existing.contractorId = syncRequest.contractorId
+            try await existing.save(on: req.db)
+
+            let slugOrToken = existing.slug ?? existing.token
+            return MagicLinkSyncResponse(
+                success: true,
+                token: existing.token,
+                shortUrl: "\(baseURL)/m/\(slugOrToken)"
+            )
+        }
+
+        // Create new magic link with iOS-provided token
+        let slug = try await generateUniqueSlug(contractorName: syncRequest.contractorName, on: req.db)
+
+        let magicLink = MagicLink(
+            token: syncRequest.token,
+            accessLevel: AccessLevel(rawValue: syncRequest.accessLevel) ?? .view,
+            expiresAt: syncRequest.expiresAt,
+            snagIds: syncRequest.snagIds,
+            projectId: syncRequest.projectId,
+            contractorId: syncRequest.contractorId,
+            createdById: userId,
+            slug: slug
+        )
+
+        try await magicLink.save(on: req.db)
+
+        return MagicLinkSyncResponse(
+            success: true,
+            token: magicLink.token,
+            shortUrl: "\(baseURL)/m/\(slug)"
+        )
+    }
+
+    // MARK: - Report Data Sync
+
+    /// Receives project/snag/drawing data from the iOS app for web viewer display
+    /// POST /api/v1/magic-links/:token/report
+    @Sendable
+    func syncReportData(req: Request) async throws -> ReportSyncResponse {
+        let userId = try req.requireAuthenticatedUserId()
+
+        guard let token = req.parameters.get("linkId") else {
+            throw Abort(.badRequest, reason: "Token is required")
+        }
+
+        // Verify magic link exists and belongs to this user
+        guard let magicLink = try await MagicLink.query(on: req.db)
+            .filter(\.$token == token)
+            .filter(\.$createdById == userId)
+            .first() else {
+            throw Abort(.notFound, reason: "Magic link not found")
+        }
+
+        // Store the raw JSON body as a string
+        guard let bodyData = req.body.data,
+              let jsonString = bodyData.getString(at: 0, length: bodyData.readableBytes) else {
+            throw Abort(.badRequest, reason: "Invalid request body")
+        }
+
+        // Upsert: update if exists, create if not
+        if let existing = try await SyncedReport.query(on: req.db)
+            .filter(\.$magicLinkToken == magicLink.token)
+            .first() {
+            existing.reportJSON = jsonString
+            try await existing.save(on: req.db)
+        } else {
+            let report = SyncedReport(
+                magicLinkToken: magicLink.token,
+                reportJSON: jsonString
+            )
+            try await report.save(on: req.db)
+        }
+
+        // Extract snag IDs from the report and update magic link if snagIds is empty
+        if magicLink.snagIds.isEmpty,
+           let jsonData = jsonString.data(using: .utf8),
+           let report = try? JSONDecoder().decode(SyncedReportJSON.self, from: jsonData),
+           let snags = report.snags {
+            let snagIds = snags.compactMap { $0.id }
+            if !snagIds.isEmpty {
+                magicLink.snagIds = snagIds
+                try await magicLink.save(on: req.db)
+                req.logger.info("Updated magic link snagIds with \(snagIds.count) IDs from synced report")
+            }
+        }
+
+        req.logger.info("Report data synced for magic link: \(token)")
+
+        return ReportSyncResponse(
+            success: true,
+            message: "Report data synced",
+            syncedAt: Date()
+        )
+    }
+
+    // MARK: - Photo Sync
+
+    /// Receives a photo file from the iOS app for web viewer display
+    /// POST /api/v1/magic-links/:token/photos
+    @Sendable
+    func syncPhoto(req: Request) async throws -> PhotoSyncResponse {
+        let userId = try req.requireAuthenticatedUserId()
+
+        guard let token = req.parameters.get("linkId") else {
+            throw Abort(.badRequest, reason: "Token is required")
+        }
+
+        // Verify magic link exists and belongs to this user
+        guard let magicLink = try await MagicLink.query(on: req.db)
+            .filter(\.$token == token)
+            .filter(\.$createdById == userId)
+            .first() else {
+            throw Abort(.notFound, reason: "Magic link not found")
+        }
+
+        // Parse multipart form data
+        struct PhotoUploadPayload: Content {
+            var metadata: String
+            var image: File
+        }
+
+        let upload = try req.content.decode(PhotoUploadPayload.self)
+
+        // Parse the metadata JSON
+        struct PhotoMetadata: Codable {
+            let id: UUID
+            let snagId: UUID
+            let label: String
+            let capturedAt: Date?
+            let hasAnnotations: Bool?
+            let sortOrder: Int
+        }
+
+        let photoDecoder = JSONDecoder()
+        photoDecoder.dateDecodingStrategy = .iso8601
+        guard let metadataData = upload.metadata.data(using: .utf8),
+              let metadata = try? photoDecoder.decode(PhotoMetadata.self, from: metadataData) else {
+            throw Abort(.badRequest, reason: "Invalid photo metadata")
+        }
+
+        // Save file to disk
+        let fileExtension = "jpg"
+        let filename = "\(metadata.id.uuidString).\(fileExtension)"
+        let uploadDir = "./Public/uploads/synced-photos"
+
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: uploadDir) {
+            try fileManager.createDirectory(atPath: uploadDir, withIntermediateDirectories: true)
+        }
+
+        let filePath = "\(uploadDir)/\(filename)"
+        try await req.fileio.writeFile(upload.image.data, at: filePath)
+
+        // Upsert photo record
+        if let existing = try await SyncedPhoto.query(on: req.db)
+            .filter(\.$id == metadata.id)
+            .first() {
+            existing.filePath = "/uploads/synced-photos/\(filename)"
+            existing.label = metadata.label
+            existing.sortOrder = metadata.sortOrder
+            try await existing.save(on: req.db)
+        } else {
+            let syncedPhoto = SyncedPhoto(
+                id: metadata.id,
+                magicLinkToken: magicLink.token,
+                snagId: metadata.snagId,
+                label: metadata.label,
+                filePath: "/uploads/synced-photos/\(filename)",
+                sortOrder: metadata.sortOrder
+            )
+            try await syncedPhoto.save(on: req.db)
+        }
+
+        let baseUrl = Environment.get("BASE_URL") ?? "https://snaglist.app"
+
+        req.logger.info("Photo synced: \(metadata.id) for magic link: \(token)")
+
+        return PhotoSyncResponse(
+            success: true,
+            photoId: metadata.id,
+            url: "\(baseUrl)/uploads/synced-photos/\(filename)"
+        )
+    }
+
+    // MARK: - Drawing Sync
+
+    /// Receives a drawing file from the iOS app for web viewer display
+    /// POST /api/v1/magic-links/:token/drawings
+    @Sendable
+    func syncDrawing(req: Request) async throws -> DrawingSyncResponse {
+        let userId = try req.requireAuthenticatedUserId()
+
+        guard let token = req.parameters.get("linkId") else {
+            throw Abort(.badRequest, reason: "Token is required")
+        }
+
+        // Verify magic link exists and belongs to this user
+        guard let magicLink = try await MagicLink.query(on: req.db)
+            .filter(\.$token == token)
+            .filter(\.$createdById == userId)
+            .first() else {
+            throw Abort(.notFound, reason: "Magic link not found")
+        }
+
+        // Parse multipart form data
+        struct DrawingUploadPayload: Content {
+            var drawingId: String
+            var file: File
+        }
+
+        let upload = try req.content.decode(DrawingUploadPayload.self)
+
+        guard let drawingId = UUID(uuidString: upload.drawingId) else {
+            throw Abort(.badRequest, reason: "Invalid drawing ID")
+        }
+
+        // Determine file extension
+        let originalFilename = upload.file.filename
+        let ext = originalFilename.split(separator: ".").last.map(String.init)?.lowercased() ?? "pdf"
+        let safeExt = ["pdf", "png", "jpg", "jpeg"].contains(ext) ? ext : "pdf"
+        let filename = "\(drawingId.uuidString).\(safeExt)"
+        let uploadDir = "./Public/uploads/synced-drawings"
+
+        let fileManager = FileManager.default
+        if !fileManager.fileExists(atPath: uploadDir) {
+            try fileManager.createDirectory(atPath: uploadDir, withIntermediateDirectories: true)
+        }
+
+        let filePath = "\(uploadDir)/\(filename)"
+        try await req.fileio.writeFile(upload.file.data, at: filePath)
+
+        // Upsert drawing record
+        if let existing = try await SyncedDrawing.query(on: req.db)
+            .filter(\.$drawingId == drawingId)
+            .filter(\.$magicLinkToken == magicLink.token)
+            .first() {
+            existing.filePath = "/uploads/synced-drawings/\(filename)"
+            existing.fileName = originalFilename
+            try await existing.save(on: req.db)
+        } else {
+            let syncedDrawing = SyncedDrawing(
+                id: UUID(),
+                magicLinkToken: magicLink.token,
+                drawingId: drawingId,
+                filePath: "/uploads/synced-drawings/\(filename)",
+                fileName: originalFilename
+            )
+            try await syncedDrawing.save(on: req.db)
+        }
+
+        let baseUrl = Environment.get("BASE_URL") ?? "https://snaglist.app"
+
+        req.logger.info("Drawing synced: \(drawingId) for magic link: \(token)")
+
+        return DrawingSyncResponse(
+            success: true,
+            drawingId: drawingId,
+            url: "\(baseUrl)/uploads/synced-drawings/\(filename)"
+        )
+    }
+}
+
+// MARK: - Sync Response DTOs
+
+struct ReportSyncResponse: Content {
+    let success: Bool
+    let message: String?
+    let syncedAt: Date?
+}
+
+struct PhotoSyncResponse: Content {
+    let success: Bool
+    let photoId: UUID
+    let url: String?
+}
+
+struct DrawingSyncResponse: Content {
+    let success: Bool
+    let drawingId: UUID
+    let url: String?
+}
+
+// MARK: - Synced Report JSON Parsing
+
+/// Top-level structure of the report JSON stored in SyncedReport.reportJSON
+struct SyncedReportJSON: Decodable {
+    let projectName: String?
+    let projectAddress: String?
+    let contractorName: String?
+    let createdByName: String?
+    let snags: [SyncedSnagJSON]?
+}
+
+/// A snag entry within the synced report JSON
+struct SyncedSnagJSON: Decodable {
+    let id: UUID?
+    let title: String?
+    let reference: String?
+    let description: String?
+    let status: String?
+    let priority: String?
+    let location: String?
+    let floorPlanName: String?
+    let floorPlanId: UUID?
+    let floorPlanImageURL: String?
+    let pinX: Double?
+    let pinY: Double?
+    let dueDate: String?
+    let assignedTo: String?
+    let createdAt: String?
+    let createdByName: String?
+    let photos: [SyncedSnagPhotoJSON]?
+}
+
+/// A photo reference within a synced snag
+struct SyncedSnagPhotoJSON: Decodable {
+    let id: UUID?
+    let url: String?
+    let thumbnailUrl: String?
 }

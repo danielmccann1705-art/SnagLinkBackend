@@ -19,6 +19,9 @@ func routes(_ app: Application) throws {
         Endpoints:
         - GET /health - Health check
 
+        Authentication:
+        - POST /api/v1/auth/apple - Sign in with Apple
+
         Magic Links:
         - GET /api/v1/magic-links/:linkId/validate - Validate a magic link token
         - POST /api/v1/magic-links/:linkId/verify-pin - Verify PIN for magic link
@@ -28,6 +31,10 @@ func routes(_ app: Application) throws {
         - GET /api/v1/magic-links/:linkId/analytics - Get magic link analytics (auth required)
         - GET /api/v1/magic-links/:linkId/pdf - Download PDF report of snags
         - GET /api/v1/magic-links/:linkId/qr - Generate QR code image (PNG)
+        - POST /api/v1/magic-links/sync - Sync magic link from iOS app (auth required)
+        - POST /api/v1/magic-links/:linkId/report - Sync report data (auth required)
+        - POST /api/v1/magic-links/:linkId/photos - Upload synced photo (auth required)
+        - POST /api/v1/magic-links/:linkId/drawings - Upload synced drawing (auth required)
 
         Team Invites:
         - GET /api/v1/team-invites/:inviteId/validate - Validate a team invite token
@@ -46,9 +53,14 @@ func routes(_ app: Application) throws {
 
         Snags:
         - GET /api/v1/magic-links/:linkId/snags - List snags for a magic link
+        - GET /api/v1/snags/:snagId/completions - List all completions for a snag (auth required)
 
         Uploads:
         - POST /api/v1/uploads/photo - Upload a photo (multipart form data)
+
+        Devices:
+        - POST /api/v1/devices/register - Register device for push notifications (auth required)
+        - DELETE /api/v1/devices/unregister - Unregister device token (auth required)
         """
     }
 
@@ -57,6 +69,8 @@ func routes(_ app: Application) throws {
     try app.register(collection: TeamInviteController())
     try app.register(collection: CompletionController())
     try app.register(collection: UploadController())
+    try app.register(collection: AuthController())
+    try app.register(collection: DeviceController())
 }
 
 // MARK: - Response Models
