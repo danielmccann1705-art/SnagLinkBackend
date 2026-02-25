@@ -195,6 +195,7 @@ struct WebReportRenderer {
     // MARK: - Full Report
 
     struct ReportData {
+        let slug: String
         let projectName: String
         let projectAddress: String?
         let contractorName: String
@@ -222,17 +223,27 @@ struct WebReportRenderer {
 
     struct PhotoData {
         let url: String
-        let isBefore: Bool
+        let label: String
+        let snagIndex: Int
+        let snagTitle: String
     }
 
     static func renderReport(data: ReportData) -> String {
         let totalCount = data.openCount + data.inProgressCount + data.completedCount
         let completionPercent = totalCount > 0 ? Int(Double(data.completedCount) / Double(totalCount) * 100) : 0
 
+        // Collect all photos across snags for the lightbox
+        let allPhotos = data.snags.flatMap(\.photos)
+
+        // Build snag cards, tracking global photo index for lightbox
         var snagCards = ""
+        var globalPhotoIndex = 0
         for snag in data.snags {
-            snagCards += renderSnagCard(snag)
+            snagCards += renderSnagCard(snag, globalPhotoIndexStart: globalPhotoIndex)
+            globalPhotoIndex += snag.photos.count
         }
+
+        let ogMeta = renderOGMeta(data: data, firstPhotoURL: allPhotos.first?.url)
 
         return """
         <!DOCTYPE html>
@@ -241,6 +252,7 @@ struct WebReportRenderer {
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Snaglist Report - \(data.projectName.htmlEscaped)</title>
+            \(ogMeta)
             <meta name="apple-itunes-app" content="app-clip-bundle-id=com.snaglist.app.Clip, app-id=6758858102">
             \(sharedStyles)
             \(reportStyles)
@@ -249,11 +261,13 @@ struct WebReportRenderer {
             <div class="report">
                 \(renderReportHeader(data: data, completionPercent: completionPercent))
                 \(renderStatsBar(data: data))
+                \(renderDownloadAllButton(slug: data.slug, photoCount: allPhotos.count))
                 <div class="snag-list">
                     \(snagCards.isEmpty ? renderEmptyState() : snagCards)
                 </div>
                 \(renderFooter())
             </div>
+            \(renderLightbox(allPhotos: allPhotos))
         </body>
         </html>
         """
@@ -306,7 +320,21 @@ struct WebReportRenderer {
         """
     }
 
-    private static func renderSnagCard(_ snag: SnagData) -> String {
+    private static func renderDownloadAllButton(slug: String, photoCount: Int) -> String {
+        guard photoCount > 0 else { return "" }
+        return """
+        <div class="download-all-wrap">
+            <a href="/m/\(slug.htmlEscaped)/photos.zip" class="download-all-btn">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M8 1v10M8 11L4.5 7.5M8 11l3.5-3.5M2 13h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Download All Photos (\(photoCount))
+            </a>
+        </div>
+        """
+    }
+
+    private static func renderSnagCard(_ snag: SnagData, globalPhotoIndexStart: Int) -> String {
         let statusColor = statusColorCSS(snag.status)
         let statusLabel = snag.status.replacingOccurrences(of: "_", with: " ").capitalized
         let priorityColor = priorityColorCSS(snag.priority)
@@ -330,7 +358,7 @@ struct WebReportRenderer {
             "<p class=\"snag-desc\">\($0.htmlEscaped)</p>"
         } ?? ""
 
-        let photosHTML = renderPhotoGallery(snag.photos)
+        let photosHTML = renderPhotoGallery(snag.photos, globalPhotoIndexStart: globalPhotoIndexStart)
         let floorPlanHTML = renderFloorPlanOverlay(url: snag.floorPlanURL, pinX: snag.pinX, pinY: snag.pinY)
 
         return """
@@ -351,16 +379,22 @@ struct WebReportRenderer {
         """
     }
 
-    private static func renderPhotoGallery(_ photos: [PhotoData]) -> String {
+    private static func renderPhotoGallery(_ photos: [PhotoData], globalPhotoIndexStart: Int) -> String {
         guard !photos.isEmpty else { return "" }
 
         var items = ""
-        for photo in photos {
-            let label = photo.isBefore ? "Before" : "After"
+        for (i, photo) in photos.enumerated() {
+            let globalIdx = globalPhotoIndexStart + i
+            let displayLabel = photo.label.capitalized
             items += """
-            <div class="photo-item">
+            <div class="photo-item" onclick="openLightbox(\(globalIdx))">
                 <img src="\(photo.url.htmlEscaped)" alt="Snag photo" loading="lazy">
-                <span class="photo-label">\(label)</span>
+                <span class="photo-label">\(displayLabel.htmlEscaped)</span>
+                <a href="\(photo.url.htmlEscaped)" download class="photo-download" onclick="event.stopPropagation()" title="Download photo">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M8 1v10M8 11L4.5 7.5M8 11l3.5-3.5M2 13h12" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </a>
             </div>
             """
         }
@@ -414,6 +448,131 @@ struct WebReportRenderer {
             <p>Report generated by <strong>Snaglist</strong></p>
             <a href="https://apps.apple.com/app/id6758858102" class="footer-cta">Try Snaglist Free</a>
         </footer>
+        """
+    }
+
+    // MARK: - Open Graph Meta Tags
+
+    private static func renderOGMeta(data: ReportData, firstPhotoURL: String?) -> String {
+        let totalCount = data.openCount + data.inProgressCount + data.completedCount
+        let ogTitle = "\(data.projectName) - Snaglist Report"
+        let ogDescription = "\(totalCount) snags - \(data.completedCount) completed, \(data.openCount) open"
+        let ogURL = "https://snaglist.app/m/\(data.slug)"
+
+        var meta = """
+        <meta property="og:type" content="website">
+        <meta property="og:title" content="\(ogTitle.htmlEscaped)">
+        <meta property="og:description" content="\(ogDescription.htmlEscaped)">
+        <meta property="og:url" content="\(ogURL.htmlEscaped)">
+        <meta property="og:site_name" content="Snaglist">
+        """
+
+        if let imageURL = firstPhotoURL {
+            meta += "\n        <meta property=\"og:image\" content=\"\(imageURL.htmlEscaped)\">"
+        }
+
+        return meta
+    }
+
+    // MARK: - Lightbox
+
+    private static func renderLightbox(allPhotos: [PhotoData]) -> String {
+        guard !allPhotos.isEmpty else { return "" }
+
+        // Build JS array of photo data
+        var jsArray = "["
+        for (i, photo) in allPhotos.enumerated() {
+            if i > 0 { jsArray += "," }
+            let escapedURL = photo.url.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+            let escapedLabel = photo.label.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+            let escapedTitle = photo.snagTitle.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+            jsArray += "{'url':'\(escapedURL)','label':'\(escapedLabel)','snagIndex':\(photo.snagIndex),'snagTitle':'\(escapedTitle)'}"
+        }
+        jsArray += "]"
+
+        return """
+        <div class="lb-overlay" id="lbOverlay">
+            <div class="lb-top-bar">
+                <span class="lb-info" id="lbInfo"></span>
+                <button class="lb-close" onclick="closeLightbox()" aria-label="Close">&times;</button>
+            </div>
+            <div class="lb-content">
+                <button class="lb-arrow lb-prev" onclick="lbNav(-1)" aria-label="Previous">&#8249;</button>
+                <div class="lb-img-wrap">
+                    <img id="lbImg" src="" alt="Photo">
+                    <div class="lb-caption">
+                        <span class="lb-label" id="lbLabel"></span>
+                        <span class="lb-snag" id="lbSnag"></span>
+                    </div>
+                </div>
+                <button class="lb-arrow lb-next" onclick="lbNav(1)" aria-label="Next">&#8250;</button>
+            </div>
+            <div class="lb-bottom-bar">
+                <span class="lb-counter" id="lbCounter"></span>
+                <a class="lb-dl" id="lbDl" href="" download>
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M8 11L4.5 7.5M8 11l3.5-3.5M2 13h12" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    Download
+                </a>
+            </div>
+        </div>
+        <script>
+        (function(){
+            var photos=\(jsArray);
+            var cur=0;
+            var overlay=document.getElementById('lbOverlay');
+            var img=document.getElementById('lbImg');
+            var info=document.getElementById('lbInfo');
+            var label=document.getElementById('lbLabel');
+            var snag=document.getElementById('lbSnag');
+            var counter=document.getElementById('lbCounter');
+            var dl=document.getElementById('lbDl');
+            var tx=0,ty=0;
+
+            window.openLightbox=function(i){
+                cur=i;
+                show();
+                overlay.classList.add('active');
+                document.body.style.overflow='hidden';
+            };
+            window.closeLightbox=function(){
+                overlay.classList.remove('active');
+                document.body.style.overflow='';
+            };
+            window.lbNav=function(d){
+                cur=(cur+d+photos.length)%photos.length;
+                show();
+            };
+
+            function show(){
+                var p=photos[cur];
+                img.src=p.url;
+                label.textContent=p.label.charAt(0).toUpperCase()+p.label.slice(1);
+                snag.textContent='Snag #'+p.snagIndex+' \\u2014 '+p.snagTitle;
+                counter.textContent=(cur+1)+' / '+photos.length;
+                dl.href=p.url;
+            }
+
+            document.addEventListener('keydown',function(e){
+                if(!overlay.classList.contains('active'))return;
+                if(e.key==='Escape')closeLightbox();
+                if(e.key==='ArrowLeft')lbNav(-1);
+                if(e.key==='ArrowRight')lbNav(1);
+            });
+
+            overlay.addEventListener('touchstart',function(e){tx=e.touches[0].clientX;ty=e.touches[0].clientY;},{passive:true});
+            overlay.addEventListener('touchend',function(e){
+                var dx=e.changedTouches[0].clientX-tx;
+                var dy=e.changedTouches[0].clientY-ty;
+                if(Math.abs(dx)>50&&Math.abs(dx)>Math.abs(dy)){
+                    if(dx<0)lbNav(1);else lbNav(-1);
+                }
+            },{passive:true});
+
+            overlay.addEventListener('click',function(e){
+                if(e.target===overlay)closeLightbox();
+            });
+        })();
+        </script>
         """
     }
 
@@ -515,6 +674,22 @@ struct WebReportRenderer {
             .stat-complete .stat-value { color: #16A34A; }
             .stat-complete .stat-label { color: #16A34A; }
 
+            /* Download All */
+            .download-all-wrap {
+                text-align: center; margin-bottom: 20px;
+            }
+            .download-all-btn {
+                display: inline-flex; align-items: center; gap: 8px;
+                background: #fff; color: #374151; text-decoration: none;
+                padding: 10px 20px; border-radius: 10px; font-size: 14px; font-weight: 600;
+                border: 1px solid #E5E7EB; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+                transition: border-color 0.15s, box-shadow 0.15s;
+            }
+            .download-all-btn:hover {
+                border-color: #F97316; box-shadow: 0 1px 4px rgba(249,115,22,0.15);
+                color: #F97316;
+            }
+
             /* Snag Cards */
             .snag-list { display: flex; flex-direction: column; gap: 16px; }
             .snag-card {
@@ -534,17 +709,16 @@ struct WebReportRenderer {
             .snag-meta-item { display: flex; align-items: center; gap: 4px; font-size: 13px; color: #6B7280; }
             .meta-icon { font-size: 14px; }
 
-            /* Photos */
+            /* Photos — Grid Layout */
             .photo-gallery {
-                display: flex; gap: 8px; overflow-x: auto; padding: 4px 0;
-                -webkit-overflow-scrolling: touch; scroll-snap-type: x mandatory;
+                display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+                padding: 4px 0;
             }
             .photo-item {
-                flex: 0 0 auto; width: 160px; position: relative;
-                border-radius: 10px; overflow: hidden; scroll-snap-align: start;
+                position: relative; border-radius: 10px; overflow: hidden; cursor: pointer;
             }
             .photo-item img {
-                width: 100%; height: 120px; object-fit: cover; display: block;
+                width: 100%; aspect-ratio: 4/3; object-fit: cover; display: block;
                 background: #F3F4F6;
             }
             .photo-label {
@@ -552,6 +726,15 @@ struct WebReportRenderer {
                 background: rgba(0,0,0,0.6); color: #fff; font-size: 10px;
                 font-weight: 600; padding: 2px 8px; border-radius: 4px;
             }
+            .photo-download {
+                position: absolute; top: 6px; right: 6px;
+                width: 28px; height: 28px; border-radius: 6px;
+                background: rgba(0,0,0,0.5); display: flex;
+                align-items: center; justify-content: center;
+                opacity: 0; transition: opacity 0.15s;
+                text-decoration: none;
+            }
+            .photo-item:hover .photo-download { opacity: 1; }
 
             /* Floor Plan */
             .floor-plan-wrap { margin-top: 10px; }
@@ -600,6 +783,64 @@ struct WebReportRenderer {
             }
             .footer-cta:hover { text-decoration: underline; }
 
+            /* Lightbox */
+            .lb-overlay {
+                display: none; position: fixed; inset: 0; z-index: 9999;
+                background: rgba(0,0,0,0.92); flex-direction: column;
+            }
+            .lb-overlay.active { display: flex; }
+            .lb-top-bar {
+                display: flex; justify-content: space-between; align-items: center;
+                padding: 12px 16px; flex-shrink: 0;
+            }
+            .lb-info { color: #ccc; font-size: 13px; }
+            .lb-close {
+                background: none; border: none; color: #fff; font-size: 32px;
+                cursor: pointer; padding: 0 4px; line-height: 1;
+            }
+            .lb-content {
+                flex: 1; display: flex; align-items: center; justify-content: center;
+                position: relative; min-height: 0; padding: 0 8px;
+            }
+            .lb-arrow {
+                position: absolute; top: 50%; transform: translateY(-50%);
+                background: rgba(255,255,255,0.12); border: none; color: #fff;
+                font-size: 36px; width: 44px; height: 44px; border-radius: 50%;
+                cursor: pointer; display: flex; align-items: center; justify-content: center;
+                z-index: 2; transition: background 0.15s;
+            }
+            .lb-arrow:hover { background: rgba(255,255,255,0.25); }
+            .lb-prev { left: 12px; }
+            .lb-next { right: 12px; }
+            .lb-img-wrap {
+                max-width: 90vw; max-height: 75vh; position: relative;
+                display: flex; flex-direction: column; align-items: center;
+            }
+            .lb-img-wrap img {
+                max-width: 100%; max-height: 70vh; object-fit: contain; border-radius: 8px;
+            }
+            .lb-caption {
+                display: flex; gap: 10px; align-items: center; margin-top: 10px;
+                flex-wrap: wrap; justify-content: center;
+            }
+            .lb-label {
+                background: rgba(249,115,22,0.85); color: #fff; font-size: 11px;
+                font-weight: 700; padding: 3px 10px; border-radius: 4px; text-transform: uppercase;
+            }
+            .lb-snag { color: #ccc; font-size: 13px; }
+            .lb-bottom-bar {
+                display: flex; justify-content: center; align-items: center; gap: 16px;
+                padding: 12px 16px; flex-shrink: 0;
+            }
+            .lb-counter { color: #999; font-size: 13px; }
+            .lb-dl {
+                display: inline-flex; align-items: center; gap: 6px;
+                color: #fff; text-decoration: none; font-size: 13px; font-weight: 600;
+                background: rgba(255,255,255,0.12); padding: 6px 14px; border-radius: 6px;
+                transition: background 0.15s;
+            }
+            .lb-dl:hover { background: rgba(255,255,255,0.25); }
+
             /* Responsive */
             @media (max-width: 480px) {
                 .report { padding: 12px 10px 40px; }
@@ -609,8 +850,18 @@ struct WebReportRenderer {
                 .stat { padding: 12px 4px; }
                 .stat-value { font-size: 22px; }
                 .snag-card { padding: 16px; }
-                .photo-item { width: 140px; }
-                .photo-item img { height: 100px; }
+                .photo-gallery { grid-template-columns: repeat(2, 1fr); }
+                .photo-download { opacity: 1; }
+                .lb-arrow { width: 36px; height: 36px; font-size: 28px; }
+                .lb-prev { left: 4px; }
+                .lb-next { right: 4px; }
+            }
+
+            /* Print */
+            @media print {
+                .download-all-wrap, .photo-download, .lb-overlay, .footer-cta { display: none !important; }
+                .report { max-width: 100%; padding: 0; }
+                .snag-card { break-inside: avoid; }
             }
         </style>
         """

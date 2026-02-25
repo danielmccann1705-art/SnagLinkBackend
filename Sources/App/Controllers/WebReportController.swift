@@ -8,6 +8,7 @@ struct WebReportController: RouteCollection {
         let m = routes.grouped("m")
         m.get(":slug", use: renderReport)
         m.post(":slug", "verify", use: verifyPIN)
+        m.get(":slug", "photos.zip", use: downloadPhotosZip)
     }
 
     // MARK: - GET /m/:slug
@@ -82,11 +83,17 @@ struct WebReportController: RouteCollection {
             .all()
 
         let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.app"
-        var photosBySnagId: [UUID: [WebReportRenderer.PhotoData]] = [:]
+
+        // Build raw photos by snag ID (label preserved as-is)
+        struct RawPhoto {
+            let url: String
+            let label: String
+        }
+        var rawPhotosBySnagId: [UUID: [RawPhoto]] = [:]
         for photo in syncedPhotos {
-            let url = "\(baseURL)\(photo.filePath)"
-            let data = WebReportRenderer.PhotoData(url: url, isBefore: photo.label == "before")
-            photosBySnagId[photo.snagId, default: []].append(data)
+            rawPhotosBySnagId[photo.snagId, default: []].append(
+                RawPhoto(url: "\(baseURL)\(photo.filePath)", label: photo.label)
+            )
         }
 
         // Fetch synced drawings indexed by drawingId
@@ -106,9 +113,31 @@ struct WebReportController: RouteCollection {
 
         let snagDataItems: [WebReportRenderer.SnagData] = (report.snags ?? []).enumerated().map { index, snag in
             let snagId = snag.id ?? UUID()
-            let photos = photosBySnagId[snagId] ?? snag.photos?.map { p in
-                WebReportRenderer.PhotoData(url: p.url ?? "", isBefore: true)
-            } ?? []
+            let snagIndex = index + 1
+            let snagTitle = snag.title ?? "Untitled"
+
+            let photos: [WebReportRenderer.PhotoData]
+            if let rawPhotos = rawPhotosBySnagId[snagId] {
+                photos = rawPhotos.map { raw in
+                    WebReportRenderer.PhotoData(
+                        url: raw.url,
+                        label: raw.label,
+                        snagIndex: snagIndex,
+                        snagTitle: snagTitle
+                    )
+                }
+            } else if let embeddedPhotos = snag.photos {
+                photos = embeddedPhotos.map { p in
+                    WebReportRenderer.PhotoData(
+                        url: p.url ?? "",
+                        label: "before",
+                        snagIndex: snagIndex,
+                        snagTitle: snagTitle
+                    )
+                }
+            } else {
+                photos = []
+            }
 
             // Resolve floor plan URL: prefer synced drawing, fall back to embedded URL
             let floorPlanURL: String?
@@ -119,8 +148,8 @@ struct WebReportController: RouteCollection {
             }
 
             return WebReportRenderer.SnagData(
-                index: index + 1,
-                title: snag.title ?? "Untitled",
+                index: snagIndex,
+                title: snagTitle,
                 description: snag.description,
                 status: snag.status ?? "open",
                 priority: snag.priority ?? "medium",
@@ -146,6 +175,7 @@ struct WebReportController: RouteCollection {
         let generatedDate = dateFormatter.string(from: Date())
 
         let reportData = WebReportRenderer.ReportData(
+            slug: slug,
             projectName: projectName,
             projectAddress: projectAddress,
             contractorName: contractorName,
@@ -157,6 +187,122 @@ struct WebReportController: RouteCollection {
         )
 
         return htmlResponse(WebReportRenderer.renderReport(data: reportData))
+    }
+
+    // MARK: - GET /m/:slug/photos.zip
+
+    @Sendable
+    func downloadPhotosZip(req: Request) async throws -> Response {
+        guard let slug = req.parameters.get("slug") else {
+            throw Abort(.notFound)
+        }
+
+        // Validate magic link
+        let magicLink: MagicLink
+        do {
+            magicLink = try await TokenValidationService.validateMagicLink(
+                token: slug,
+                on: req.db
+            )
+        } catch {
+            throw Abort(.notFound)
+        }
+
+        // PIN check
+        if magicLink.requiresPIN {
+            guard isPINVerified(req: req, magicLink: magicLink) else {
+                throw Abort(.unauthorized, reason: "PIN verification required")
+            }
+        }
+
+        let token = magicLink.token
+
+        // Fetch synced report for snag metadata
+        guard let syncedReport = try await SyncedReport.query(on: req.db)
+            .filter(\.$magicLinkToken == token)
+            .first(),
+            let jsonData = syncedReport.reportJSON.data(using: .utf8) else {
+            throw Abort(.notFound, reason: "Report not found")
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let report = try decoder.decode(SyncedReportJSON.self, from: jsonData)
+
+        // Build snag metadata lookup: snagId -> (index, reference, title)
+        struct SnagMeta {
+            let index: Int
+            let reference: String?
+            let title: String
+        }
+        var snagMetaById: [UUID: SnagMeta] = [:]
+        for (i, snag) in (report.snags ?? []).enumerated() {
+            guard let id = snag.id else { continue }
+            snagMetaById[id] = SnagMeta(
+                index: i + 1,
+                reference: snag.reference,
+                title: snag.title ?? "Untitled"
+            )
+        }
+
+        // Fetch synced photos
+        let syncedPhotos = try await SyncedPhoto.query(on: req.db)
+            .filter(\.$magicLinkToken == token)
+            .sort(\.$sortOrder)
+            .all()
+
+        guard !syncedPhotos.isEmpty else {
+            throw Abort(.notFound, reason: "No photos found")
+        }
+
+        // Build ZIP entries
+        let publicDir = req.application.directory.publicDirectory
+        var entries: [ZIPBuilder.Entry] = []
+
+        for photo in syncedPhotos {
+            // Build file path on disk — filePath starts with "/" like "/uploads/..."
+            let relativePath = photo.filePath.hasPrefix("/") ? String(photo.filePath.dropFirst()) : photo.filePath
+            let fullPath = publicDir + relativePath
+
+            guard FileManager.default.fileExists(atPath: fullPath),
+                  let fileData = FileManager.default.contents(atPath: fullPath) else {
+                req.logger.warning("ZIP: skipping missing photo file: \(fullPath)")
+                continue
+            }
+
+            // Determine folder name from snag metadata
+            let meta = snagMetaById[photo.snagId]
+            let folderRef = meta?.reference ?? "Snag_\(meta?.index ?? 0)"
+            let folderTitle = meta?.title ?? "Unknown"
+            let folderName = "\(folderRef)_\(folderTitle)"
+
+            // Determine file extension from path
+            let ext = (photo.filePath as NSString).pathExtension
+            let fileName = "\(photo.label)_\(photo.sortOrder).\(ext.isEmpty ? "jpg" : ext)"
+
+            let entryPath = ZIPBuilder.sanitizeFilename("\(folderName)/\(fileName)")
+            entries.append(ZIPBuilder.Entry(path: entryPath, data: fileData))
+        }
+
+        guard !entries.isEmpty else {
+            throw Abort(.notFound, reason: "No photo files available")
+        }
+
+        let zipData = ZIPBuilder.build(entries: entries)
+        let projectName = report.resolvedProjectName ?? "Report"
+        let safeProjectName = projectName
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: "/", with: "_")
+
+        var headers = HTTPHeaders()
+        headers.add(name: .contentType, value: "application/zip")
+        headers.add(name: .contentDisposition, value: "attachment; filename=\"\(safeProjectName)_Photos.zip\"")
+
+        return Response(
+            status: .ok,
+            headers: headers,
+            body: .init(data: zipData)
+        )
     }
 
     // MARK: - POST /m/:slug/verify
