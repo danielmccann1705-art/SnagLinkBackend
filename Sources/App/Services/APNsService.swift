@@ -53,11 +53,10 @@ struct APNsService {
         body: String,
         completionId: UUID,
         snagId: UUID,
-        magicLinkToken: String,
         client: Client,
         logger: Logger
     ) async throws -> Bool {
-        logger.info("🔔 APNs: Preparing notification for device token: \(deviceToken.prefix(8))...")
+        logger.info("APNs: Preparing notification for device \(deviceToken.prefix(8))...")
 
         guard let bundleId = bundleId else {
             logger.warning("APNs: APNS_BUNDLE_ID not configured, skipping push")
@@ -65,8 +64,6 @@ struct APNsService {
         }
 
         let jwt = try getOrCreateToken(logger: logger)
-        logger.info("🔔 APNs: Using key ID: \(keyId ?? "nil"), team ID: \(teamId ?? "nil"), bundle ID: \(bundleId)")
-        logger.info("🔔 APNs: Environment: \(environment)")
 
         let payload: [String: Any] = [
             "aps": [
@@ -77,8 +74,7 @@ struct APNsService {
                 "sound": "default"
             ],
             "completionId": completionId.uuidString,
-            "snagId": snagId.uuidString,
-            "magicLinkToken": magicLinkToken
+            "snagId": snagId.uuidString
         ]
 
         let payloadData = try JSONSerialization.data(withJSONObject: payload)
@@ -94,7 +90,7 @@ struct APNsService {
             req.body = .init(data: payloadData)
         }
 
-        logger.info("🔔 APNs: HTTP response status: \(response.status)")
+        logger.info("APNs: Response status: \(response.status)")
 
         if response.status == .ok {
             logger.info("APNs: Push sent successfully to \(deviceToken.prefix(8))...")
@@ -105,7 +101,7 @@ struct APNsService {
         if let body = response.body,
            let errorResponse = try? JSONDecoder().decode(APNsErrorResponse.self, from: body) {
             let reason = errorResponse.reason ?? ""
-            logger.info("🔔 APNs: Response body: \(reason)")
+            logger.info("APNs: Response reason: \(reason)")
             if reason == "BadDeviceToken" || reason == "Unregistered" {
                 logger.warning("APNs: Stale device token \(deviceToken.prefix(8))...: \(reason)")
                 return false
@@ -126,7 +122,6 @@ struct APNsService {
         snagTitle: String,
         completionId: UUID,
         snagId: UUID,
-        magicLinkToken: String,
         client: Client,
         logger: Logger,
         db: Database
@@ -142,13 +137,10 @@ struct APNsService {
             .filter(\.$userId == userId)
             .all()
 
-        logger.info("🔔 Found \(deviceTokens.count) device token(s) for user")
-        for token in deviceTokens {
-            logger.info("🔔 Found device token: \(token.deviceToken.prefix(8))...")
-        }
+        logger.info("APNs: Found \(deviceTokens.count) device token(s) for user")
 
         guard !deviceTokens.isEmpty else {
-            logger.info("🔔 No device token found for user \(userId)")
+            logger.info("APNs: No device tokens registered for user")
             return
         }
 
@@ -165,7 +157,6 @@ struct APNsService {
                     body: body,
                     completionId: completionId,
                     snagId: snagId,
-                    magicLinkToken: magicLinkToken,
                     client: client,
                     logger: logger
                 )

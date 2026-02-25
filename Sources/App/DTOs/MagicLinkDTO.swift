@@ -27,6 +27,7 @@ struct SnagPhotoDTO: Content {
     let id: UUID
     let url: String
     let thumbnailUrl: String?
+    let isBefore: Bool
 }
 
 // Note: SnagLocationDTO removed - location is now a human-readable string in SnagDTO

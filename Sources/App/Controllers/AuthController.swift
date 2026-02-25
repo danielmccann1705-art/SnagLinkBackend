@@ -1,6 +1,6 @@
 import Vapor
 import Fluent
-import JWT
+@preconcurrency import JWT
 
 struct AuthController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
@@ -12,25 +12,19 @@ struct AuthController: RouteCollection {
     func appleSignIn(req: Request) async throws -> AuthResponse {
         let input = try req.content.decode(AppleSignInRequest.self)
 
-        // Decode JWT payload (middle segment)
-        let segments = input.identityToken.split(separator: ".")
-        guard segments.count == 3 else {
-            throw Abort(.unauthorized, reason: "Invalid token format")
+        // Verify Apple identity token using JWKS (signature + issuer + expiry)
+        let appleToken: AppleIdentityToken
+        do {
+            appleToken = try await req.jwt.apple.verify(
+                input.identityToken,
+                applicationIdentifier: Environment.get("APPLE_APP_ID")
+            ).get()
+        } catch {
+            throw Abort(.unauthorized, reason: "Invalid Apple identity token")
         }
 
-        // Base64URL decode the payload
-        var payload = String(segments[1])
-        while payload.count % 4 != 0 { payload += "=" }
-        payload = payload.replacingOccurrences(of: "-", with: "+")
-                         .replacingOccurrences(of: "_", with: "/")
-
-        guard let data = Data(base64Encoded: payload),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let appleUserId = json["sub"] as? String else {
-            throw Abort(.unauthorized, reason: "Invalid token payload")
-        }
-
-        let email = json["email"] as? String
+        let appleUserId = appleToken.subject.value
+        let email = appleToken.email
 
         // Find or create user
         let user: User

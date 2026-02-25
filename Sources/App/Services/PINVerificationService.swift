@@ -3,15 +3,11 @@ import Fluent
 
 struct PINVerificationService {
     static let maxAttempts = 5
-    static let lockoutDuration: TimeInterval = 5 * 60 // 5 minutes
+    static let lockoutDuration: TimeInterval = 60 * 60 // 1 hour
 
-    /// Verifies a PIN for a magic link with brute-force protection
-    /// - Parameters:
-    ///   - pin: The PIN to verify
-    ///   - magicLink: The magic link to verify against
-    ///   - db: Database connection
-    /// - Returns: true if PIN is correct and link is not locked
-    /// - Throws: Abort error if link is locked or PIN is incorrect
+    /// Verifies a PIN for a magic link with brute-force protection.
+    /// Supports both bcrypt (new) and SHA256 (legacy) hashes.
+    /// Legacy hashes are transparently upgraded to bcrypt on successful verification.
     static func verify(
         pin: String,
         magicLink: MagicLink,
@@ -24,18 +20,36 @@ struct PINVerificationService {
             throw Abort(.tooManyRequests, reason: "Too many failed attempts. Try again in \(minutes) minute(s).")
         }
 
-        // Verify PIN requires both hash and salt
-        guard let pinHash = magicLink.pinHash, let pinSalt = magicLink.pinSalt else {
+        guard let pinHash = magicLink.pinHash else {
             throw Abort(.badRequest, reason: "This magic link does not require a PIN")
         }
 
-        // Verify the PIN using constant-time comparison
-        let isValid = SHA256Hasher.verify(pin: pin, salt: pinSalt, storedHash: pinHash)
+        // Determine hash type and verify accordingly
+        let isValid: Bool
+        let isLegacyHash = !pinHash.hasPrefix("$2")
+
+        if isLegacyHash {
+            // Legacy SHA256 verification (requires pinSalt)
+            guard let pinSalt = magicLink.pinSalt else {
+                throw Abort(.badRequest, reason: "This magic link does not require a PIN")
+            }
+            isValid = SHA256Hasher.verify(pin: pin, salt: pinSalt, storedHash: pinHash)
+        } else {
+            // Bcrypt verification
+            isValid = try Bcrypt.verify(pin, created: pinHash)
+        }
 
         if isValid {
             // Reset failed attempts on success
             magicLink.failedPinAttempts = 0
             magicLink.lockedUntil = nil
+
+            // Transparently upgrade legacy SHA256 hash to bcrypt
+            if isLegacyHash {
+                magicLink.pinHash = try Bcrypt.hash(pin)
+                magicLink.pinSalt = nil
+            }
+
             try await magicLink.save(on: db)
             return true
         } else {
@@ -53,17 +67,14 @@ struct PINVerificationService {
             if attemptsRemaining > 0 {
                 throw Abort(.unauthorized, reason: "Invalid PIN. \(attemptsRemaining) attempt(s) remaining.")
             } else {
-                throw Abort(.tooManyRequests, reason: "Too many failed attempts. Try again in 5 minutes.")
+                throw Abort(.tooManyRequests, reason: "Too many failed attempts. Try again later.")
             }
         }
     }
 
-    /// Hashes a new PIN with a generated salt
-    /// - Parameter pin: The PIN to hash
-    /// - Returns: Tuple of (hash, salt)
-    static func hashPIN(_ pin: String) throws -> (hash: String, salt: String) {
-        let salt = try SecureTokenGenerator.generateSalt()
-        let hash = SHA256Hasher.hash(pin: pin, salt: salt)
-        return (hash, salt)
+    /// Hashes a new PIN using bcrypt
+    static func hashPIN(_ pin: String) throws -> (hash: String, salt: String?) {
+        let hash = try Bcrypt.hash(pin)
+        return (hash, nil)
     }
 }

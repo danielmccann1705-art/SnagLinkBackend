@@ -1,8 +1,11 @@
 import Vapor
+import Logging
 import Foundation
 
 /// Service for sending email notifications via Resend API
 struct NotificationService {
+
+    private static let logger = Logger(label: "notification-service")
 
     // MARK: - Configuration
 
@@ -84,8 +87,7 @@ struct NotificationService {
         client: Client
     ) async throws {
         guard let apiKey = resendAPIKey else {
-            // Log but don't fail - email is optional functionality
-            print("RESEND_API_KEY not configured, skipping email notification")
+            logger.info("RESEND_API_KEY not configured, skipping email notification")
             return
         }
 
@@ -161,8 +163,7 @@ struct NotificationService {
         client: Client
     ) async throws {
         guard let apiKey = resendAPIKey else {
-            // Log but don't fail - email is optional functionality
-            print("RESEND_API_KEY not configured, skipping email notification")
+            logger.info("RESEND_API_KEY not configured, skipping email notification")
             return
         }
 
@@ -273,6 +274,6 @@ struct NotificationService {
             throw EmailError.invalidResponse
         }
 
-        print("Email sent successfully with ID: \(emailResponse.id ?? "unknown")")
+        logger.info("Email sent successfully")
     }
 }

@@ -19,9 +19,16 @@ struct TokenValidationService {
         token: String,
         on db: Database
     ) async throws -> MagicLink {
-        guard let magicLink = try await MagicLink.query(on: db)
+        // Look up by token first, then fall back to slug
+        let byToken = try await MagicLink.query(on: db)
             .filter(\.$token == token)
-            .first() else {
+            .first()
+        let bySlug = byToken == nil
+            ? try await MagicLink.query(on: db)
+                .filter(\.$slug == token)
+                .first()
+            : nil
+        guard let magicLink = byToken ?? bySlug else {
             throw ValidationError.notFound
         }
 

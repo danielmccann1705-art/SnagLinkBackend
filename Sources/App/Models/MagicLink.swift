@@ -108,6 +108,6 @@ final class MagicLink: Model, Content, @unchecked Sendable {
     }
 
     var requiresPIN: Bool {
-        return pinHash != nil && pinSalt != nil
+        return pinHash != nil
     }
 }

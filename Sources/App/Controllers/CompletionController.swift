@@ -37,7 +37,7 @@ struct CompletionController: RouteCollection {
             throw Abort(.badRequest, reason: "Invalid token or snag ID")
         }
 
-        req.logger.info("🔔 Completion submitted for snag: \(snagId)")
+        req.logger.info("Completion submitted for snag: \(snagId)")
 
         // Validate magic link
         let magicLink = try await TokenValidationService.validateMagicLink(token: token, on: req.db)
@@ -158,23 +158,20 @@ struct CompletionController: RouteCollection {
 
             // Push notification
             do {
-                req.logger.info("🔔 Looking up magic link creator...")
-                req.logger.info("🔔 Creator user ID: \(magicLink.createdById)")
-                req.logger.info("🔔 Looking up device token for user...")
+                req.logger.info("Looking up device tokens for magic link creator")
                 try await APNsService.sendCompletionNotification(
                     toUserId: magicLink.createdById,
                     contractorName: request.contractorName,
                     snagTitle: snagTitle,
                     completionId: completion.id!,
                     snagId: snagId,
-                    magicLinkToken: token,
                     client: req.client,
                     logger: req.logger,
                     db: req.db
                 )
-                req.logger.info("🔔 Push notification sent successfully")
+                req.logger.info("Push notification sent successfully")
             } catch {
-                req.logger.error("🔔 APNs send failed: \(error)")
+                req.logger.error("APNs send failed: \(error)")
             }
         }
 

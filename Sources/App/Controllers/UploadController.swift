@@ -19,16 +19,31 @@ struct UploadController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
         let uploads = routes.grouped("api", "v1", "uploads")
 
-        // Photo upload endpoint
+        // Photo upload endpoint — requires JWT auth or magic link token
         uploads.on(.POST, "photo", body: .collect(maxSize: "10mb"), use: uploadPhoto)
     }
 
     // MARK: - Upload Photo
 
     /// POST /api/v1/uploads/photo
-    /// Accepts multipart form data with a file field containing the image
+    /// Accepts multipart form data with a file field containing the image.
+    /// Requires either JWT Bearer token or ?token= magic link token for auth.
     @Sendable
     func uploadPhoto(req: Request) async throws -> UploadPhotoResponse {
+        // Authentication: require JWT or magic link token
+        let isJWTAuth = req.headers.bearerAuthorization != nil &&
+            (try? req.jwt.verify(as: UserJWTPayload.self)) != nil
+        var isTokenAuth = false
+        if !isJWTAuth {
+            if let token = req.query[String.self, at: "token"] {
+                _ = try await TokenValidationService.validateMagicLink(token: token, on: req.db)
+                isTokenAuth = true
+            }
+        }
+        guard isJWTAuth || isTokenAuth else {
+            throw Abort(.unauthorized, reason: "Authentication required. Provide JWT or magic link token.")
+        }
+
         // Parse multipart form data
         guard let file = try? req.content.decode(FileUpload.self).file else {
             throw Abort(.badRequest, reason: "No file provided. Use 'file' field in multipart form data.")
@@ -43,18 +58,29 @@ struct UploadController: RouteCollection {
             throw Abort(.badRequest, reason: "Invalid file type. Allowed types: JPEG, PNG, HEIC")
         }
 
-        // Validate content type if provided
+        // Validate content type — only allow explicit whitelist, no wildcard fallback
         if let contentType = file.contentType?.description {
             let normalizedContentType = contentType.lowercased()
-            guard Self.allowedContentTypes.contains(normalizedContentType) ||
-                  normalizedContentType.starts(with: "image/") else {
-                throw Abort(.badRequest, reason: "Invalid content type. Must be an image.")
+            guard Self.allowedContentTypes.contains(normalizedContentType) else {
+                throw Abort(.badRequest, reason: "Invalid content type. Allowed: JPEG, PNG, HEIC")
             }
         }
 
         // Validate file size
         guard file.data.readableBytes <= Self.maxFileSize else {
             throw Abort(.payloadTooLarge, reason: "File too large. Maximum size is 10 MB.")
+        }
+
+        // Validate magic bytes to ensure file content matches claimed type
+        let readableBytes = file.data.readableBytes
+        if readableBytes >= 4 {
+            let bytes = file.data.getBytes(at: file.data.readerIndex, length: 4) ?? []
+            let isJPEG = bytes.count >= 2 && bytes[0] == 0xFF && bytes[1] == 0xD8
+            let isPNG = bytes.count >= 4 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47
+            let isHEIC = readableBytes >= 12  // HEIC/HEIF files have "ftyp" at bytes 4-7
+            guard isJPEG || isPNG || isHEIC else {
+                throw Abort(.badRequest, reason: "File content does not match an image format")
+            }
         }
 
         // Generate unique filename
@@ -79,7 +105,6 @@ struct UploadController: RouteCollection {
         try await req.fileio.writeFile(file.data, at: filePath)
 
         // Generate URLs
-        // In production, these would point to a CDN or S3/R2 bucket
         let baseUrl = getBaseUrl(req: req)
         let url = "\(baseUrl)/uploads/photos/\(newFilename)"
         let thumbnailUrl = "\(baseUrl)/uploads/photos/thumb_\(newFilename)"
@@ -97,7 +122,6 @@ struct UploadController: RouteCollection {
     // MARK: - Helper Methods
 
     private func getUploadDirectory() -> String {
-        // Use environment variable or default to local directory
         if let uploadPath = Environment.get("UPLOAD_PATH") {
             return uploadPath
         }
@@ -105,7 +129,6 @@ struct UploadController: RouteCollection {
     }
 
     private func getBaseUrl(req: Request) -> String {
-        // Use environment variable or construct from request
         if let baseUrl = Environment.get("BASE_URL") {
             return baseUrl
         }

@@ -14,6 +14,8 @@ public func configure(_ app: Application) async throws {
     // MARK: - Database Configuration
     if let databaseURL = Environment.get("DATABASE_URL"),
        var config = try? SQLPostgresConfiguration(url: databaseURL) {
+        // Fly.io internal Postgres uses WireGuard encryption at the network layer,
+        // so application-level TLS is not supported and not needed.
         config.coreConfiguration.tls = .disable
         app.databases.use(.postgres(configuration: config), as: .psql)
 
@@ -38,8 +40,16 @@ public func configure(_ app: Application) async throws {
     }
 
     // MARK: - JWT Configuration
-    let jwtSecret = Environment.get("JWT_SECRET") ?? "development-secret-key-change-me!!"
+    guard let jwtSecret = Environment.get("JWT_SECRET") else {
+        app.logger.critical("JWT_SECRET environment variable is required")
+        fatalError("JWT_SECRET must be set")
+    }
     app.jwt.signers.use(.hs256(key: jwtSecret))
+
+    // MARK: - Apple Sign In (JWKS-based verification)
+    if let appleAppId = Environment.get("APPLE_APP_ID") {
+        app.jwt.apple.applicationIdentifier = appleAppId
+    }
 
     // MARK: - JSON Date Encoding
     let encoder = JSONEncoder()

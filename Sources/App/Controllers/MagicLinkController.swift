@@ -43,20 +43,22 @@ struct MagicLinkController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
         let magicLinks = routes.grouped("api", "v1", "magic-links")
 
-        // Routes with consistent parameter name ":linkId"
-        // Note: Using same param name at each route level is required by Vapor's TrieRouter
-        magicLinks.get(":linkId", "validate", use: validateToken)
-        magicLinks.post(":linkId", "verify-pin", use: verifyPIN)
-        magicLinks.post(use: create)
-        magicLinks.get(use: list)
-        magicLinks.delete(":linkId", use: revoke)
-        magicLinks.get(":linkId", "analytics", use: getAnalytics)
-        magicLinks.get(":linkId", "snags", use: getSnags)
-        magicLinks.get(":linkId", "pdf", use: downloadPDF)
-        magicLinks.get(":linkId", "qr", use: generateQRCode)
+        // Public routes — rate limited to prevent brute force
+        let rateLimited = magicLinks.grouped(RateLimitMiddleware(action: .tokenLookup))
+        rateLimited.get(":linkId", "validate", use: validateToken)
+        rateLimited.post(":linkId", "verify-pin", use: verifyPIN)
+        rateLimited.get(":linkId", "snags", use: getSnags)
+        rateLimited.get(":linkId", "pdf", use: downloadPDF)
+        rateLimited.get(":linkId", "qr", use: generateQRCode)
+
+        // Authenticated management routes (JWT required)
+        let authenticated = magicLinks.grouped(JWTAuthMiddleware())
+        authenticated.post(use: create)
+        authenticated.get(use: list)
+        authenticated.delete(":linkId", use: revoke)
+        authenticated.get(":linkId", "analytics", use: getAnalytics)
 
         // Authenticated sync routes for iOS app
-        let authenticated = magicLinks.grouped(JWTAuthMiddleware())
         authenticated.post("sync", use: syncFromiOS)
         authenticated.post(":linkId", "report", use: syncReportData)
         authenticated.on(.POST, ":linkId", "photos", body: .collect(maxSize: "10mb"), use: syncPhoto)
@@ -206,13 +208,13 @@ struct MagicLinkController: RouteCollection {
         // Generate human-friendly slug
         let slug = try await generateUniqueSlug(contractorName: createRequest.contractorName, on: req.db)
 
-        // Hash PIN if provided
+        // Hash PIN if provided (using bcrypt)
         var pinHash: String? = nil
         var pinSalt: String? = nil
         if let pin = createRequest.pin {
             let hashResult = try PINVerificationService.hashPIN(pin)
             pinHash = hashResult.hash
-            pinSalt = hashResult.salt
+            pinSalt = hashResult.salt  // nil for bcrypt (salt embedded in hash)
         }
 
         let magicLink = MagicLink(
@@ -394,19 +396,19 @@ struct MagicLinkController: RouteCollection {
         var photosBySnagId: [UUID: [SnagPhotoDTO]] = [:]
         for photo in syncedPhotos {
             let url = "\(baseURL)\(photo.filePath)"
-            let dto = SnagPhotoDTO(id: photo.id!, url: url, thumbnailUrl: url)
+            let dto = SnagPhotoDTO(id: photo.id!, url: url, thumbnailUrl: url, isBefore: photo.label == "before")
             photosBySnagId[photo.snagId, default: []].append(dto)
         }
 
-        // Build SnagDTOs from the report JSON
-        let projectName = report.projectName ?? "Project"
-        let contractorName = report.contractorName ?? "Contractor"
-        let projectAddress = report.projectAddress
+        // Build SnagDTOs from the report JSON (supports both flat and nested fields)
+        let projectName = report.resolvedProjectName ?? "Project"
+        let contractorName = report.resolvedContractorName ?? "Contractor"
+        let projectAddress = report.resolvedProjectAddress
 
         var snags: [SnagDTO] = (report.snags ?? []).map { snag in
             let snagId = snag.id ?? UUID()
             let photos = photosBySnagId[snagId] ?? snag.photos?.map { p in
-                SnagPhotoDTO(id: p.id ?? UUID(), url: p.url ?? "", thumbnailUrl: p.thumbnailUrl ?? p.url)
+                SnagPhotoDTO(id: p.id ?? UUID(), url: p.url ?? "", thumbnailUrl: p.thumbnailUrl ?? p.url, isBefore: true)
             } ?? []
 
             return SnagDTO(
@@ -550,17 +552,17 @@ struct MagicLinkController: RouteCollection {
             <tr style="border-bottom: 1px solid #e5e7eb;">
                 <td style="padding: 12px 8px; font-weight: 500;">\(index + 1)</td>
                 <td style="padding: 12px 8px;">
-                    <div style="font-weight: 600; color: #111827;">\(snag.title)</div>
-                    \(snag.description.map { "<div style=\"font-size: 12px; color: #6b7280; margin-top: 4px;\">\($0)</div>" } ?? "")
+                    <div style="font-weight: 600; color: #111827;">\(snag.title.htmlEscaped)</div>
+                    \(snag.description.map { "<div style=\"font-size: 12px; color: #6b7280; margin-top: 4px;\">\($0.htmlEscaped)</div>" } ?? "")
                 </td>
-                <td style="padding: 12px 8px;">\(snag.location ?? "-")</td>
+                <td style="padding: 12px 8px;">\((snag.location ?? "-").htmlEscaped)</td>
                 <td style="padding: 12px 8px;">
                     <span style="display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; background: \(statusColor)20; color: \(statusColor);">\(snag.status.replacingOccurrences(of: "_", with: " ").uppercased())</span>
                 </td>
                 <td style="padding: 12px 8px;">
                     <span style="display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; background: \(priorityColor)20; color: \(priorityColor);">\(snag.priority.uppercased())</span>
                 </td>
-                <td style="padding: 12px 8px; font-size: 12px;">\(snag.dueDate ?? "-")</td>
+                <td style="padding: 12px 8px; font-size: 12px;">\((snag.dueDate ?? "-").htmlEscaped)</td>
             </tr>
             """
         }
@@ -574,7 +576,7 @@ struct MagicLinkController: RouteCollection {
         <html>
         <head>
             <meta charset="utf-8">
-            <title>Snag Report - \(projectName)</title>
+            <title>Snag Report - \(projectName.htmlEscaped)</title>
             <style>
                 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 40px; color: #1f2937; }
                 .header { border-bottom: 2px solid #f97316; padding-bottom: 20px; margin-bottom: 30px; }
@@ -602,9 +604,9 @@ struct MagicLinkController: RouteCollection {
             </div>
 
             <div class="project-info">
-                <h2>\(projectName)</h2>
-                <p>\(projectAddress)</p>
-                <p style="margin-top: 8px;">Assigned to: <strong>\(contractorName)</strong></p>
+                <h2>\(projectName.htmlEscaped)</h2>
+                <p>\(projectAddress.htmlEscaped)</p>
+                <p style="margin-top: 8px;">Assigned to: <strong>\(contractorName.htmlEscaped)</strong></p>
             </div>
 
             <div class="stats">
@@ -813,7 +815,7 @@ struct MagicLinkController: RouteCollection {
             }
         }
 
-        req.logger.info("Report data synced for magic link: \(token)")
+        req.logger.info("Report data synced for magic link: \(token.prefix(8))...")
 
         return ReportSyncResponse(
             success: true,
@@ -902,7 +904,7 @@ struct MagicLinkController: RouteCollection {
 
         let baseUrl = Environment.get("BASE_URL") ?? "https://snaglist.app"
 
-        req.logger.info("Photo synced: \(metadata.id) for magic link: \(token)")
+        req.logger.info("Photo synced: \(metadata.id) for magic link: \(token.prefix(8))...")
 
         return PhotoSyncResponse(
             success: true,
@@ -979,7 +981,7 @@ struct MagicLinkController: RouteCollection {
 
         let baseUrl = Environment.get("BASE_URL") ?? "https://snaglist.app"
 
-        req.logger.info("Drawing synced: \(drawingId) for magic link: \(token)")
+        req.logger.info("Drawing synced: \(drawingId) for magic link: \(token.prefix(8))...")
 
         return DrawingSyncResponse(
             success: true,
@@ -1012,12 +1014,28 @@ struct DrawingSyncResponse: Content {
 // MARK: - Synced Report JSON Parsing
 
 /// Top-level structure of the report JSON stored in SyncedReport.reportJSON
+/// Supports both flat fields (projectName, projectAddress) and nested project object
 struct SyncedReportJSON: Decodable {
+    let project: SyncedProjectJSON?
     let projectName: String?
     let projectAddress: String?
     let contractorName: String?
     let createdByName: String?
     let snags: [SyncedSnagJSON]?
+
+    /// Resolves project name from flat field or nested project object
+    var resolvedProjectName: String? { projectName ?? project?.name }
+    /// Resolves project address from flat field or nested project object
+    var resolvedProjectAddress: String? { projectAddress ?? project?.address }
+    /// Resolves contractor name from flat field or snags
+    var resolvedContractorName: String? { contractorName ?? snags?.first?.contractorName }
+}
+
+/// Nested project object sent by iOS within ReportSyncData
+struct SyncedProjectJSON: Decodable {
+    let name: String?
+    let address: String?
+    let clientName: String?
 }
 
 /// A snag entry within the synced report JSON
@@ -1036,6 +1054,7 @@ struct SyncedSnagJSON: Decodable {
     let pinY: Double?
     let dueDate: String?
     let assignedTo: String?
+    let contractorName: String?
     let createdAt: String?
     let createdByName: String?
     let photos: [SyncedSnagPhotoJSON]?

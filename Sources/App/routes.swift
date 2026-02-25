@@ -64,7 +64,41 @@ func routes(_ app: Application) throws {
         """
     }
 
+    // MARK: - Apple App Site Association
+    app.get(".well-known", "apple-app-site-association") { req -> Response in
+        let json = """
+        {
+          "applinks": {
+            "details": [{
+              "appIDs": ["52ZZHYHM62.com.snaglist.app"],
+              "components": [{ "/": "/m/*" }]
+            }]
+          },
+          "appclips": {
+            "apps": ["52ZZHYHM62.com.snaglist.app.Clip"]
+          }
+        }
+        """
+        return Response(
+            status: .ok,
+            headers: ["Content-Type": "application/json"],
+            body: .init(string: json)
+        )
+    }
+
+    // MARK: - Legal Pages
+    app.get("privacy") { req async -> Response in
+        let html = LegalPageRenderer.privacyPolicy()
+        return Response(status: .ok, headers: ["Content-Type": "text/html; charset=utf-8"], body: .init(string: html))
+    }
+
+    app.get("terms") { req async -> Response in
+        let html = LegalPageRenderer.termsOfService()
+        return Response(status: .ok, headers: ["Content-Type": "text/html; charset=utf-8"], body: .init(string: html))
+    }
+
     // MARK: - Controllers
+    try app.register(collection: WebReportController())
     try app.register(collection: MagicLinkController())
     try app.register(collection: TeamInviteController())
     try app.register(collection: CompletionController())
