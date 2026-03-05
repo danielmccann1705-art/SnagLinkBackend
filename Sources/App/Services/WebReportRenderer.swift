@@ -196,6 +196,7 @@ struct WebReportRenderer {
 
     struct ReportData {
         let slug: String
+        let baseURL: String
         let projectName: String
         let projectAddress: String?
         let contractorName: String
@@ -457,7 +458,7 @@ struct WebReportRenderer {
         let totalCount = data.openCount + data.inProgressCount + data.completedCount
         let ogTitle = "\(data.projectName) - Snaglist Report"
         let ogDescription = "\(totalCount) snags - \(data.completedCount) completed, \(data.openCount) open"
-        let ogURL = "https://snaglist.app/m/\(data.slug)"
+        let ogURL = "\(data.baseURL)/m/\(data.slug)"
 
         var meta = """
         <meta property="og:type" content="website">
@@ -468,7 +469,8 @@ struct WebReportRenderer {
         """
 
         if let imageURL = firstPhotoURL {
-            meta += "\n        <meta property=\"og:image\" content=\"\(imageURL.htmlEscaped)\">"
+            let absoluteURL = imageURL.hasPrefix("http") ? imageURL : "\(data.baseURL)\(imageURL)"
+            meta += "\n        <meta property=\"og:image\" content=\"\(absoluteURL.htmlEscaped)\">"
         }
 
         return meta

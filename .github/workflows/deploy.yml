@@ -1,0 +1,61 @@
+name: Deploy to Hetzner
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Docker Image"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    concurrency: deploy-group
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: snaglist
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script_stop: false
+          script: |
+            set -e
+            cd /home/snaglist/app
+
+            # Save current image digest for rollback
+            PREV_IMAGE=$(docker compose -f docker-compose.prod.yml images app -q 2>/dev/null || echo "")
+
+            # Pull latest image and restart app service
+            docker compose -f docker-compose.prod.yml pull app
+            docker compose -f docker-compose.prod.yml up -d app
+
+            # Health check gate: 3 attempts, 5s apart
+            HEALTHY=false
+            for i in 1 2 3; do
+              sleep 5
+              if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+                echo "Health check passed on attempt $i"
+                HEALTHY=true
+                break
+              fi
+              echo "Health check attempt $i failed, retrying..."
+            done
+
+            if [ "$HEALTHY" = true ]; then
+              # Clean up old images
+              docker image prune -f
+              echo "Deploy successful"
+              exit 0
+            fi
+
+            # Health check failed — rollback
+            echo "HEALTH CHECK FAILED — rolling back"
+            if [ -n "$PREV_IMAGE" ]; then
+              docker compose -f docker-compose.prod.yml down app
+              docker tag "$PREV_IMAGE" ghcr.io/danielmccann1705-art/snaglinkbackend:rollback
+              IMAGE_TAG=rollback docker compose -f docker-compose.prod.yml up -d app
+            fi
+            exit 1

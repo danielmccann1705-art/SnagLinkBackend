@@ -140,7 +140,7 @@ struct MagicLinkResponse: Content {
         self.createdAt = magicLink.createdAt
         self.slug = magicLink.slug
 
-        let base = baseURL ?? Environment.get("BASE_URL") ?? "https://snaglist.app"
+        let base = baseURL ?? Environment.get("BASE_URL") ?? "https://snaglist.dev"
         let slugOrToken = magicLink.slug ?? magicLink.token
         self.shortUrl = "\(base)/m/\(slugOrToken)"
         self.qrCodeUrl = "\(base)/api/v1/magic-links/\(magicLink.id!)/qr"

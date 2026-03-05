@@ -23,11 +23,13 @@ enum Entrypoint {
             try await app.execute()
         } catch {
             app.logger.error("Server execution failed: \(error)")
+            try? await StorageService.shutdown()
             try? await app.asyncShutdown()
             // Exit gracefully instead of throwing, which can trigger SIGILL
             exit(1)
         }
 
+        try? await StorageService.shutdown()
         try await app.asyncShutdown()
     }
 }

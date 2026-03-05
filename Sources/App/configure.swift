@@ -14,9 +14,11 @@ public func configure(_ app: Application) async throws {
     // MARK: - Database Configuration
     if let databaseURL = Environment.get("DATABASE_URL"),
        var config = try? SQLPostgresConfiguration(url: databaseURL) {
-        // Fly.io internal Postgres uses WireGuard encryption at the network layer,
-        // so application-level TLS is not supported and not needed.
-        config.coreConfiguration.tls = .disable
+        // Disable TLS for local/same-VPS Postgres (e.g. Docker internal network).
+        // Default: TLS enabled (for managed/external databases).
+        if Environment.get("DATABASE_TLS_DISABLE") == "true" {
+            config.coreConfiguration.tls = .disable
+        }
         app.databases.use(.postgres(configuration: config), as: .psql)
 
         // MARK: - Migrations
@@ -71,8 +73,10 @@ public func configure(_ app: Application) async throws {
     app.middleware.use(cors, at: .beginning)
     app.middleware.use(ErrorMiddleware.default(environment: app.environment))
 
-    // File middleware for serving uploaded photos
-    app.middleware.use(FileMiddleware(publicDirectory: app.directory.publicDirectory))
+    // File middleware for serving uploaded photos (only needed when using local storage)
+    if StorageService.backend == .local {
+        app.middleware.use(FileMiddleware(publicDirectory: app.directory.publicDirectory))
+    }
 
     // MARK: - Routes
     try routes(app)

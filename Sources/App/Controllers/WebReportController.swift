@@ -9,6 +9,11 @@ struct WebReportController: RouteCollection {
         m.get(":slug", use: renderReport)
         m.post(":slug", "verify", use: verifyPIN)
         m.get(":slug", "photos.zip", use: downloadPhotosZip)
+
+        // Debug route (JWT-protected)
+        let debug = routes.grouped("api", "v1", "debug")
+            .grouped(JWTAuthMiddleware())
+        debug.get("photos", ":token", use: debugPhotos)
     }
 
     // MARK: - GET /m/:slug
@@ -76,15 +81,18 @@ struct WebReportController: RouteCollection {
             return htmlResponse(WebReportRenderer.renderError(type: .notSynced))
         }
 
-        // Fetch synced photos grouped by snagId
+        // Fetch synced photos for snags in this report (query by snagId so photos
+        // appear regardless of which magic link originally synced them)
+        let reportSnagIds = (report.snags ?? []).compactMap { $0.id }
         let syncedPhotos = try await SyncedPhoto.query(on: req.db)
-            .filter(\.$magicLinkToken == token)
+            .filter(\.$snagId ~~ reportSnagIds)
             .sort(\.$sortOrder)
             .all()
 
-        let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.app"
+        let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.dev"
+        let storageBaseURL = StorageService.publicBaseURL
 
-        // Build raw photos by snag ID (label preserved as-is)
+        // Build raw photos by snag ID — URLs point to StorageService backend
         struct RawPhoto {
             let url: String
             let label: String
@@ -92,7 +100,7 @@ struct WebReportController: RouteCollection {
         var rawPhotosBySnagId: [UUID: [RawPhoto]] = [:]
         for photo in syncedPhotos {
             rawPhotosBySnagId[photo.snagId, default: []].append(
-                RawPhoto(url: "\(baseURL)\(photo.filePath)", label: photo.label)
+                RawPhoto(url: "\(storageBaseURL)\(photo.filePath)", label: photo.label)
             )
         }
 
@@ -103,7 +111,7 @@ struct WebReportController: RouteCollection {
 
         var drawingURLByDrawingId: [UUID: String] = [:]
         for drawing in syncedDrawings {
-            drawingURLByDrawingId[drawing.drawingId] = "\(baseURL)\(drawing.filePath)"
+            drawingURLByDrawingId[drawing.drawingId] = "\(storageBaseURL)\(drawing.filePath)"
         }
 
         // Build snag data
@@ -176,6 +184,7 @@ struct WebReportController: RouteCollection {
 
         let reportData = WebReportRenderer.ReportData(
             slug: slug,
+            baseURL: baseURL,
             projectName: projectName,
             projectAddress: projectAddress,
             contractorName: contractorName,
@@ -245,9 +254,11 @@ struct WebReportController: RouteCollection {
             )
         }
 
-        // Fetch synced photos
+        // Fetch synced photos for snags in this report (query by snagId so photos
+        // appear regardless of which magic link originally synced them)
+        let reportSnagIds = (report.snags ?? []).compactMap { $0.id }
         let syncedPhotos = try await SyncedPhoto.query(on: req.db)
-            .filter(\.$magicLinkToken == token)
+            .filter(\.$snagId ~~ reportSnagIds)
             .sort(\.$sortOrder)
             .all()
 
@@ -256,17 +267,14 @@ struct WebReportController: RouteCollection {
         }
 
         // Build ZIP entries
-        let publicDir = req.application.directory.publicDirectory
         var entries: [ZIPBuilder.Entry] = []
 
         for photo in syncedPhotos {
-            // Build file path on disk — filePath starts with "/" like "/uploads/..."
-            let relativePath = photo.filePath.hasPrefix("/") ? String(photo.filePath.dropFirst()) : photo.filePath
-            let fullPath = publicDir + relativePath
+            // Storage key: strip leading "/" from filePath
+            let storageKey = photo.filePath.hasPrefix("/") ? String(photo.filePath.dropFirst()) : photo.filePath
 
-            guard FileManager.default.fileExists(atPath: fullPath),
-                  let fileData = FileManager.default.contents(atPath: fullPath) else {
-                req.logger.warning("ZIP: skipping missing photo file: \(fullPath)")
+            guard let fileData = try await StorageService.download(key: storageKey, app: req.application) else {
+                req.logger.warning("ZIP: skipping missing photo file: \(storageKey)")
                 continue
             }
 
@@ -434,6 +442,91 @@ struct WebReportController: RouteCollection {
             using: key
         )
         return Data(signature).base64EncodedString()
+    }
+
+    // MARK: - Debug
+
+    /// GET /api/v1/debug/photos/:token — diagnose photo file existence (JWT-protected)
+    @Sendable
+    func debugPhotos(req: Request) async throws -> Response {
+        guard let token = req.parameters.get("token") else {
+            throw Abort(.badRequest, reason: "Token is required")
+        }
+
+        let storageBaseURL = StorageService.publicBaseURL
+
+        let photos = try await SyncedPhoto.query(on: req.db)
+            .filter(\.$magicLinkToken == token)
+            .sort(\.$sortOrder)
+            .all()
+
+        let drawings = try await SyncedDrawing.query(on: req.db)
+            .filter(\.$magicLinkToken == token)
+            .all()
+
+        struct FileInfo: Content {
+            let id: UUID
+            let snagId: UUID?
+            let filePath: String
+            let storageKey: String
+            let existsInStorage: Bool
+        }
+
+        var photoInfos: [FileInfo] = []
+        for photo in photos {
+            let key = photo.filePath.hasPrefix("/") ? String(photo.filePath.dropFirst()) : photo.filePath
+            let exists = try await StorageService.exists(key: key, app: req.application)
+            photoInfos.append(FileInfo(
+                id: photo.id!,
+                snagId: photo.snagId,
+                filePath: photo.filePath,
+                storageKey: key,
+                existsInStorage: exists
+            ))
+        }
+
+        var drawingInfos: [FileInfo] = []
+        for drawing in drawings {
+            let key = drawing.filePath.hasPrefix("/") ? String(drawing.filePath.dropFirst()) : drawing.filePath
+            let exists = try await StorageService.exists(key: key, app: req.application)
+            drawingInfos.append(FileInfo(
+                id: drawing.id!,
+                snagId: nil,
+                filePath: drawing.filePath,
+                storageKey: key,
+                existsInStorage: exists
+            ))
+        }
+
+        struct DebugResponse: Content {
+            let token: String
+            let storageBackend: String
+            let storageBaseURL: String
+            let photoCount: Int
+            let photos: [FileInfo]
+            let drawingCount: Int
+            let drawings: [FileInfo]
+        }
+
+        let result = DebugResponse(
+            token: token,
+            storageBackend: StorageService.backend == .r2 ? "r2" : "local",
+            storageBaseURL: storageBaseURL,
+            photoCount: photoInfos.count,
+            photos: photoInfos,
+            drawingCount: drawingInfos.count,
+            drawings: drawingInfos
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        let data = try encoder.encode(result)
+
+        return Response(
+            status: .ok,
+            headers: ["Content-Type": "application/json"],
+            body: .init(data: data)
+        )
     }
 
     // MARK: - Helpers

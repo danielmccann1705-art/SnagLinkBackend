@@ -13,6 +13,7 @@ let package = Package(
         .package(url: "https://github.com/vapor/jwt.git", from: "4.2.0"),
         .package(url: "https://github.com/vapor/redis.git", from: "4.10.0"),
         .package(url: "https://github.com/fwcd/swift-qrcode-generator.git", from: "2.0.0"),
+        .package(url: "https://github.com/soto-project/soto.git", from: "7.0.0"),
     ],
     targets: [
         .executableTarget(
@@ -24,6 +25,7 @@ let package = Package(
                 .product(name: "JWT", package: "jwt"),
                 .product(name: "Redis", package: "redis"),
                 .product(name: "QRCodeGenerator", package: "swift-qrcode-generator"),
+                .product(name: "SotoS3", package: "soto"),
             ],
             path: "Sources/App"
         ),

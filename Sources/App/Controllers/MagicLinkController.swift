@@ -245,7 +245,7 @@ struct MagicLinkController: RouteCollection {
 
         // Send email notification if contractor email provided
         if let contractorEmail = createRequest.contractorEmail, !contractorEmail.isEmpty {
-            let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.app"
+            let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.dev"
             let magicLinkURL = "\(baseURL)/link/\(token)"
 
             // Fire-and-forget: don't block response on email sending
@@ -386,16 +386,17 @@ struct MagicLinkController: RouteCollection {
             throw Abort(.internalServerError, reason: "Failed to parse report data")
         }
 
-        // Fetch synced photos for this magic link, grouped by snagId
+        // Fetch synced photos for snags in this report (query by snagId so photos
+        // appear regardless of which magic link originally synced them)
+        let reportSnagIds = (report.snags ?? []).compactMap { $0.id }
         let syncedPhotos = try await SyncedPhoto.query(on: req.db)
-            .filter(\.$magicLinkToken == token)
+            .filter(\.$snagId ~~ reportSnagIds)
             .sort(\.$sortOrder)
             .all()
 
-        let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.app"
         var photosBySnagId: [UUID: [SnagPhotoDTO]] = [:]
         for photo in syncedPhotos {
-            let url = "\(baseURL)\(photo.filePath)"
+            let url = "\(StorageService.publicBaseURL)\(photo.filePath)"
             let dto = SnagPhotoDTO(id: photo.id!, url: url, thumbnailUrl: url, isBefore: photo.label == "before")
             photosBySnagId[photo.snagId, default: []].append(dto)
         }
@@ -687,7 +688,7 @@ struct MagicLinkController: RouteCollection {
         }
 
         // Build the short URL using slug if available, otherwise token
-        let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.app"
+        let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.dev"
         let slugOrToken = magicLink.slug ?? magicLink.token
         let shortUrl = "\(baseURL)/m/\(slugOrToken)"
 
@@ -717,7 +718,7 @@ struct MagicLinkController: RouteCollection {
         let userId = try req.requireAuthenticatedUserId()
         let syncRequest = try req.content.decode(SyncMagicLinkRequest.self)
 
-        let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.app"
+        let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.dev"
 
         // Check if a magic link with this token already exists (upsert)
         if let existing = try await MagicLink.query(on: req.db)
@@ -869,18 +870,17 @@ struct MagicLinkController: RouteCollection {
             throw Abort(.badRequest, reason: "Invalid photo metadata")
         }
 
-        // Save file to disk
+        // Upload file via StorageService
         let fileExtension = "jpg"
         let filename = "\(metadata.id.uuidString).\(fileExtension)"
-        let uploadDir = "./Public/uploads/synced-photos"
+        let storageKey = "uploads/synced-photos/\(filename)"
 
-        let fileManager = FileManager.default
-        if !fileManager.fileExists(atPath: uploadDir) {
-            try fileManager.createDirectory(atPath: uploadDir, withIntermediateDirectories: true)
-        }
-
-        let filePath = "\(uploadDir)/\(filename)"
-        try await req.fileio.writeFile(upload.image.data, at: filePath)
+        try await StorageService.upload(
+            data: upload.image.data,
+            key: storageKey,
+            contentType: "image/jpeg",
+            app: req.application
+        )
 
         // Upsert photo record
         if let existing = try await SyncedPhoto.query(on: req.db)
@@ -889,6 +889,7 @@ struct MagicLinkController: RouteCollection {
             existing.filePath = "/uploads/synced-photos/\(filename)"
             existing.label = metadata.label
             existing.sortOrder = metadata.sortOrder
+            existing.magicLinkToken = magicLink.token
             try await existing.save(on: req.db)
         } else {
             let syncedPhoto = SyncedPhoto(
@@ -902,14 +903,12 @@ struct MagicLinkController: RouteCollection {
             try await syncedPhoto.save(on: req.db)
         }
 
-        let baseUrl = Environment.get("BASE_URL") ?? "https://snaglist.app"
-
         req.logger.info("Photo synced: \(metadata.id) for magic link: \(token.prefix(8))...")
 
         return PhotoSyncResponse(
             success: true,
             photoId: metadata.id,
-            url: "\(baseUrl)/uploads/synced-photos/\(filename)"
+            url: "\(StorageService.publicBaseURL)/uploads/synced-photos/\(filename)"
         )
     }
 
@@ -945,20 +944,26 @@ struct MagicLinkController: RouteCollection {
             throw Abort(.badRequest, reason: "Invalid drawing ID")
         }
 
-        // Determine file extension
+        // Determine file extension and upload
         let originalFilename = upload.file.filename
         let ext = originalFilename.split(separator: ".").last.map(String.init)?.lowercased() ?? "pdf"
         let safeExt = ["pdf", "png", "jpg", "jpeg"].contains(ext) ? ext : "pdf"
         let filename = "\(drawingId.uuidString).\(safeExt)"
-        let uploadDir = "./Public/uploads/synced-drawings"
+        let storageKey = "uploads/synced-drawings/\(filename)"
 
-        let fileManager = FileManager.default
-        if !fileManager.fileExists(atPath: uploadDir) {
-            try fileManager.createDirectory(atPath: uploadDir, withIntermediateDirectories: true)
+        let contentType: String
+        switch safeExt {
+        case "pdf": contentType = "application/pdf"
+        case "png": contentType = "image/png"
+        default: contentType = "image/jpeg"
         }
 
-        let filePath = "\(uploadDir)/\(filename)"
-        try await req.fileio.writeFile(upload.file.data, at: filePath)
+        try await StorageService.upload(
+            data: upload.file.data,
+            key: storageKey,
+            contentType: contentType,
+            app: req.application
+        )
 
         // Upsert drawing record
         if let existing = try await SyncedDrawing.query(on: req.db)
@@ -979,14 +984,12 @@ struct MagicLinkController: RouteCollection {
             try await syncedDrawing.save(on: req.db)
         }
 
-        let baseUrl = Environment.get("BASE_URL") ?? "https://snaglist.app"
-
         req.logger.info("Drawing synced: \(drawingId) for magic link: \(token.prefix(8))...")
 
         return DrawingSyncResponse(
             success: true,
             drawingId: drawingId,
-            url: "\(baseUrl)/uploads/synced-drawings/\(filename)"
+            url: "\(StorageService.publicBaseURL)/uploads/synced-drawings/\(filename)"
         )
     }
 }

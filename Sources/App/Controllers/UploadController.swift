@@ -86,27 +86,20 @@ struct UploadController: RouteCollection {
         // Generate unique filename
         let uuid = UUID().uuidString
         let newFilename = "\(uuid).\(fileExtension)"
+        let storageKey = "uploads/photos/\(newFilename)"
 
-        // Determine upload directory
-        let uploadDir = getUploadDirectory()
+        // Upload via StorageService
+        let contentType = file.contentType?.description ?? "image/jpeg"
+        try await StorageService.upload(
+            data: file.data,
+            key: storageKey,
+            contentType: contentType,
+            app: req.application
+        )
 
-        // Create directory if it doesn't exist
-        let fileManager = FileManager.default
-        if !fileManager.fileExists(atPath: uploadDir) {
-            try fileManager.createDirectory(
-                atPath: uploadDir,
-                withIntermediateDirectories: true,
-                attributes: nil
-            )
-        }
-
-        // Save file to disk
-        let filePath = uploadDir + "/" + newFilename
-        try await req.fileio.writeFile(file.data, at: filePath)
-
-        // Generate URLs
-        let baseUrl = getBaseUrl(req: req)
-        let url = "\(baseUrl)/uploads/photos/\(newFilename)"
+        // Generate URLs using storage-aware base URL
+        let baseUrl = StorageService.publicBaseURL
+        let url = "\(baseUrl)/\(storageKey)"
         let thumbnailUrl = "\(baseUrl)/uploads/photos/thumb_\(newFilename)"
 
         req.logger.info("Photo uploaded: \(newFilename)")
@@ -119,24 +112,6 @@ struct UploadController: RouteCollection {
         )
     }
 
-    // MARK: - Helper Methods
-
-    private func getUploadDirectory() -> String {
-        if let uploadPath = Environment.get("UPLOAD_PATH") {
-            return uploadPath
-        }
-        return "./Public/uploads/photos"
-    }
-
-    private func getBaseUrl(req: Request) -> String {
-        if let baseUrl = Environment.get("BASE_URL") {
-            return baseUrl
-        }
-
-        let scheme = req.headers.first(name: "X-Forwarded-Proto") ?? "http"
-        let host = req.headers.first(name: "Host") ?? "localhost:8080"
-        return "\(scheme)://\(host)"
-    }
 }
 
 // MARK: - Request/Response DTOs
