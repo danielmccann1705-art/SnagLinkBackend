@@ -81,13 +81,21 @@ struct WebReportController: RouteCollection {
             return htmlResponse(WebReportRenderer.renderError(type: .notSynced))
         }
 
-        // Fetch synced photos for snags in this report (query by snagId so photos
-        // appear regardless of which magic link originally synced them)
+        // Fetch synced photos: prefer snag-based lookup, fall back to token-based
         let reportSnagIds = (report.snags ?? []).compactMap { $0.id }
-        let syncedPhotos = try await SyncedPhoto.query(on: req.db)
-            .filter(\.$snagId ~~ reportSnagIds)
-            .sort(\.$sortOrder)
-            .all()
+        let syncedPhotos: [SyncedPhoto]
+        if !reportSnagIds.isEmpty {
+            syncedPhotos = try await SyncedPhoto.query(on: req.db)
+                .filter(\.$snagId ~~ reportSnagIds)
+                .sort(\.$sortOrder)
+                .all()
+        } else {
+            // Fallback: snag IDs missing from report JSON, query by token
+            syncedPhotos = try await SyncedPhoto.query(on: req.db)
+                .filter(\.$magicLinkToken == token)
+                .sort(\.$sortOrder)
+                .all()
+        }
 
         let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.dev"
         let storageBaseURL = StorageService.publicBaseURL
@@ -120,12 +128,12 @@ struct WebReportController: RouteCollection {
         let projectAddress = report.resolvedProjectAddress
 
         let snagDataItems: [WebReportRenderer.SnagData] = (report.snags ?? []).enumerated().map { index, snag in
-            let snagId = snag.id ?? UUID()
             let snagIndex = index + 1
             let snagTitle = snag.title ?? "Untitled"
 
+            // Look up synced photos by snag ID; only attempt if snag has a real ID
             let photos: [WebReportRenderer.PhotoData]
-            if let rawPhotos = rawPhotosBySnagId[snagId] {
+            if let snagId = snag.id, let rawPhotos = rawPhotosBySnagId[snagId] {
                 photos = rawPhotos.map { raw in
                     WebReportRenderer.PhotoData(
                         url: raw.url,
@@ -134,10 +142,11 @@ struct WebReportController: RouteCollection {
                         snagTitle: snagTitle
                     )
                 }
-            } else if let embeddedPhotos = snag.photos {
-                photos = embeddedPhotos.map { p in
-                    WebReportRenderer.PhotoData(
-                        url: p.url ?? "",
+            } else if let embeddedPhotos = snag.photos, !embeddedPhotos.isEmpty {
+                photos = embeddedPhotos.compactMap { p in
+                    guard let url = p.url, !url.isEmpty else { return nil }
+                    return WebReportRenderer.PhotoData(
+                        url: url,
                         label: "before",
                         snagIndex: snagIndex,
                         snagTitle: snagTitle
@@ -254,13 +263,20 @@ struct WebReportController: RouteCollection {
             )
         }
 
-        // Fetch synced photos for snags in this report (query by snagId so photos
-        // appear regardless of which magic link originally synced them)
+        // Fetch synced photos: prefer snag-based lookup, fall back to token-based
         let reportSnagIds = (report.snags ?? []).compactMap { $0.id }
-        let syncedPhotos = try await SyncedPhoto.query(on: req.db)
-            .filter(\.$snagId ~~ reportSnagIds)
-            .sort(\.$sortOrder)
-            .all()
+        let syncedPhotos: [SyncedPhoto]
+        if !reportSnagIds.isEmpty {
+            syncedPhotos = try await SyncedPhoto.query(on: req.db)
+                .filter(\.$snagId ~~ reportSnagIds)
+                .sort(\.$sortOrder)
+                .all()
+        } else {
+            syncedPhotos = try await SyncedPhoto.query(on: req.db)
+                .filter(\.$magicLinkToken == token)
+                .sort(\.$sortOrder)
+                .all()
+        }
 
         guard !syncedPhotos.isEmpty else {
             throw Abort(.notFound, reason: "No photos found")

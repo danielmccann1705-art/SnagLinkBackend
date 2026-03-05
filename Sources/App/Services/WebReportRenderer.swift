@@ -258,7 +258,7 @@ struct WebReportRenderer {
             \(sharedStyles)
             \(reportStyles)
         </head>
-        <body>
+        <body style="background: #F9FAFB; color: #1F2937;">
             <div class="report">
                 \(renderReportHeader(data: data, completionPercent: completionPercent))
                 \(renderStatsBar(data: data))
