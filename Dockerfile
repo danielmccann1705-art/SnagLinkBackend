@@ -1,5 +1,5 @@
 # Build stage
-FROM swift:5.9-jammy as builder
+FROM swift:6.0-jammy as builder
 
 WORKDIR /app
 
@@ -12,17 +12,17 @@ RUN swift package resolve
 # Pre-build dependencies in a cached layer
 RUN mkdir -p Sources/App && \
     echo 'import Vapor; @main struct Placeholder { static func main() async throws { print("x") } }' > Sources/App/main.swift && \
-    (swift build -c release --product App -j 2 || true) && \
+    (swift build -c release --product App -j 1 || true) && \
     rm -rf Sources
 
 # Copy actual source code
 COPY Sources ./Sources
 
 # Build release binary
-RUN swift build -c release --product App -j 2
+RUN swift build -c release --product App -j 1
 
 # Runtime stage
-FROM swift:5.9-jammy-slim
+FROM swift:6.0-jammy-slim
 
 # Create non-root user
 RUN useradd --create-home --user-group vapor
