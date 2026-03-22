@@ -89,13 +89,29 @@ struct MagicLinkController: RouteCollection {
                 on: req.db
             )
 
-            // Return validation response with contractor/project info for demo
-            // In production, these would be fetched from the database
+            // Fetch contractor/project info from synced report data
+            var contractorName: String? = nil
+            var projectName: String? = nil
+            var projectAddress: String? = nil
+
+            if let syncedReport = try await SyncedReport.query(on: req.db)
+                .filter(\.$magicLinkToken == magicLink.token)
+                .first(),
+               let jsonData = syncedReport.reportJSON.data(using: .utf8) {
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .iso8601
+                if let report = try? decoder.decode(SyncedReportJSON.self, from: jsonData) {
+                    contractorName = report.resolvedContractorName
+                    projectName = report.resolvedProjectName
+                    projectAddress = report.resolvedProjectAddress
+                }
+            }
+
             return MagicLinkValidationResponse.valid(
                 magicLink: magicLink,
-                contractorName: "ABC Plumbing",
-                projectName: "Riverside Apartments",
-                projectAddress: "123 River Road, London SE1 2AB"
+                contractorName: contractorName,
+                projectName: projectName,
+                projectAddress: projectAddress
             )
         } catch let error as TokenValidationService.ValidationError {
             // Log failed validation
@@ -517,26 +533,38 @@ struct MagicLinkController: RouteCollection {
             on: req.db
         )
 
-        // Build snag data (same logic as getSnags)
-        let testSnagData: [(title: String, description: String?, status: String, priority: String, location: String?, dueDate: String?)] = [
-            ("Kitchen tap leaking", "Hot water tap in kitchen area is dripping constantly. Washer may need replacement.", "open", "high", "Unit 4B, Kitchen", ISO8601DateFormatter().string(from: Date().addingTimeInterval(-3 * 24 * 60 * 60))),
-            ("Shower seal incomplete", "Silicone sealant around shower tray is peeling away in corners.", "open", "critical", "Unit 2A, Bathroom", ISO8601DateFormatter().string(from: Date().addingTimeInterval(-1 * 24 * 60 * 60))),
-            ("Radiator not heating", "Bedroom radiator stays cold even when heating is on.", "in_progress", "medium", "Unit 3C, Master Bedroom", ISO8601DateFormatter().string(from: Date().addingTimeInterval(2 * 24 * 60 * 60))),
-            ("Socket cover plate missing", "Electrical socket in living room missing cover plate.", "open", "high", "Unit 1A, Living Room", ISO8601DateFormatter().string(from: Date().addingTimeInterval(1 * 24 * 60 * 60))),
-            ("Window latch broken", "Latch mechanism on bedroom window doesn't secure properly.", "open", "critical", "Unit 5D, Bedroom 2", ISO8601DateFormatter().string(from: Date().addingTimeInterval(5 * 24 * 60 * 60))),
-            ("Paint touch-up needed", "Scuff marks and minor damage to hallway walls.", "open", "low", "Unit 4B, Hallway", nil),
-            ("Door hinge squeaking", "Entrance door hinge making loud squeaking noise when opened.", "resolved", "low", "Unit 2A, Front Door", ISO8601DateFormatter().string(from: Date().addingTimeInterval(-5 * 24 * 60 * 60))),
-            ("Extractor fan noisy", "Bathroom extractor fan making rattling noise when running.", "open", "medium", "Unit 3C, En-suite", ISO8601DateFormatter().string(from: Date().addingTimeInterval(7 * 24 * 60 * 60)))
-        ]
+        // Fetch real snag data from synced report
+        guard let syncedReport = try await SyncedReport.query(on: req.db)
+            .filter(\.$magicLinkToken == magicLink.token)
+            .first(),
+            let jsonData = syncedReport.reportJSON.data(using: .utf8) else {
+            throw Abort(.notFound, reason: "Report data not yet synced. Please sync from the app first.")
+        }
 
-        let contractorName = "ABC Plumbing"
-        let projectName = "Riverside Apartments"
-        let projectAddress = "123 River Road, London SE1 2AB"
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let report: SyncedReportJSON
+        do {
+            report = try decoder.decode(SyncedReportJSON.self, from: jsonData)
+        } catch {
+            req.logger.error("Failed to parse synced report JSON for PDF: \(error)")
+            throw Abort(.internalServerError, reason: "Failed to parse report data")
+        }
 
-        // Build snag list for PDF
-        var snags: [(title: String, description: String?, status: String, priority: String, location: String?, dueDate: String?)] = []
-        for (index, data) in testSnagData.prefix(magicLink.snagIds.count).enumerated() {
-            snags.append(data)
+        let contractorName = report.resolvedContractorName ?? "Contractor"
+        let projectName = report.resolvedProjectName ?? "Project"
+        let projectAddress = report.resolvedProjectAddress ?? ""
+
+        // Build snag list for PDF from real data
+        let snags: [(title: String, description: String?, status: String, priority: String, location: String?, dueDate: String?)] = (report.snags ?? []).map { snag in
+            (
+                title: snag.title ?? "Untitled",
+                description: snag.description,
+                status: snag.status ?? "open",
+                priority: snag.priority ?? "medium",
+                location: snag.location,
+                dueDate: snag.dueDate
+            )
         }
 
         // Generate simple HTML-based PDF content

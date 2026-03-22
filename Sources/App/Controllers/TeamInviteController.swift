@@ -8,11 +8,14 @@ struct TeamInviteController: RouteCollection {
         // Routes with consistent parameter name ":inviteId"
         // Note: Using same param name at each route level is required by Vapor's TrieRouter
         teamInvites.get(":inviteId", "validate", use: validateToken)
-        teamInvites.post(use: create)
-        teamInvites.get("pending", use: listPending)
-        teamInvites.post(":inviteId", "accept", use: accept)
-        teamInvites.post(":inviteId", "decline", use: decline)
-        teamInvites.delete(":inviteId", use: revoke)
+
+        // Authenticated routes (JWT required)
+        let authenticated = teamInvites.grouped(JWTAuthMiddleware())
+        authenticated.post(use: create)
+        authenticated.get("pending", use: listPending)
+        authenticated.post(":inviteId", "accept", use: accept)
+        authenticated.post(":inviteId", "decline", use: decline)
+        authenticated.delete(":inviteId", use: revoke)
     }
 
     // MARK: - Public Endpoints
@@ -96,10 +99,14 @@ struct TeamInviteController: RouteCollection {
     /// GET /api/v1/team-invites/pending
     @Sendable
     func listPending(req: Request) async throws -> [TeamInviteResponse] {
-        // Note: In a real app, you'd get the user's email from the JWT or a user service
-        // For now, we'll accept an email query parameter
-        guard let email = req.query[String.self, at: "email"] else {
-            throw Abort(.badRequest, reason: "Email query parameter is required")
+        let userId = try req.requireAuthenticatedUserId()
+
+        guard let user = try await User.find(userId, on: req.db) else {
+            throw Abort(.notFound, reason: "User not found")
+        }
+
+        guard let email = user.email else {
+            throw Abort(.badRequest, reason: "No email associated with your account")
         }
 
         let invites = try await TeamInvite.query(on: req.db)

@@ -102,7 +102,7 @@ struct WebReportRenderer {
 
     // MARK: - PIN Form
 
-    static func renderPINForm(slug: String, error: String? = nil, attemptsRemaining: Int? = nil) -> String {
+    static func renderPINForm(slug: String, csrfToken: String, error: String? = nil, attemptsRemaining: Int? = nil) -> String {
         let errorHTML: String
         if let error = error {
             let attemptsText = attemptsRemaining.map { " (\($0) attempt\($0 == 1 ? "" : "s") remaining)" } ?? ""
@@ -171,6 +171,7 @@ struct WebReportRenderer {
                     <p class="pin-subtitle">Enter the PIN provided by the project manager to view this report.</p>
                     \(errorHTML)
                     <form method="POST" action="/m/\(slug.htmlEscaped)/verify">
+                        <input type="hidden" name="csrf_token" value="\(csrfToken.htmlEscaped)">
                         <input
                             type="text"
                             name="pin"

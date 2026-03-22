@@ -1,6 +1,7 @@
 import Vapor
 import Fluent
 import Foundation
+import Crypto
 
 struct WebReportController: RouteCollection {
 
@@ -45,7 +46,8 @@ struct WebReportController: RouteCollection {
         // PIN check: if PIN required and no valid cookie, show PIN form
         if magicLink.requiresPIN {
             guard isPINVerified(req: req, magicLink: magicLink) else {
-                return htmlResponse(WebReportRenderer.renderPINForm(slug: slug))
+                let csrfToken = generateCSRFToken(slug: slug)
+                return htmlResponse(WebReportRenderer.renderPINForm(slug: slug, csrfToken: csrfToken))
             }
         }
 
@@ -358,15 +360,29 @@ struct WebReportController: RouteCollection {
         // Decode PIN from form body
         struct PINForm: Content {
             let pin: String
+            let csrf_token: String?
         }
 
         let form: PINForm
         do {
             form = try req.content.decode(PINForm.self)
         } catch {
+            let csrfToken = generateCSRFToken(slug: slug)
             return htmlResponse(WebReportRenderer.renderPINForm(
                 slug: slug,
+                csrfToken: csrfToken,
                 error: "Please enter a PIN."
+            ))
+        }
+
+        // Verify CSRF token
+        guard let csrfToken = form.csrf_token,
+              verifyCSRFToken(csrfToken, slug: slug) else {
+            let newToken = generateCSRFToken(slug: slug)
+            return htmlResponse(WebReportRenderer.renderPINForm(
+                slug: slug,
+                csrfToken: newToken,
+                error: "Session expired. Please try again."
             ))
         }
 
@@ -386,8 +402,10 @@ struct WebReportController: RouteCollection {
                 return response
             } else {
                 let remaining = PINVerificationService.maxAttempts - magicLink.failedPinAttempts
+                let newToken = generateCSRFToken(slug: slug)
                 return htmlResponse(WebReportRenderer.renderPINForm(
                     slug: slug,
+                    csrfToken: newToken,
                     error: "Invalid PIN.",
                     attemptsRemaining: remaining > 0 ? remaining : nil
                 ))
@@ -397,8 +415,10 @@ struct WebReportController: RouteCollection {
                 return htmlResponse(WebReportRenderer.renderError(type: .locked))
             }
             let remaining = PINVerificationService.maxAttempts - magicLink.failedPinAttempts
+            let newToken = generateCSRFToken(slug: slug)
             return htmlResponse(WebReportRenderer.renderPINForm(
                 slug: slug,
+                csrfToken: newToken,
                 error: error.reason,
                 attemptsRemaining: remaining > 0 ? remaining : nil
             ))
@@ -446,6 +466,42 @@ struct WebReportController: RouteCollection {
             sameSite: .lax
         )
         response.cookies[Self.cookieName] = cookie
+    }
+
+    // MARK: - CSRF Token
+
+    private static let csrfTTL: TimeInterval = 15 * 60 // 15 minutes
+
+    /// Generates a signed CSRF token embedding the current timestamp.
+    private func generateCSRFToken(slug: String) -> String {
+        let timestamp = String(Int(Date().timeIntervalSince1970))
+        let secret = Environment.get("JWT_SECRET") ?? ""
+        let message = "csrf:\(timestamp):\(slug)"
+        let key = SymmetricKey(data: Data(secret.utf8))
+        let sig = HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: key)
+        let sigString = Data(sig).base64EncodedString()
+        return "\(timestamp):\(sigString)"
+    }
+
+    /// Verifies a CSRF token is valid and not expired.
+    private func verifyCSRFToken(_ token: String, slug: String) -> Bool {
+        let parts = token.split(separator: ":", maxSplits: 1)
+        guard parts.count == 2,
+              let timestamp = TimeInterval(parts[0]) else {
+            return false
+        }
+
+        // Check TTL
+        let age = Date().timeIntervalSince1970 - timestamp
+        guard age >= 0 && age < Self.csrfTTL else { return false }
+
+        // Verify signature
+        let secret = Environment.get("JWT_SECRET") ?? ""
+        let message = "csrf:\(parts[0]):\(slug)"
+        let key = SymmetricKey(data: Data(secret.utf8))
+        let expectedSig = HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: key)
+        let expectedString = Data(expectedSig).base64EncodedString()
+        return String(parts[1]) == expectedString
     }
 
     /// Computes HMAC-SHA256 using JWT_SECRET as the key.
