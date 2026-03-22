@@ -7,7 +7,7 @@ Snaglist is a SaaS platform for construction snag/punch list management. The bac
 - **Framework**: Vapor 4.89+ (Swift web framework)
 - **Database**: PostgreSQL with Fluent ORM
 - **Authentication**: JWT tokens
-- **Deployment**: Fly.io
+- **Deployment**: Hetzner VPS (Docker) + Cloudflare
 
 ## Key Directories
 - `Sources/App/Models/` - Fluent database models

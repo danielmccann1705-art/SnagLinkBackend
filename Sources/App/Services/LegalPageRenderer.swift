@@ -67,7 +67,7 @@ struct LegalPageRenderer {
 
                     <section>
                         <h2>4. Data Storage and Security</h2>
-                        <p>Your data is stored on secure servers hosted by Fly.io. We use industry-standard security measures including encrypted connections (TLS/SSL), secure authentication tokens, and access controls to protect your data.</p>
+                        <p>Your data is stored on secure servers hosted by Hetzner. We use industry-standard security measures including encrypted connections (TLS/SSL), secure authentication tokens, and access controls to protect your data.</p>
                         <p>While we take reasonable precautions, no method of electronic storage is 100% secure. We cannot guarantee absolute security of your data.</p>
                     </section>
 
@@ -78,7 +78,7 @@ struct LegalPageRenderer {
                             <li><strong>Apple Sign In</strong> — for secure authentication</li>
                             <li><strong>Apple App Store / RevenueCat</strong> — for subscription payment processing</li>
                             <li><strong>Apple Push Notification Service (APNs)</strong> — for push notifications</li>
-                            <li><strong>Fly.io</strong> — for server hosting and data storage</li>
+                            <li><strong>Hetzner / Cloudflare</strong> — for server hosting and data storage</li>
                         </ul>
                         <p>These services have their own privacy policies governing how they handle your data.</p>
                     </section>
