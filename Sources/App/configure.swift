@@ -35,6 +35,12 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateSyncedPhoto())
         app.migrations.add(CreateSyncedDrawing())
         app.migrations.add(CreateDeviceToken())
+        app.migrations.add(CreateProject())
+        app.migrations.add(CreateSnag())
+        app.migrations.add(CreateContractor())
+        app.migrations.add(CreateTrade())
+        app.migrations.add(CreateTeam())
+        app.migrations.add(AddForeignKeysAndIndexes())
 
         try await app.autoMigrate()
     } else {

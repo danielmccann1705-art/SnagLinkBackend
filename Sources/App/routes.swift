@@ -105,6 +105,12 @@ func routes(_ app: Application) throws {
     try app.register(collection: UploadController())
     try app.register(collection: AuthController())
     try app.register(collection: DeviceController())
+    try app.register(collection: ProjectController())
+    try app.register(collection: SnagController())
+    try app.register(collection: ContractorController())
+    try app.register(collection: TradeController())
+    try app.register(collection: TeamController())
+    try app.register(collection: UserProfileController())
 }
 
 // MARK: - Response Models
