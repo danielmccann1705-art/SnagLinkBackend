@@ -206,9 +206,12 @@ struct WebReportRenderer {
         let inProgressCount: Int
         let completedCount: Int
         let snags: [SnagData]
+        let token: String      // Full magic link token for API calls
+        let accessLevel: String // "view", "update", or "full"
     }
 
     struct SnagData {
+        let id: String?        // Snag UUID for API calls
         let index: Int
         let title: String
         let description: String?
@@ -225,6 +228,7 @@ struct WebReportRenderer {
 
     struct PhotoData {
         let url: String
+        let thumbnailUrl: String?
         let label: String
         let snagIndex: Int
         let snagTitle: String
@@ -233,6 +237,7 @@ struct WebReportRenderer {
     static func renderReport(data: ReportData) -> String {
         let totalCount = data.openCount + data.inProgressCount + data.completedCount
         let completionPercent = totalCount > 0 ? Int(Double(data.completedCount) / Double(totalCount) * 100) : 0
+        let canInteract = data.accessLevel != "view"
 
         // Collect all photos across snags for the lightbox
         let allPhotos = data.snags.flatMap(\.photos)
@@ -241,11 +246,12 @@ struct WebReportRenderer {
         var snagCards = ""
         var globalPhotoIndex = 0
         for snag in data.snags {
-            snagCards += renderSnagCard(snag, globalPhotoIndexStart: globalPhotoIndex)
+            snagCards += renderSnagCard(snag, globalPhotoIndexStart: globalPhotoIndex, canInteract: canInteract)
             globalPhotoIndex += snag.photos.count
         }
 
         let ogMeta = renderOGMeta(data: data, firstPhotoURL: allPhotos.first?.url)
+        let interactiveJS = canInteract ? renderInteractiveScript(data: data, totalCount: totalCount) : ""
 
         return """
         <!DOCTYPE html>
@@ -255,9 +261,10 @@ struct WebReportRenderer {
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>Snaglist Report - \(data.projectName.htmlEscaped)</title>
             \(ogMeta)
-            <meta name="apple-itunes-app" content="app-clip-bundle-id=com.snaglist.app.Clip, app-id=6758858102">
+            <meta name="apple-itunes-app" content="app-clip-bundle-id=com.snaglist.app.Clip, app-id=6758858102, app-argument=https://snaglist.dev/m/\(data.slug.htmlEscaped)">
             \(sharedStyles)
             \(reportStyles)
+            \(canInteract ? interactiveStyles : "")
         </head>
         <body style="background: #F9FAFB; color: #1F2937;">
             <div class="report">
@@ -270,6 +277,7 @@ struct WebReportRenderer {
                 \(renderFooter())
             </div>
             \(renderLightbox(allPhotos: allPhotos))
+            \(interactiveJS)
         </body>
         </html>
         """
@@ -298,7 +306,7 @@ struct WebReportRenderer {
             <div class="progress-bar-wrap">
                 <div class="progress-bar" style="width: \(completionPercent)%"></div>
             </div>
-            <p class="progress-label">\(completionPercent)% complete</p>
+            <p class="progress-label" id="progressLabel">\(data.completedCount) of \(data.openCount + data.inProgressCount + data.completedCount) snags completed &mdash; \(completionPercent)%</p>
         </header>
         """
     }
@@ -307,15 +315,15 @@ struct WebReportRenderer {
         return """
         <div class="stats-bar">
             <div class="stat stat-open">
-                <div class="stat-value">\(data.openCount)</div>
+                <div class="stat-value" id="statOpen">\(data.openCount)</div>
                 <div class="stat-label">Open</div>
             </div>
             <div class="stat stat-progress">
-                <div class="stat-value">\(data.inProgressCount)</div>
+                <div class="stat-value" id="statProgress">\(data.inProgressCount)</div>
                 <div class="stat-label">In Progress</div>
             </div>
             <div class="stat stat-complete">
-                <div class="stat-value">\(data.completedCount)</div>
+                <div class="stat-value" id="statComplete">\(data.completedCount)</div>
                 <div class="stat-label">Completed</div>
             </div>
         </div>
@@ -336,11 +344,13 @@ struct WebReportRenderer {
         """
     }
 
-    private static func renderSnagCard(_ snag: SnagData, globalPhotoIndexStart: Int) -> String {
+    private static func renderSnagCard(_ snag: SnagData, globalPhotoIndexStart: Int, canInteract: Bool = false) -> String {
         let statusColor = statusColorCSS(snag.status)
         let statusLabel = snag.status.replacingOccurrences(of: "_", with: " ").capitalized
         let priorityColor = priorityColorCSS(snag.priority)
         let priorityLabel = snag.priority.capitalized
+        let snagIdAttr = snag.id.map { " data-snag-id=\"\($0.htmlEscaped)\"" } ?? ""
+        let isActionable = snag.status == "open" || snag.status == "in_progress"
 
         var metaItems = ""
         if let location = snag.location, !location.isEmpty {
@@ -363,13 +373,60 @@ struct WebReportRenderer {
         let photosHTML = renderPhotoGallery(snag.photos, globalPhotoIndexStart: globalPhotoIndexStart)
         let floorPlanHTML = renderFloorPlanOverlay(url: snag.floorPlanURL, pinX: snag.pinX, pinY: snag.pinY)
 
+        // Action buttons for interactive mode
+        var actionsHTML = ""
+        if canInteract, let snagId = snag.id, isActionable {
+            if snag.status == "open" {
+                actionsHTML = """
+                <div class="snag-actions">
+                    <button class="action-btn action-start" onclick="snagAction('start','\(snagId.htmlEscaped)',this)">Start Work</button>
+                    <button class="action-btn action-complete" onclick="snagAction('complete','\(snagId.htmlEscaped)',this)">Mark Complete</button>
+                </div>
+                """
+            } else if snag.status == "in_progress" {
+                actionsHTML = """
+                <div class="snag-actions">
+                    <button class="action-btn action-complete" onclick="snagAction('complete','\(snagId.htmlEscaped)',this)">Mark Complete</button>
+                </div>
+                """
+            }
+        }
+
+        // Completion form (hidden by default, shown when "Mark Complete" is tapped)
+        var completionFormHTML = ""
+        if canInteract, let snagId = snag.id, isActionable {
+            completionFormHTML = """
+            <div class="completion-form" id="cf-\(snagId.htmlEscaped)" style="display:none">
+                <div class="cf-header">Submit Completion Evidence</div>
+                <input type="text" class="cf-input" id="cf-name-\(snagId.htmlEscaped)" placeholder="Your name" required>
+                <textarea class="cf-textarea" id="cf-notes-\(snagId.htmlEscaped)" placeholder="Notes (optional)" maxlength="500" rows="2"></textarea>
+                <div class="cf-photo-section">
+                    <label class="cf-photo-btn">
+                        <input type="file" accept="image/*" capture="environment" multiple onchange="previewPhotos(this,'\(snagId.htmlEscaped)')" style="display:none">
+                        &#128247; Add Photos
+                    </label>
+                    <div class="cf-previews" id="cf-prev-\(snagId.htmlEscaped)"></div>
+                </div>
+                <div class="cf-progress" id="cf-progress-\(snagId.htmlEscaped)" style="display:none">
+                    <div class="cf-progress-bar"><div class="cf-progress-fill" id="cf-fill-\(snagId.htmlEscaped)"></div></div>
+                    <span class="cf-progress-text" id="cf-ptext-\(snagId.htmlEscaped)">Uploading...</span>
+                </div>
+                <div class="cf-buttons">
+                    <button class="action-btn action-complete" id="cf-submit-\(snagId.htmlEscaped)" onclick="submitCompletion('\(snagId.htmlEscaped)')">Submit</button>
+                    <button class="action-btn action-cancel" onclick="hideForm('\(snagId.htmlEscaped)')">Cancel</button>
+                </div>
+                <div class="cf-error" id="cf-error-\(snagId.htmlEscaped)" style="display:none"></div>
+            </div>
+            """
+        }
+
         return """
-        <div class="snag-card">
+        <div class="snag-card"\(snagIdAttr) data-status="\(snag.status.htmlEscaped)">
             <div class="snag-header">
                 <span class="snag-number">#\(snag.index)</span>
                 <h3 class="snag-title">\(snag.title.htmlEscaped)</h3>
                 <div class="snag-badges">
-                    <span class="badge" style="background:\(statusColor)18;color:\(statusColor)">\(statusLabel.htmlEscaped)</span>
+                    <span class="badge status-badge" style="background:\(statusColor)18;color:\(statusColor)">\(statusLabel.htmlEscaped)</span>
                     <span class="badge" style="background:\(priorityColor)18;color:\(priorityColor)">\(priorityLabel.htmlEscaped)</span>
                 </div>
             </div>
@@ -377,6 +434,8 @@ struct WebReportRenderer {
             \(metaHTML)
             \(photosHTML)
             \(floorPlanHTML)
+            \(actionsHTML)
+            \(completionFormHTML)
         </div>
         """
     }
@@ -390,7 +449,7 @@ struct WebReportRenderer {
             let displayLabel = photo.label.capitalized
             items += """
             <div class="photo-item" onclick="openLightbox(\(globalIdx))">
-                <img src="\(photo.url.htmlEscaped)" alt="Snag photo" loading="lazy">
+                <img src="\((photo.thumbnailUrl ?? photo.url).htmlEscaped)" alt="Snag photo" loading="lazy">
                 <span class="photo-label">\(displayLabel.htmlEscaped)</span>
                 <a href="\(photo.url.htmlEscaped)" download class="photo-download" onclick="event.stopPropagation()" title="Download photo">
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -670,7 +729,7 @@ struct WebReportRenderer {
             }
             .stat-value { font-size: 28px; font-weight: 800; }
             .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
-            .stat-open .stat-value { color: #6B7280; }
+            .stat-open .stat-value { color: #DC2626; }
             .stat-open .stat-label { color: #9CA3AF; }
             .stat-progress .stat-value { color: #CA8A04; }
             .stat-progress .stat-label { color: #CA8A04; }
@@ -862,11 +921,373 @@ struct WebReportRenderer {
 
             /* Print */
             @media print {
-                .download-all-wrap, .photo-download, .lb-overlay, .footer-cta { display: none !important; }
+                .download-all-wrap, .photo-download, .lb-overlay, .footer-cta, .snag-actions, .completion-form { display: none !important; }
                 .report { max-width: 100%; padding: 0; }
                 .snag-card { break-inside: avoid; }
             }
         </style>
+        """
+    }
+
+    // MARK: - Interactive Styles (only included when accessLevel != "view")
+
+    private static var interactiveStyles: String {
+        return """
+        <style>
+            .snag-actions { display: flex; gap: 8px; margin-top: 12px; }
+            .action-btn {
+                padding: 10px 20px; border: none; border-radius: 10px; font-size: 14px;
+                font-weight: 600; cursor: pointer; font-family: inherit; transition: opacity 0.15s;
+            }
+            .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+            .action-start { background: #DBEAFE; color: #2563EB; }
+            .action-start:hover:not(:disabled) { background: #BFDBFE; }
+            .action-complete { background: #F97316; color: #fff; }
+            .action-complete:hover:not(:disabled) { background: #EA580C; }
+            .action-cancel { background: #F3F4F6; color: #6B7280; }
+            .action-cancel:hover:not(:disabled) { background: #E5E7EB; }
+
+            .completion-form {
+                margin-top: 12px; padding: 16px; background: #F9FAFB;
+                border: 1px solid #E5E7EB; border-radius: 12px;
+            }
+            .cf-header { font-size: 14px; font-weight: 700; color: #374151; margin-bottom: 12px; }
+            .cf-input, .cf-textarea {
+                width: 100%; padding: 10px 12px; border: 1px solid #D1D5DB; border-radius: 8px;
+                font-size: 14px; font-family: inherit; margin-bottom: 8px;
+                -webkit-appearance: none; appearance: none;
+            }
+            .cf-input:focus, .cf-textarea:focus { border-color: #F97316; outline: none; box-shadow: 0 0 0 2px rgba(249,115,22,0.15); }
+            .cf-photo-section { margin-bottom: 10px; }
+            .cf-photo-btn {
+                display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px;
+                background: #fff; border: 1px solid #D1D5DB; border-radius: 8px;
+                font-size: 13px; color: #374151; cursor: pointer;
+            }
+            .cf-photo-btn:hover { border-color: #F97316; }
+            .cf-previews { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+            .cf-previews img { width: 60px; height: 60px; object-fit: cover; border-radius: 6px; }
+            .cf-progress { margin-bottom: 10px; }
+            .cf-progress-bar { height: 4px; background: #E5E7EB; border-radius: 2px; overflow: hidden; }
+            .cf-progress-fill { height: 100%; background: #F97316; width: 0%; transition: width 0.2s; }
+            .cf-progress-text { font-size: 12px; color: #6B7280; }
+            .cf-buttons { display: flex; gap: 8px; }
+            .cf-error { color: #DC2626; font-size: 13px; margin-top: 8px; padding: 8px 12px; background: #FEE2E2; border-radius: 6px; }
+
+            .snag-card.completed { opacity: 0.7; }
+            .snag-success { margin-top: 10px; padding: 10px 14px; background: #DCFCE7; color: #166534; border-radius: 8px; font-size: 13px; font-weight: 600; }
+        </style>
+        """
+    }
+
+    // MARK: - Interactive JavaScript
+
+    private static func renderInteractiveScript(data: ReportData, totalCount: Int) -> String {
+        let escapedToken = data.token
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "</", with: "<\\/")  // Prevent </script> injection
+        let escapedBaseURL = data.baseURL
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "</", with: "<\\/")
+
+        return """
+        <script>
+        (function(){
+            var TOKEN='\(escapedToken)';
+            var BASE='\(escapedBaseURL)';
+
+            // --- Status update (Start Work) ---
+            window.snagAction=function(action,snagId,btn){
+                if(action==='complete'){
+                    showForm(snagId);
+                    return;
+                }
+                // "start" action
+                btn.disabled=true;
+                btn.textContent='Starting...';
+                fetch(BASE+'/api/v1/magic-links/'+TOKEN+'/snags/'+snagId+'/status',{
+                    method:'PATCH',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({status:'in_progress'})
+                }).then(function(r){return r.json()}).then(function(d){
+                    if(d.success){
+                        updateCardStatus(snagId,'in_progress');
+                        updateStats();
+                    } else {
+                        btn.disabled=false;
+                        btn.textContent='Start Work';
+                        showError(snagId,d.reason||d.message||'Failed to update');
+                    }
+                }).catch(function(){
+                    btn.disabled=false;
+                    btn.textContent='Start Work';
+                    showError(snagId,'Network error. Please try again.');
+                });
+            };
+
+            // --- Show/hide completion form ---
+            function showForm(snagId){
+                var el=document.getElementById('cf-'+snagId);
+                if(el) el.style.display='block';
+                var card=el?el.closest('.snag-card'):null;
+                var actions=card?card.querySelector('.snag-actions'):null;
+                if(actions) actions.style.display='none';
+            }
+            window.hideForm=function(snagId){
+                var el=document.getElementById('cf-'+snagId);
+                if(el) el.style.display='none';
+                var card=el?el.closest('.snag-card'):null;
+                var actions=card?card.querySelector('.snag-actions'):null;
+                if(actions) actions.style.display='flex';
+                hideError(snagId);
+            };
+
+            // --- Photo preview ---
+            window.previewPhotos=function(input,snagId){
+                var container=document.getElementById('cf-prev-'+snagId);
+                container.innerHTML='';
+                Array.from(input.files).forEach(function(f){
+                    var img=document.createElement('img');
+                    img.src=URL.createObjectURL(f);
+                    container.appendChild(img);
+                });
+            };
+
+            // --- Client-side image compression ---
+            // Handles JPEG/PNG via canvas. HEIC (unsupported in non-Safari browsers) falls back to raw upload.
+            function compressImage(file,maxBytes){
+                return new Promise(function(resolve){
+                    // If file is already under limit, skip compression
+                    if(file.size<=maxBytes){resolve(file);return;}
+                    var reader=new FileReader();
+                    reader.onload=function(e){
+                        var img=new Image();
+                        img.onload=function(){
+                            var canvas=document.createElement('canvas');
+                            var w=img.width,h=img.height,max=2048;
+                            if(w>max||h>max){var r=Math.min(max/w,max/h);w=Math.round(w*r);h=Math.round(h*r);}
+                            canvas.width=w;canvas.height=h;
+                            canvas.getContext('2d').drawImage(img,0,0,w,h);
+                            var q=0.85;
+                            (function tryQ(){
+                                canvas.toBlob(function(b){
+                                    if(!b){resolve(file);return;} // toBlob failed, send original
+                                    if(b.size<=maxBytes||q<=0.3){resolve(b);}
+                                    else{q-=0.1;tryQ();}
+                                },'image/jpeg',q);
+                            })();
+                        };
+                        // HEIC and unsupported formats: onerror fires, upload original
+                        img.onerror=function(){resolve(file);};
+                        img.src=e.target.result;
+                    };
+                    reader.onerror=function(){resolve(file);};
+                    reader.readAsDataURL(file);
+                });
+            }
+
+            // --- Upload with retry ---
+            function uploadPhoto(blob,snagId,idx,total){
+                var maxRetries=3,delays=[1000,2000,4000],attempt=0;
+                return new Promise(function(resolve,reject){
+                    function tryUp(){
+                        attempt++;
+                        var fd=new FormData();
+                        fd.append('file',blob,'photo.jpg');
+                        var xhr=new XMLHttpRequest();
+                        xhr.open('POST',BASE+'/api/v1/uploads/photo?token='+TOKEN);
+                        xhr.upload.onprogress=function(e){
+                            if(e.lengthComputable){
+                                var pct=Math.round(((idx/total)+(e.loaded/e.total/total))*100);
+                                var fill=document.getElementById('cf-fill-'+snagId);
+                                var txt=document.getElementById('cf-ptext-'+snagId);
+                                if(fill)fill.style.width=pct+'%';
+                                if(txt)txt.textContent='Uploading photo '+(idx+1)+' of '+total+'...';
+                            }
+                        };
+                        xhr.onload=function(){
+                            if(xhr.status>=200&&xhr.status<300){
+                                try{resolve(JSON.parse(xhr.responseText).url);}
+                                catch(e){resolve('');}
+                            } else if(attempt<maxRetries){
+                                setTimeout(tryUp,delays[attempt-1]);
+                            } else {
+                                reject(new Error('Upload failed after '+maxRetries+' attempts'));
+                            }
+                        };
+                        xhr.onerror=function(){
+                            if(attempt<maxRetries){setTimeout(tryUp,delays[attempt-1]);}
+                            else{reject(new Error('Network error'));}
+                        };
+                        xhr.send(fd);
+                    }
+                    tryUp();
+                });
+            }
+
+            // --- Submit completion ---
+            window.submitCompletion=async function(snagId){
+                var name=document.getElementById('cf-name-'+snagId).value.trim();
+                if(!name){showError(snagId,'Please enter your name.');return;}
+                var notes=document.getElementById('cf-notes-'+snagId).value.trim();
+                var submitBtn=document.getElementById('cf-submit-'+snagId);
+                submitBtn.disabled=true;
+                submitBtn.textContent='Submitting...';
+                hideError(snagId);
+
+                // Upload photos first
+                var photoUrls=[];
+                var fileInput=document.querySelector('#cf-'+snagId+' input[type=file]');
+                if(fileInput&&fileInput.files.length>0){
+                    var prog=document.getElementById('cf-progress-'+snagId);
+                    if(prog)prog.style.display='block';
+                    try{
+                        var files=Array.from(fileInput.files);
+                        for(var i=0;i<files.length;i++){
+                            var compressed=await compressImage(files[i],2*1024*1024);
+                            var url=await uploadPhoto(compressed,snagId,i,files.length);
+                            if(url)photoUrls.push(url);
+                        }
+                    }catch(err){
+                        submitBtn.disabled=false;
+                        submitBtn.textContent='Submit';
+                        showError(snagId,'Photo upload failed: '+err.message);
+                        return;
+                    }
+                }
+
+                // Submit completion
+                try{
+                    var resp=await fetch(BASE+'/api/v1/magic-links/'+TOKEN+'/snags/'+snagId+'/complete',{
+                        method:'POST',
+                        headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify({
+                            contractorName:name,
+                            notes:notes||null,
+                            photoUrls:photoUrls.length>0?photoUrls:null
+                        })
+                    });
+                    var result=await resp.json();
+                    if(result.success||resp.ok){
+                        updateCardStatus(snagId,'completed');
+                        hideForm(snagId);
+                        updateStats();
+                        // Show success message
+                        var card=document.querySelector('[data-snag-id="'+snagId+'"]');
+                        if(card){
+                            var msg=document.createElement('div');
+                            msg.className='snag-success';
+                            msg.textContent='\\u2705 Submitted for review';
+                            card.appendChild(msg);
+                        }
+                        checkAllComplete();
+                    } else {
+                        submitBtn.disabled=false;
+                        submitBtn.textContent='Submit';
+                        showError(snagId,result.reason||result.message||'Submission failed');
+                    }
+                }catch(err){
+                    submitBtn.disabled=false;
+                    submitBtn.textContent='Submit';
+                    showError(snagId,'Network error. Please try again.');
+                }
+            };
+
+            // --- DOM helpers ---
+            function updateCardStatus(snagId,newStatus){
+                var card=document.querySelector('[data-snag-id="'+snagId+'"]');
+                if(!card)return;
+                card.setAttribute('data-status',newStatus);
+                // Update status badge
+                var badge=card.querySelector('.status-badge');
+                if(badge){
+                    var colors={open:'#DC2626',in_progress:'#CA8A04',completed:'#16A34A',closed:'#16A34A',resolved:'#16A34A'};
+                    var labels={open:'Open',in_progress:'In Progress',completed:'Completed',closed:'Closed',resolved:'Resolved'};
+                    var c=colors[newStatus]||'#6B7280';
+                    badge.style.background=c+'18';
+                    badge.style.color=c;
+                    badge.textContent=labels[newStatus]||newStatus.replace(/_/g,' ');
+                }
+                // Update action buttons
+                var actions=card.querySelector('.snag-actions');
+                if(newStatus==='in_progress'&&actions){
+                    var b=document.createElement('button');
+                    b.className='action-btn action-complete';
+                    b.textContent='Mark Complete';
+                    b.onclick=function(){snagAction('complete',snagId,b);};
+                    actions.innerHTML='';
+                    actions.appendChild(b);
+                } else if(newStatus==='completed'||newStatus==='closed'){
+                    if(actions)actions.style.display='none';
+                    card.classList.add('completed');
+                }
+            }
+
+            function updateStats(){
+                var cards=document.querySelectorAll('.snag-card');
+                var o=0,p=0,c=0;
+                cards.forEach(function(card){
+                    var s=card.getAttribute('data-status');
+                    if(s==='open')o++;
+                    else if(s==='in_progress')p++;
+                    else c++;
+                });
+                var total=cards.length;
+                var pct=total>0?Math.round(c/total*100):0;
+                var bar=document.querySelector('.progress-bar');
+                if(bar)bar.style.width=pct+'%';
+                var label=document.getElementById('progressLabel');
+                if(label)label.textContent=c+' of '+total+' snags completed \\u2014 '+pct+'%';
+                var so=document.getElementById('statOpen');if(so)so.textContent=o;
+                var sp=document.getElementById('statProgress');if(sp)sp.textContent=p;
+                var sc=document.getElementById('statComplete');if(sc)sc.textContent=c;
+            }
+
+            function checkAllComplete(){
+                var cards=document.querySelectorAll('.snag-card');
+                var allDone=true;
+                cards.forEach(function(card){
+                    var s=card.getAttribute('data-status');
+                    if(s==='open'||s==='in_progress')allDone=false;
+                });
+                if(allDone&&cards.length>0){
+                    showCelebration(cards.length);
+                }
+            }
+
+            function showCelebration(count){
+                if(document.getElementById('snaglist-celebration'))return; // prevent duplicate
+                var overlay=document.createElement('div');
+                overlay.id='snaglist-celebration';
+                overlay.style.cssText='position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;padding:24px';
+                var card=document.createElement('div');
+                card.style.cssText='background:#fff;border-radius:20px;padding:40px 32px;text-align:center;max-width:400px;width:100%';
+                card.innerHTML='<div style="font-size:48px;margin-bottom:12px">&#127881;</div>'
+                    +'<h2 style="font-size:22px;font-weight:800;color:#111827;margin-bottom:8px">All snags completed!</h2>'
+                    +'<p style="color:#6B7280;font-size:15px;margin-bottom:20px">'+count+' snags submitted for review</p>'
+                    +'<a href="https://apps.apple.com/app/id6758858102?ct=magic_link_complete" style="display:inline-block;background:#F97316;color:#fff;text-decoration:none;padding:14px 28px;border-radius:12px;font-size:15px;font-weight:600;margin-bottom:12px">Get Snaglist</a><br>';
+                var dismissBtn=document.createElement('button');
+                dismissBtn.textContent='Dismiss';
+                dismissBtn.style.cssText='background:none;border:none;color:#9CA3AF;font-size:14px;cursor:pointer;padding:8px;font-family:inherit';
+                dismissBtn.onclick=function(){overlay.remove();};
+                card.appendChild(dismissBtn);
+                overlay.appendChild(card);
+                overlay.addEventListener('click',function(e){if(e.target===overlay)overlay.remove();});
+                document.body.appendChild(overlay);
+            }
+
+            function showError(snagId,msg){
+                var el=document.getElementById('cf-error-'+snagId);
+                if(el){el.textContent=msg;el.style.display='block';}
+            }
+            function hideError(snagId){
+                var el=document.getElementById('cf-error-'+snagId);
+                if(el)el.style.display='none';
+            }
+        })();
+        </script>
         """
     }
 }

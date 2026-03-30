@@ -10,6 +10,7 @@ struct CompletionController: RouteCollection {
         // Public routes (magic link authenticated)
         let magicLinks = completions.grouped("magic-links")
         magicLinks.post(":linkId", "snags", ":snagId", "complete", use: submitCompletion)
+        magicLinks.patch(":linkId", "snags", ":snagId", "status", use: updateSnagStatus)
 
         // Authenticated routes
         let authenticated = completions.grouped(JWTAuthMiddleware())
@@ -197,19 +198,31 @@ struct CompletionController: RouteCollection {
             return PendingCompletionsResponse(completions: [], totalCount: 0)
         }
 
+        let page = (try? req.query.get(Int.self, at: "page")) ?? 1
+        let perPage = min((try? req.query.get(Int.self, at: "perPage")) ?? 50, 100)
+        let offset = (page - 1) * perPage
+
+        // Get total count for pagination
+        let totalCount = try await Completion.query(on: req.db)
+            .filter(\.$magicLinkId ~~ magicLinkIds)
+            .filter(\.$status == .pending)
+            .count()
+
         // Get pending completions for these magic links
         let completions = try await Completion.query(on: req.db)
             .filter(\.$magicLinkId ~~ magicLinkIds)
             .filter(\.$status == .pending)
             .with(\.$photos)
             .sort(\.$submittedAt, .descending)
+            .offset(offset)
+            .limit(perPage)
             .all()
 
         let summaries = completions.map { PendingCompletionSummary(from: $0) }
 
         return PendingCompletionsResponse(
             completions: summaries,
-            totalCount: summaries.count
+            totalCount: totalCount
         )
     }
 
@@ -390,4 +403,149 @@ struct CompletionController: RouteCollection {
 
         return SnagCompletionsResponse(completions: entries)
     }
+
+    // MARK: - Update Snag Status (Magic Link)
+
+    /// PATCH /api/v1/magic-links/:linkId/snags/:snagId/status
+    /// Allows a contractor to change a snag's status via magic link (e.g. open → in_progress)
+    @Sendable
+    func updateSnagStatus(req: Request) async throws -> StatusUpdateResponse {
+        guard let token = req.parameters.get("linkId"),
+              let snagIdString = req.parameters.get("snagId"),
+              let snagId = UUID(uuidString: snagIdString) else {
+            throw Abort(.badRequest, reason: "Invalid token or snag ID")
+        }
+
+        // Validate magic link
+        let magicLink = try await TokenValidationService.validateMagicLink(token: token, on: req.db)
+
+        // Verify snag ID is in the magic link's allowed snags
+        guard magicLink.snagIds.contains(snagId) else {
+            throw Abort(.forbidden, reason: "This magic link does not have access to this snag")
+        }
+
+        // Verify magic link has update or full access
+        guard magicLink.accessLevel != AccessLevel.view.rawValue else {
+            throw Abort(.forbidden, reason: "This magic link does not allow status updates")
+        }
+
+        // Decode request
+        struct StatusRequest: Content {
+            let status: String
+        }
+        let request = try req.content.decode(StatusRequest.self)
+
+        let allowedStatuses = ["in_progress", "complete", "closed"]
+        guard allowedStatuses.contains(request.status) else {
+            throw Abort(.badRequest, reason: "Status must be one of: \(allowedStatuses.joined(separator: ", "))")
+        }
+
+        // Validate transition and update status in synced report JSON (single query)
+        let allowedTransitions: [String: Set<String>] = [
+            "open": ["in_progress", "complete", "closed"],
+            "in_progress": ["complete", "closed"],
+        ]
+
+        // Fetch synced report — required for both validation and update
+        guard let report = try await SyncedReport.query(on: req.db)
+            .filter(\.$magicLinkToken == magicLink.token)
+            .first(),
+              let jsonData = report.reportJSON.data(using: .utf8) else {
+            throw Abort(.notFound, reason: "Report data not found for this magic link")
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard var reportJSON = try? decoder.decode(SyncedReportMutable.self, from: jsonData),
+              let idx = reportJSON.snags?.firstIndex(where: { $0.id == snagId }) else {
+            throw Abort(.notFound, reason: "Snag not found in report data")
+        }
+
+        // Validate forward-only transition
+        let currentStatus = reportJSON.snags?[idx].status ?? "open"
+        let validNextStatuses = allowedTransitions[currentStatus] ?? []
+        guard validNextStatuses.contains(request.status) else {
+            throw Abort(.conflict, reason: "Cannot change status from '\(currentStatus)' to '\(request.status)'")
+        }
+
+        // Apply update to synced report JSON
+        reportJSON.snags?[idx].status = request.status
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let updatedData = try? encoder.encode(reportJSON),
+           let updatedString = String(data: updatedData, encoding: .utf8) {
+            report.reportJSON = updatedString
+            try await report.save(on: req.db)
+        }
+
+        // Also update the Snag record in the snags table if it exists
+        if let snag = try await Snag.find(snagId, on: req.db) {
+            snag.status = request.status
+            if request.status == "closed" || request.status == "complete" {
+                snag.closedAt = Date()
+            }
+            try await snag.save(on: req.db)
+        }
+
+        // Record access
+        try await TokenValidationService.recordAccess(
+            magicLink: magicLink,
+            request: req,
+            pinVerified: false,
+            on: req.db
+        )
+
+        return StatusUpdateResponse(success: true, snagId: snagId, newStatus: request.status)
+    }
+}
+
+// MARK: - Status Update DTOs
+
+struct StatusUpdateResponse: Content {
+    let success: Bool
+    let snagId: UUID
+    let newStatus: String
+}
+
+/// Mutable version of SyncedReportJSON for updating snag statuses in-place
+struct SyncedReportMutable: Codable {
+    let project: SyncedReportMutableProject?
+    let projectName: String?
+    let projectAddress: String?
+    let contractorName: String?
+    let createdByName: String?
+    var snags: [SyncedReportMutableSnag]?
+}
+
+struct SyncedReportMutableProject: Codable {
+    let name: String?
+    let address: String?
+    let clientName: String?
+}
+
+struct SyncedReportMutableSnag: Codable {
+    let id: UUID?
+    let title: String?
+    let reference: String?
+    let description: String?
+    var status: String?
+    let priority: String?
+    let location: String?
+    let floorPlanName: String?
+    let floorPlanId: UUID?
+    let floorPlanImageURL: String?
+    let pinX: Double?
+    let pinY: Double?
+    let dueDate: String?
+    let assignedTo: String?
+    let contractorName: String?
+    let createdAt: String?
+    let createdByName: String?
+    let photos: [SyncedReportMutablePhoto]?
+}
+
+struct SyncedReportMutablePhoto: Codable {
+    let id: UUID?
+    let url: String?
+    let thumbnailUrl: String?
 }

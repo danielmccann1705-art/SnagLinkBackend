@@ -105,12 +105,14 @@ struct WebReportController: RouteCollection {
         // Build raw photos by snag ID — URLs point to StorageService backend
         struct RawPhoto {
             let url: String
+            let thumbnailUrl: String?
             let label: String
         }
         var rawPhotosBySnagId: [UUID: [RawPhoto]] = [:]
         for photo in syncedPhotos {
+            let thumbnailUrl: String? = photo.thumbnailFilePath.map { "\(storageBaseURL)\($0)" }
             rawPhotosBySnagId[photo.snagId, default: []].append(
-                RawPhoto(url: "\(storageBaseURL)\(photo.filePath)", label: photo.label)
+                RawPhoto(url: "\(storageBaseURL)\(photo.filePath)", thumbnailUrl: thumbnailUrl, label: photo.label)
             )
         }
 
@@ -139,6 +141,7 @@ struct WebReportController: RouteCollection {
                 photos = rawPhotos.map { raw in
                     WebReportRenderer.PhotoData(
                         url: raw.url,
+                        thumbnailUrl: raw.thumbnailUrl,
                         label: raw.label,
                         snagIndex: snagIndex,
                         snagTitle: snagTitle
@@ -149,6 +152,7 @@ struct WebReportController: RouteCollection {
                     guard let url = p.url, !url.isEmpty else { return nil }
                     return WebReportRenderer.PhotoData(
                         url: url,
+                        thumbnailUrl: nil,
                         label: "before",
                         snagIndex: snagIndex,
                         snagTitle: snagTitle
@@ -167,6 +171,7 @@ struct WebReportController: RouteCollection {
             }
 
             return WebReportRenderer.SnagData(
+                id: snag.id?.uuidString,
                 index: snagIndex,
                 title: snagTitle,
                 description: snag.description,
@@ -186,7 +191,7 @@ struct WebReportController: RouteCollection {
         let openCount = snagDataItems.filter { $0.status == "open" }.count
         let inProgressCount = snagDataItems.filter { $0.status == "in_progress" }.count
         let completedCount = snagDataItems.filter {
-            $0.status == "resolved" || $0.status == "verified" || $0.status == "closed"
+            $0.status == "resolved" || $0.status == "verified" || $0.status == "closed" || $0.status == "completed"
         }.count
 
         let dateFormatter = DateFormatter()
@@ -203,7 +208,9 @@ struct WebReportController: RouteCollection {
             openCount: openCount,
             inProgressCount: inProgressCount,
             completedCount: completedCount,
-            snags: snagDataItems
+            snags: snagDataItems,
+            token: magicLink.token,
+            accessLevel: magicLink.accessLevel
         )
 
         return htmlResponse(WebReportRenderer.renderReport(data: reportData))
