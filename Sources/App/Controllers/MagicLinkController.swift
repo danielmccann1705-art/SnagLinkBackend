@@ -292,9 +292,15 @@ struct MagicLinkController: RouteCollection {
     func list(req: Request) async throws -> [MagicLinkResponse] {
         let userId = try req.requireAuthenticatedUserId()
 
+        let page = (try? req.query.get(Int.self, at: "page")) ?? 1
+        let perPage = min((try? req.query.get(Int.self, at: "perPage")) ?? 50, 100)
+        let offset = (page - 1) * perPage
+
         let magicLinks = try await MagicLink.query(on: req.db)
             .filter(\.$createdById == userId)
             .sort(\.$createdAt, .descending)
+            .offset(offset)
+            .limit(perPage)
             .all()
 
         return magicLinks.map { MagicLinkResponse(from: $0, includeToken: false) }
@@ -910,6 +916,19 @@ struct MagicLinkController: RouteCollection {
             app: req.application
         )
 
+        // Generate thumbnail
+        var imageBuffer = upload.image.data
+        let imageRawData = imageBuffer.readData(length: imageBuffer.readableBytes) ?? Data()
+        let thumbFilename = "thumb_\(filename)"
+        let thumbStorageKey = "uploads/synced-photos/\(thumbFilename)"
+        let thumbGenerated = await ThumbnailService.generateAndUpload(
+            originalData: imageRawData,
+            thumbnailKey: thumbStorageKey,
+            app: req.application,
+            logger: req.logger
+        )
+        let thumbnailFilePath = thumbGenerated ? "/uploads/synced-photos/\(thumbFilename)" : nil
+
         // Upsert photo record
         if let existing = try await SyncedPhoto.query(on: req.db)
             .filter(\.$id == metadata.id)
@@ -918,6 +937,7 @@ struct MagicLinkController: RouteCollection {
             existing.label = metadata.label
             existing.sortOrder = metadata.sortOrder
             existing.magicLinkToken = magicLink.token
+            existing.thumbnailFilePath = thumbnailFilePath
             try await existing.save(on: req.db)
         } else {
             let syncedPhoto = SyncedPhoto(
@@ -926,7 +946,8 @@ struct MagicLinkController: RouteCollection {
                 snagId: metadata.snagId,
                 label: metadata.label,
                 filePath: "/uploads/synced-photos/\(filename)",
-                sortOrder: metadata.sortOrder
+                sortOrder: metadata.sortOrder,
+                thumbnailFilePath: thumbnailFilePath
             )
             try await syncedPhoto.save(on: req.db)
         }

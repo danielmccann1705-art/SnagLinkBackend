@@ -24,6 +24,8 @@ RUN swift build -c release --product App -j 1
 # Runtime stage
 FROM swift:6.0-jammy-slim
 
+RUN apt-get update && apt-get install -y --no-install-recommends imagemagick && rm -rf /var/lib/apt/lists/*
+
 # Create non-root user
 RUN useradd --create-home --user-group vapor
 

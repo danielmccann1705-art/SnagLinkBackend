@@ -100,9 +100,21 @@ struct UploadController: RouteCollection {
         // Generate URLs using storage-aware base URL
         let baseUrl = StorageService.publicBaseURL
         let url = "\(baseUrl)/\(storageKey)"
-        let thumbnailUrl = "\(baseUrl)/uploads/photos/thumb_\(newFilename)"
 
-        req.logger.info("Photo uploaded: \(newFilename)")
+        // Generate real thumbnail (300px wide)
+        let thumbnailKey = "uploads/photos/thumb_\(newFilename)"
+        var imageBytes = file.data
+        let rawData = imageBytes.readData(length: imageBytes.readableBytes) ?? Data()
+
+        let thumbnailGenerated = await ThumbnailService.generateAndUpload(
+            originalData: rawData,
+            thumbnailKey: thumbnailKey,
+            app: req.application,
+            logger: req.logger
+        )
+        let thumbnailUrl = thumbnailGenerated ? "\(baseUrl)/\(thumbnailKey)" : url
+
+        req.logger.info("Photo uploaded: \(newFilename), thumbnail: \(thumbnailGenerated ? "yes" : "fallback to original")")
 
         return UploadPhotoResponse(
             url: url,

@@ -21,6 +21,9 @@ final class SyncedPhoto: Model, Content, @unchecked Sendable {
     @Field(key: "file_path")
     var filePath: String
 
+    @OptionalField(key: "thumbnail_file_path")
+    var thumbnailFilePath: String?
+
     @Field(key: "sort_order")
     var sortOrder: Int
 
@@ -29,12 +32,13 @@ final class SyncedPhoto: Model, Content, @unchecked Sendable {
 
     init() {}
 
-    init(id: UUID? = nil, magicLinkToken: String, snagId: UUID, label: String, filePath: String, sortOrder: Int) {
+    init(id: UUID? = nil, magicLinkToken: String, snagId: UUID, label: String, filePath: String, sortOrder: Int, thumbnailFilePath: String? = nil) {
         self.id = id
         self.magicLinkToken = magicLinkToken
         self.snagId = snagId
         self.label = label
         self.filePath = filePath
         self.sortOrder = sortOrder
+        self.thumbnailFilePath = thumbnailFilePath
     }
 }

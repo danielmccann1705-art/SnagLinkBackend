@@ -41,6 +41,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateTrade())
         app.migrations.add(CreateTeam())
         app.migrations.add(AddForeignKeysAndIndexes())
+        app.migrations.add(AddThumbnailToSyncedPhoto())
 
         try await app.autoMigrate()
     } else {
@@ -86,6 +87,9 @@ public func configure(_ app: Application) async throws {
 
     // MARK: - Routes
     try routes(app)
+
+    // MARK: - Scheduled Tasks
+    CleanupService.scheduleCleanup(app: app)
 
     app.logger.info("Snaglist Backend configured successfully")
 }
