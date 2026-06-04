@@ -1,0 +1,88 @@
+name: Deploy to Staging
+
+# Builds a :staging image and deploys it to the staging stack on the Hetzner VPS.
+# Triggered by pushes to the `staging` branch, or manually via the Actions tab.
+# Isolated from the production pipeline (build-and-push + deploy.yml on `main`).
+
+on:
+  push:
+    branches: [staging]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build and push :staging image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}:staging
+            ${{ env.REGISTRY }}/${{ github.repository }}:staging-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to staging VPS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    concurrency: deploy-staging-group
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: snaglist
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script_stop: false
+          script: |
+            set -e
+            cd /home/snaglist/staging
+
+            # Pull latest staging image and restart the staging app service.
+            docker compose -f docker-compose.staging.yml pull app
+            docker compose -f docker-compose.staging.yml up -d
+
+            # Health check gate on the staging port: 3 attempts, 5s apart.
+            HEALTHY=false
+            for i in 1 2 3; do
+              sleep 5
+              if curl -sf http://localhost:8081/health > /dev/null 2>&1; then
+                echo "Staging health check passed on attempt $i"
+                HEALTHY=true
+                break
+              fi
+              echo "Staging health check attempt $i failed, retrying..."
+            done
+
+            if [ "$HEALTHY" = true ]; then
+              docker image prune -f
+              echo "Staging deploy successful"
+              exit 0
+            fi
+
+            echo "STAGING HEALTH CHECK FAILED"
+            docker compose -f docker-compose.staging.yml logs --tail=50 app || true
+            exit 1

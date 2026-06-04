@@ -236,6 +236,68 @@ struct NotificationService {
         )
     }
 
+    /// Sends a passwordless ("magic link") sign-in email to a Project Manager (B1).
+    /// No-ops (logs and returns) when `RESEND_API_KEY` is unconfigured, matching the
+    /// other senders — keeps staging/dev functional without transactional-email creds.
+    /// - Parameters:
+    ///   - email: Recipient email address.
+    ///   - name: Optional display name for the greeting.
+    ///   - magicLinkURL: The full `https://snaglist.dev/auth/{token}` sign-in URL.
+    ///   - client: HTTP client for making requests.
+    static func sendMagicSignInEmail(
+        to email: String,
+        name: String?,
+        magicLinkURL: String,
+        client: Client
+    ) async throws {
+        guard let apiKey = resendAPIKey else {
+            logger.info("RESEND_API_KEY not configured, skipping magic sign-in email")
+            return
+        }
+
+        let subject = "Sign in to Snaglist — one-tap link"
+        let greetingName = (name?.isEmpty == false) ? name! : "there"
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+                <h1 style="color: white; margin: 0; font-size: 24px;">Snaglist</h1>
+            </div>
+
+            <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 12px 12px;">
+                <p style="font-size: 18px; margin-top: 0;">Hi \(greetingName),</p>
+
+                <p>Tap the button below to sign in to Snaglist. No password needed.</p>
+
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="\(magicLinkURL)" style="display: inline-block; background: #f97316; color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px;">Sign in to Snaglist</a>
+                </div>
+
+                <p style="color: #6b7280; font-size: 14px;">This link expires in 15 minutes and can only be used once.</p>
+
+                <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
+
+                <p style="color: #9ca3af; font-size: 12px; margin-bottom: 0;">If you didn't request this, you can safely ignore this email — no one can sign in without the link above.</p>
+            </div>
+        </body>
+        </html>
+        """
+
+        try await sendEmail(
+            to: email,
+            subject: subject,
+            html: html,
+            apiKey: apiKey,
+            client: client
+        )
+    }
+
     // MARK: - Private Methods
 
     private static func sendEmail(

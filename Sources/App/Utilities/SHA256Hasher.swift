@@ -24,4 +24,14 @@ struct SHA256Hasher {
         let computedHash = hash(pin: pin, salt: salt)
         return ConstantTimeComparison.compare(computedHash, storedHash)
     }
+
+    /// Hashes an opaque token (e.g. a magic-link auth token) for at-rest storage.
+    /// Unsalted: the token is high-entropy (32 random bytes) so a salt adds nothing,
+    /// and an unsalted digest is required for direct lookup by hash.
+    /// - Parameter token: The raw URL-safe token.
+    /// - Returns: Hex-encoded SHA256 digest.
+    static func hash(token: String) -> String {
+        let hashed = SHA256.hash(data: Data(token.utf8))
+        return hashed.compactMap { String(format: "%02x", $0) }.joined()
+    }
 }

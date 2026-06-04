@@ -21,6 +21,10 @@ func routes(_ app: Application) throws {
 
         Authentication:
         - POST /api/v1/auth/apple - Sign in with Apple
+        - POST /api/v1/auth/magic-link/request - Send a passwordless sign-in email (PM)
+        - POST /api/v1/auth/magic-link/verify - Exchange a magic-link token for a JWT
+        - GET /api/v1/auth/recognise?email= - Check if an email maps to a known account
+        - GET /auth/:token - Magic-link universal-link landing/fallback page (web)
 
         Magic Links:
         - GET /api/v1/magic-links/:linkId/validate - Validate a magic link token
@@ -83,6 +87,23 @@ func routes(_ app: Application) throws {
             status: .ok,
             headers: ["Content-Type": "application/json"],
             body: .init(string: json)
+        )
+    }
+
+    // MARK: - Magic-link universal-link fallback (B1)
+    // The OS opens the Snaglist app directly when this universal link is tapped on a device
+    // with the app installed + AASA configured. This route is only hit as a fallback (app not
+    // installed, or link opened in a browser). The server NEVER verifies the token here — the
+    // iOS app verifies via POST /api/v1/auth/magic-link/verify.
+    app.get("auth", ":token") { req -> Response in
+        let token = req.parameters.get("token") ?? ""
+        let userAgent = IPAddressExtractor.extractUserAgent(from: req) ?? ""
+        let isIOS = userAgent.contains("iPhone") || userAgent.contains("iPad") || userAgent.contains("iPod")
+        let html = MagicLinkLandingRenderer.render(token: token, isIOS: isIOS)
+        return Response(
+            status: .ok,
+            headers: ["Content-Type": "text/html; charset=utf-8"],
+            body: .init(string: html)
         )
     }
 

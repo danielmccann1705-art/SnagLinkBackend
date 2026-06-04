@@ -7,7 +7,9 @@ struct UpdateUserProfileRequest: Content {
 
 struct UserProfileResponse: Content {
     let id: UUID
-    let appleUserId: String
+    /// Nil for magic-link accounts.
+    let appleUserId: String?
+    let authProvider: String
     let email: String?
     let name: String?
     let createdAt: Date?
@@ -16,6 +18,7 @@ struct UserProfileResponse: Content {
     init(from user: User) {
         self.id = user.id!
         self.appleUserId = user.appleUserId
+        self.authProvider = user.authProvider
         self.email = user.email
         self.name = user.name
         self.createdAt = user.createdAt

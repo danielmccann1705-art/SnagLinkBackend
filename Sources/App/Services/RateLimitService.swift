@@ -5,12 +5,18 @@ enum RateLimitAction: String {
     case tokenLookup = "token_lookup"
     case pinAttempt = "pin_attempt"
     case apiCall = "api_call"
+    /// Magic-link sign-in email requests, keyed per email. 3 per hour (B1).
+    case magicLinkRequest = "magic_link_request"
+    /// Email recognition lookups, keyed per IP. 10 per minute — prevents enumeration (B1).
+    case emailRecognise = "email_recognise"
 
     var limit: Int {
         switch self {
         case .tokenLookup: return 20
         case .pinAttempt: return 5
         case .apiCall: return 100
+        case .magicLinkRequest: return 3
+        case .emailRecognise: return 10
         }
     }
 
@@ -19,6 +25,8 @@ enum RateLimitAction: String {
         case .tokenLookup: return 60      // 1 minute
         case .pinAttempt: return 300      // 5 minutes
         case .apiCall: return 60          // 1 minute
+        case .magicLinkRequest: return 3600  // 1 hour
+        case .emailRecognise: return 60      // 1 minute
         }
     }
 }

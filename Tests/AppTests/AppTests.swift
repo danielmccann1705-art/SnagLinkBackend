@@ -6,6 +6,9 @@ final class AppTests: XCTestCase {
     var app: Application!
 
     override func setUp() async throws {
+        // configure() requires JWT_SECRET (fatalError otherwise) and gracefully disables DB
+        // features when DATABASE_URL is unset — set a test secret so the suite boots locally.
+        if Environment.get("JWT_SECRET") == nil { setenv("JWT_SECRET", "test-secret-key", 1) }
         app = try await Application.make(.testing)
         try await configure(app)
     }

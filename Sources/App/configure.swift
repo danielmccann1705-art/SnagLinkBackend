@@ -42,6 +42,9 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateTeam())
         app.migrations.add(AddForeignKeysAndIndexes())
         app.migrations.add(AddThumbnailToSyncedPhoto())
+        // B1: Magic-link Project Manager authentication.
+        app.migrations.add(AddAuthProviderToUsers())
+        app.migrations.add(CreateMagicLinkAuthTokens())
 
         try await app.autoMigrate()
     } else {
