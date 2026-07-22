@@ -55,6 +55,7 @@ struct MagicLinkController: RouteCollection {
         let authenticated = magicLinks.grouped(JWTAuthMiddleware())
         authenticated.post(use: create)
         authenticated.post("preview", use: createPreview)  // B2
+        authenticated.post(":linkId", "send", use: sendLink)  // B4
         authenticated.get(use: list)
         authenticated.delete(":linkId", use: revoke)
         authenticated.get(":linkId", "analytics", use: getAnalytics)
@@ -333,6 +334,59 @@ struct MagicLinkController: RouteCollection {
             previewToken: token,
             previewURL: "\(base)/preview/\(token)"
         )
+    }
+
+    /// Records a magic-link send and enforces the tier allowance (B4).
+    /// POST /api/v1/magic-links/:linkId/send
+    /// - First-ever send is the exempt onboarding link: flips `onboardingLinkConsumed`, uncounted.
+    /// - Free tier: 5 counted sends/month, else 403 (paywall).
+    /// - Pro tier: unlimited.
+    /// Returns the updated usage snapshot. Actual delivery (SMS/email) is handled by the client;
+    /// this endpoint is the counting + enforcement gate.
+    @Sendable
+    func sendLink(req: Request) async throws -> UsageResponse {
+        let userId = try req.requireAuthenticatedUserId()
+        guard let idString = req.parameters.get("linkId"), let id = UUID(uuidString: idString) else {
+            throw Abort(.badRequest, reason: "Invalid magic link ID")
+        }
+        guard let magicLink = try await MagicLink.find(id, on: req.db) else {
+            throw Abort(.notFound, reason: "Magic link not found")
+        }
+        guard magicLink.createdById == userId else {
+            throw Abort(.forbidden, reason: "You do not have permission to send this magic link")
+        }
+        guard !magicLink.previewMode else {
+            throw Abort(.badRequest, reason: "Preview links cannot be sent")
+        }
+        guard let user = try await User.find(userId, on: req.db) else {
+            throw Abort(.notFound, reason: "User not found")
+        }
+
+        // First-ever send is the free onboarding link: exempt + uncounted.
+        if !user.onboardingLinkConsumed {
+            user.onboardingLinkConsumed = true
+            try await user.save(on: req.db)
+            return try await UsageService.buildUsage(user: user, on: req.db)
+        }
+
+        // Free tier: enforce the monthly cap.
+        let tier = SubscriptionTier(rawValue: user.subscriptionTier) ?? .free
+        if tier == .free {
+            let count = try await UsageService.currentMonthSendCount(userId: userId, on: req.db)
+            guard count < UsageService.freeMonthlyLimit else {
+                throw Abort(
+                    .forbidden,
+                    headers: ["X-Snaglist-Error": "paywall_required"],
+                    reason: "You've used all \(UsageService.freeMonthlyLimit) free links this month. Upgrade to Pro for unlimited."
+                )
+            }
+        }
+
+        // Record the counted send (both free and pro, for history).
+        let send = MagicLinkSend(userId: userId, magicLinkId: id)
+        try await send.save(on: req.db)
+
+        return try await UsageService.buildUsage(user: user, on: req.db)
     }
 
     /// Lists magic links created by the authenticated user

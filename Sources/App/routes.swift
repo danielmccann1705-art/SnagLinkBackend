@@ -37,6 +37,8 @@ func routes(_ app: Application) throws {
         - GET /api/v1/magic-links/:linkId/analytics - Get magic link analytics (auth required)
         - GET /api/v1/magic-links/:linkId/pdf - Download PDF report of snags
         - GET /api/v1/magic-links/:linkId/qr - Generate QR code image (PNG)
+        - POST /api/v1/magic-links/:linkId/send - Record a send + enforce tier allowance (auth required)
+        - GET /api/v1/users/me/usage - Magic-link allowance / tier counters (auth required)
         - POST /api/v1/magic-links/sync - Sync magic link from iOS app (auth required)
         - POST /api/v1/magic-links/:linkId/report - Sync report data (auth required)
         - POST /api/v1/magic-links/:linkId/photos - Upload synced photo (auth required)

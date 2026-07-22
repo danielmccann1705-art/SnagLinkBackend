@@ -27,6 +27,16 @@ final class User: Model, Content, @unchecked Sendable {
     @Field(key: "auth_provider")
     var authProvider: String
 
+    /// Subscription tier ("free" / "pro"), updated by the client after a RevenueCat
+    /// purchase/restore. Drives the server-side magic-link allowance (B4).
+    @Field(key: "subscription_tier")
+    var subscriptionTier: String
+
+    /// Flips true on the user's first magic-link send and never resets. That first
+    /// (onboarding) send is exempt from the monthly counter (B4).
+    @Field(key: "onboarding_link_consumed")
+    var onboardingLinkConsumed: Bool
+
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
 
@@ -42,6 +52,8 @@ final class User: Model, Content, @unchecked Sendable {
         self.email = email
         self.name = name
         self.authProvider = AuthProvider.apple.rawValue
+        self.subscriptionTier = SubscriptionTier.free.rawValue
+        self.onboardingLinkConsumed = false
     }
 
     /// Generic initializer supporting any auth provider (e.g. magic-link accounts).
@@ -57,5 +69,13 @@ final class User: Model, Content, @unchecked Sendable {
         self.email = email
         self.name = name
         self.authProvider = authProvider.rawValue
+        self.subscriptionTier = SubscriptionTier.free.rawValue
+        self.onboardingLinkConsumed = false
     }
+}
+
+/// Subscription tier for magic-link allowance (B4).
+enum SubscriptionTier: String, Codable {
+    case free
+    case pro
 }

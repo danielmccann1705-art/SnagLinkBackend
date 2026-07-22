@@ -49,6 +49,9 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(AddPreviewModeToMagicLinks())
         // B5: approvals workflow.
         app.migrations.add(CreateSnagSendBacks())
+        // B4: tier counter + onboarding link tracking.
+        app.migrations.add(AddOnboardingLinkConsumedToUsers())
+        app.migrations.add(CreateMagicLinkSends())
 
         try await app.autoMigrate()
     } else {
