@@ -79,7 +79,7 @@ struct SnagController: RouteCollection {
             reference: createReq.reference,
             title: createReq.title,
             snagDescription: createReq.description,
-            status: createReq.status ?? "open",
+            status: SnagStatus.normalize(createReq.status ?? "open"),
             priority: createReq.priority ?? "medium",
             location: createReq.location,
             dueDate: createReq.dueDate,
@@ -120,7 +120,7 @@ struct SnagController: RouteCollection {
                 reference: createReq.reference,
                 title: createReq.title,
                 snagDescription: createReq.description,
-                status: createReq.status ?? "open",
+                status: SnagStatus.normalize(createReq.status ?? "open"),
                 priority: createReq.priority ?? "medium",
                 location: createReq.location,
                 dueDate: createReq.dueDate,
@@ -162,7 +162,7 @@ struct SnagController: RouteCollection {
         if let reference = updateReq.reference { snag.reference = reference }
         if let title = updateReq.title { snag.title = title }
         if let description = updateReq.description { snag.snagDescription = description }
-        if let status = updateReq.status { snag.status = status }
+        if let status = updateReq.status { snag.status = SnagStatus.normalize(status) }
         if let priority = updateReq.priority { snag.priority = priority }
         if let location = updateReq.location { snag.location = location }
         if let dueDate = updateReq.dueDate { snag.dueDate = dueDate }
