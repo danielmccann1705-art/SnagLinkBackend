@@ -47,6 +47,8 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateMagicLinkAuthTokens())
         // B2: preview magic links.
         app.migrations.add(AddPreviewModeToMagicLinks())
+        // B5: approvals workflow.
+        app.migrations.add(CreateSnagSendBacks())
 
         try await app.autoMigrate()
     } else {

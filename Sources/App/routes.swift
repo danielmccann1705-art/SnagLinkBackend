@@ -50,6 +50,11 @@ func routes(_ app: Application) throws {
         - POST /api/v1/team-invites/:inviteId/decline - Decline a team invite (auth required)
         - DELETE /api/v1/team-invites/:inviteId - Revoke a team invite (auth required)
 
+        Approvals:
+        - GET /api/v1/approvals/pending - List snags awaiting approval (auth required)
+        - POST /api/v1/approvals/:snagId/approve - Approve a submitted snag (auth required)
+        - POST /api/v1/approvals/:snagId/send-back - Send a snag back with a reason (auth required)
+
         Completions:
         - POST /api/v1/magic-links/:linkId/snags/:snagId/complete - Submit completion (magic link)
         - GET /api/v1/completions/pending - List pending completions (auth required)
@@ -134,6 +139,7 @@ func routes(_ app: Application) throws {
     try app.register(collection: TradeController())
     try app.register(collection: TeamController())
     try app.register(collection: UserProfileController())
+    try app.register(collection: ApprovalController())
 }
 
 // MARK: - Response Models

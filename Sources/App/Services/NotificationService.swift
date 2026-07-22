@@ -298,6 +298,64 @@ struct NotificationService {
         )
     }
 
+    /// Notifies a contractor of a PM's approval decision (B5). No-ops without `RESEND_API_KEY`.
+    /// - Parameters:
+    ///   - email: Contractor email.
+    ///   - contractorName: Contractor display name.
+    ///   - snagTitle: The snag that was decided.
+    ///   - approved: true = approved, false = sent back.
+    ///   - note: Optional PM note (shown for send-backs).
+    ///   - client: HTTP client.
+    static func sendApprovalDecisionEmail(
+        to email: String,
+        contractorName: String,
+        snagTitle: String,
+        approved: Bool,
+        note: String?,
+        client: Client
+    ) async throws {
+        guard let apiKey = resendAPIKey else {
+            logger.info("RESEND_API_KEY not configured, skipping approval decision email")
+            return
+        }
+
+        let subject = approved
+            ? "Approved: \(snagTitle)"
+            : "Sent back: \(snagTitle)"
+        let headline = approved ? "Work approved" : "Changes needed"
+        let accent = approved ? "#168A45" : "#D63B1F"
+        let bodyLine = approved
+            ? "Your work on <strong>\(snagTitle.htmlEscaped)</strong> has been approved. Nothing more to do — thanks!"
+            : "Your submission for <strong>\(snagTitle.htmlEscaped)</strong> was sent back. Please review and re-submit."
+        let noteBlock = (note?.isEmpty == false) ? """
+            <div style="background: #f9fafb; border-radius: 8px; padding: 15px; margin: 15px 0;">
+                <p style="font-weight: 600; color: #6b7280; margin: 0 0 5px 0; font-size: 12px; text-transform: uppercase;">Note</p>
+                <p style="color: #1f2937; margin: 0;">\(note!.htmlEscaped)</p>
+            </div>
+            """ : ""
+
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="background: \(accent); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
+                <h1 style="color: white; margin: 0; font-size: 24px;">\(headline)</h1>
+            </div>
+            <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 12px 12px;">
+                <p style="font-size: 18px; margin-top: 0;">Hi \(contractorName.htmlEscaped),</p>
+                <p>\(bodyLine)</p>
+                \(noteBlock)
+                <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
+                <p style="color: #9ca3af; font-size: 12px; margin-bottom: 0;">This notification was sent by Snaglist.</p>
+            </div>
+        </body>
+        </html>
+        """
+
+        try await sendEmail(to: email, subject: subject, html: html, apiKey: apiKey, client: client)
+    }
+
     // MARK: - Private Methods
 
     private static func sendEmail(
