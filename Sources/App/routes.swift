@@ -27,6 +27,8 @@ func routes(_ app: Application) throws {
         - GET /auth/:token - Magic-link universal-link landing/fallback page (web)
 
         Magic Links:
+        - POST /api/v1/magic-links/preview - Create an unsent preview link (auth required)
+        - GET /preview/:token - View an unsent preview link (submissions disabled)
         - GET /api/v1/magic-links/:linkId/validate - Validate a magic link token
         - POST /api/v1/magic-links/:linkId/verify-pin - Verify PIN for magic link
         - POST /api/v1/magic-links - Create a new magic link (auth required)

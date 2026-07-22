@@ -96,6 +96,25 @@ struct CreateMagicLinkRequest: Content {
     }
 }
 
+/// B2: request to create an unsent preview link (what the contractor will see).
+struct PreviewMagicLinkRequest: Content {
+    let projectId: UUID
+    let snagIds: [UUID]
+    let contractorName: String?
+    let contractorId: UUID?
+
+    func validate() throws {
+        guard !snagIds.isEmpty else {
+            throw Abort(.badRequest, reason: "At least one snag ID is required to preview a link")
+        }
+    }
+}
+
+struct PreviewMagicLinkResponse: Content {
+    let previewToken: String
+    let previewURL: String
+}
+
 struct VerifyPINRequest: Content {
     let pin: String
 

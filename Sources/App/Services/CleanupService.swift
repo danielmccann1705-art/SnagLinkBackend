@@ -8,27 +8,10 @@ struct CleanupService {
     static func scheduleCleanup(app: Application) {
         app.lifecycle.use(CleanupLifecycleHandler())
     }
-}
 
-private struct CleanupLifecycleHandler: LifecycleHandler {
-    func didBoot(_ app: Application) throws {
-        app.logger.info("Scheduling periodic cleanup task (every 6 hours)")
-
-        Task {
-            while !Task.isCancelled {
-                // Wait 6 hours between cleanups
-                try? await Task.sleep(nanoseconds: 6 * 60 * 60 * 1_000_000_000)
-
-                do {
-                    try await performCleanup(app: app)
-                } catch {
-                    app.logger.error("Cleanup task failed: \(error)")
-                }
-            }
-        }
-    }
-
-    private func performCleanup(app: Application) async throws {
+    /// Runs one full cleanup pass. Exposed (vs. buried in the lifecycle handler) so it can be
+    /// invoked directly from tests.
+    static func runCleanup(app: Application) async throws {
         let db = app.db
 
         // Clean up expired rate limit entries
@@ -47,6 +30,40 @@ private struct CleanupLifecycleHandler: LifecycleHandler {
             .filter(\.$createdAt < tokenCutoff)
             .delete()
 
-        app.logger.info("Cleanup completed: removed expired rate limits, old audit logs, and stale magic-link auth tokens")
+        // B2: purge expired preview links + their staging data (synced report/photos/drawings).
+        let expiredPreviews = try await MagicLink.query(on: db)
+            .filter(\.$previewMode == true)
+            .filter(\.$previewExpiresAt < Date())
+            .all()
+        if !expiredPreviews.isEmpty {
+            let tokens = expiredPreviews.map { $0.token }
+            let ids = expiredPreviews.compactMap { $0.id }
+            try await SyncedReport.query(on: db).filter(\.$magicLinkToken ~~ tokens).delete()
+            try await SyncedPhoto.query(on: db).filter(\.$magicLinkToken ~~ tokens).delete()
+            try await SyncedDrawing.query(on: db).filter(\.$magicLinkToken ~~ tokens).delete()
+            try await MagicLink.query(on: db).filter(\.$id ~~ ids).delete()
+            app.logger.info("Cleanup: removed \(expiredPreviews.count) expired preview link(s) + staging data")
+        }
+
+        app.logger.info("Cleanup completed: removed expired rate limits, old audit logs, stale magic-link auth tokens, and expired preview links")
+    }
+}
+
+private struct CleanupLifecycleHandler: LifecycleHandler {
+    func didBoot(_ app: Application) throws {
+        app.logger.info("Scheduling periodic cleanup task (every 6 hours)")
+
+        Task {
+            while !Task.isCancelled {
+                // Wait 6 hours between cleanups
+                try? await Task.sleep(nanoseconds: 6 * 60 * 60 * 1_000_000_000)
+
+                do {
+                    try await CleanupService.runCleanup(app: app)
+                } catch {
+                    app.logger.error("Cleanup task failed: \(error)")
+                }
+            }
+        }
     }
 }

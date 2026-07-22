@@ -43,6 +43,11 @@ struct CompletionController: RouteCollection {
         // Validate magic link
         let magicLink = try await TokenValidationService.validateMagicLink(token: token, on: req.db)
 
+        // B2: preview links are read-only — never write contractor-side data.
+        guard !magicLink.previewMode else {
+            throw Abort(.forbidden, reason: "This is a preview link — submissions are disabled.")
+        }
+
         // Verify snag ID is in the magic link's allowed snags
         guard magicLink.snagIds.contains(snagId) else {
             throw Abort(.forbidden, reason: "This magic link does not have access to this snag")
@@ -418,6 +423,11 @@ struct CompletionController: RouteCollection {
 
         // Validate magic link
         let magicLink = try await TokenValidationService.validateMagicLink(token: token, on: req.db)
+
+        // B2: preview links are read-only — never write contractor-side data.
+        guard !magicLink.previewMode else {
+            throw Abort(.forbidden, reason: "This is a preview link — status updates are disabled.")
+        }
 
         // Verify snag ID is in the magic link's allowed snags
         guard magicLink.snagIds.contains(snagId) else {

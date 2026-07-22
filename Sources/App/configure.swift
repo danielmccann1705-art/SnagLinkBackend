@@ -45,6 +45,8 @@ public func configure(_ app: Application) async throws {
         // B1: Magic-link Project Manager authentication.
         app.migrations.add(AddAuthProviderToUsers())
         app.migrations.add(CreateMagicLinkAuthTokens())
+        // B2: preview magic links.
+        app.migrations.add(AddPreviewModeToMagicLinks())
 
         try await app.autoMigrate()
     } else {

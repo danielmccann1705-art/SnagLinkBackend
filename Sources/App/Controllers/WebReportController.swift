@@ -11,6 +11,9 @@ struct WebReportController: RouteCollection {
         m.post(":slug", "verify", use: verifyPIN)
         m.get(":slug", "photos.zip", use: downloadPhotosZip)
 
+        // B2: preview link viewer (unsent link, submissions disabled)
+        routes.get("preview", ":token", use: renderPreview)
+
         // Debug route (JWT-protected)
         let debug = routes.grouped("api", "v1", "debug")
             .grouped(JWTAuthMiddleware())
@@ -59,6 +62,48 @@ struct WebReportController: RouteCollection {
             on: req.db
         )
 
+        return try await renderMagicLinkReport(magicLink: magicLink, slug: slug, req: req, preview: false)
+    }
+
+    // MARK: - GET /preview/:token  (B2)
+
+    /// Renders the contractor web viewer for an *unsent preview* link, with a preview banner and
+    /// submissions disabled client-side. PIN is bypassed and no access is recorded — this is the
+    /// PM previewing their own draft. Server-side, CompletionController rejects any write to a
+    /// preview link, so the disabling is defense-in-depth.
+    @Sendable
+    func renderPreview(req: Request) async throws -> Response {
+        guard let token = req.parameters.get("token") else {
+            return htmlResponse(WebReportRenderer.renderError(type: .notFound))
+        }
+
+        let magicLink: MagicLink
+        do {
+            magicLink = try await TokenValidationService.validateMagicLink(token: token, on: req.db)
+        } catch let error as TokenValidationService.ValidationError {
+            let errorType: WebReportRenderer.ErrorType
+            switch error {
+            case .notFound: errorType = .notFound
+            case .expired: errorType = .expired
+            case .revoked: errorType = .revoked
+            case .locked: errorType = .locked
+            }
+            return htmlResponse(WebReportRenderer.renderError(type: errorType))
+        }
+
+        // Only genuine, unexpired preview links are viewable here.
+        guard magicLink.previewMode, !magicLink.isPreviewExpired else {
+            return htmlResponse(WebReportRenderer.renderError(type: .notFound))
+        }
+
+        return try await renderMagicLinkReport(magicLink: magicLink, slug: token, req: req, preview: true)
+    }
+
+    // MARK: - Shared report rendering
+
+    /// Builds and renders the contractor report view for a magic link. When `preview` is true,
+    /// a preview banner + submission-blocking script are injected into the rendered HTML.
+    private func renderMagicLinkReport(magicLink: MagicLink, slug: String, req: Request, preview: Bool) async throws -> Response {
         // Fetch synced report
         let token = magicLink.token
         guard let syncedReport = try await SyncedReport.query(on: req.db)
@@ -213,7 +258,50 @@ struct WebReportController: RouteCollection {
             accessLevel: magicLink.accessLevel
         )
 
-        return htmlResponse(WebReportRenderer.renderReport(data: reportData))
+        let html = WebReportRenderer.renderReport(data: reportData)
+        return htmlResponse(preview ? Self.injectPreviewOverlay(into: html) : html)
+    }
+
+    /// Injects a fixed "PREVIEW" banner and a submission-blocking script into rendered report
+    /// HTML. Markup-agnostic: only anchors on the single `</body>` in the report document, so it
+    /// stays decoupled from the report renderer's internals. The banner + fetch/submit blocking
+    /// are UX only — the authoritative guard is server-side in CompletionController.
+    static func injectPreviewOverlay(into html: String) -> String {
+        let overlay = """
+        <div id="__snaglist_preview_banner">PREVIEW — this is what your contractor will see. Submissions are disabled.</div>
+        <style>
+            #__snaglist_preview_banner{position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#168AAD;color:#fff;text-align:center;padding:10px 14px;font:600 13px/1.3 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;letter-spacing:0.02em;box-shadow:0 2px 6px rgba(0,0,0,0.15);}
+            body{padding-top:42px !important;}
+        </style>
+        <script>
+        (function(){
+            var msg = "This is a preview — the contractor's submission is disabled here.";
+            // Block any submission network calls (complete / status) in preview mode.
+            if (window.fetch) {
+                var origFetch = window.fetch;
+                window.fetch = function(input, init){
+                    var url = (typeof input === 'string') ? input : (input && input.url) || '';
+                    var method = ((init && init.method) || (typeof input === 'object' && input && input.method) || 'GET').toUpperCase();
+                    if ((method === 'POST' || method === 'PATCH') && /\\/snags\\/[^/]+\\/(complete|status)/.test(url)) {
+                        alert(msg);
+                        return Promise.reject(new Error('preview mode: submissions disabled'));
+                    }
+                    return origFetch.apply(this, arguments);
+                };
+            }
+            // Neutralize any form submissions.
+            document.addEventListener('submit', function(e){
+                e.preventDefault(); e.stopPropagation(); alert(msg);
+            }, true);
+        })();
+        </script>
+        """
+        // Anchor on the report document's single closing body tag.
+        if let range = html.range(of: "</body>", options: .backwards) {
+            return html.replacingCharacters(in: range, with: overlay + "</body>")
+        }
+        // Fallback: append (still renders; banner is position:fixed so placement is unaffected).
+        return html + overlay
     }
 
     // MARK: - GET /m/:slug/photos.zip

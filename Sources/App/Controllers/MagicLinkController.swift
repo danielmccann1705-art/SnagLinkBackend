@@ -54,6 +54,7 @@ struct MagicLinkController: RouteCollection {
         // Authenticated management routes (JWT required)
         let authenticated = magicLinks.grouped(JWTAuthMiddleware())
         authenticated.post(use: create)
+        authenticated.post("preview", use: createPreview)  // B2
         authenticated.get(use: list)
         authenticated.delete(":linkId", use: revoke)
         authenticated.get(":linkId", "analytics", use: getAnalytics)
@@ -284,6 +285,54 @@ struct MagicLinkController: RouteCollection {
         }
 
         return MagicLinkResponse(from: magicLink, includeToken: true)
+    }
+
+    /// Creates an unsent preview magic link (B2).
+    /// POST /api/v1/magic-links/preview
+    /// Returns a 1h-TTL token the PM can open at `/preview/{token}` to see the contractor view.
+    /// Preview links are never counted against the monthly allowance (counting happens on send).
+    @Sendable
+    func createPreview(req: Request) async throws -> PreviewMagicLinkResponse {
+        let userId = try req.requireAuthenticatedUserId()
+        let previewRequest = try req.content.decode(PreviewMagicLinkRequest.self)
+        try previewRequest.validate()
+
+        let token = try SecureTokenGenerator.generate()
+        // 1h TTL — set both expiresAt (so standard validation catches expiry) and
+        // previewExpiresAt (drives the nightly cleanup + preview semantics).
+        let expiry = Date().addingTimeInterval(60 * 60)
+
+        let magicLink = MagicLink(
+            token: token,
+            accessLevel: .update,
+            expiresAt: expiry,
+            snagIds: previewRequest.snagIds,
+            projectId: previewRequest.projectId,
+            contractorId: previewRequest.contractorId,
+            createdById: userId,
+            slug: nil,
+            previewMode: true,
+            previewExpiresAt: expiry
+        )
+
+        try await magicLink.save(on: req.db)
+
+        try await AuditService.log(
+            eventType: .magicLinkCreated,
+            resourceType: .magicLink,
+            resourceId: magicLink.id,
+            userId: userId,
+            request: req,
+            success: true,
+            details: "Preview link created",
+            on: req.db
+        )
+
+        let base = Environment.get("MAGIC_LINK_BASE_URL") ?? Environment.get("BASE_URL") ?? "https://snaglist.dev"
+        return PreviewMagicLinkResponse(
+            previewToken: token,
+            previewURL: "\(base)/preview/\(token)"
+        )
     }
 
     /// Lists magic links created by the authenticated user

@@ -58,6 +58,15 @@ final class MagicLink: Model, Content, @unchecked Sendable {
     @OptionalField(key: "slug")
     var slug: String?
 
+    /// B2: true for unsent "preview" links (what the contractor will see). Preview links are
+    /// never counted against the monthly allowance and reject contractor-side writes.
+    @Field(key: "preview_mode")
+    var previewMode: Bool
+
+    /// B2: separate 1h TTL for preview links (independent of the production `expiresAt`).
+    @OptionalField(key: "preview_expires_at")
+    var previewExpiresAt: Date?
+
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
 
@@ -77,7 +86,9 @@ final class MagicLink: Model, Content, @unchecked Sendable {
         projectId: UUID,
         contractorId: UUID? = nil,
         createdById: UUID,
-        slug: String? = nil
+        slug: String? = nil,
+        previewMode: Bool = false,
+        previewExpiresAt: Date? = nil
     ) {
         self.id = id
         self.token = token
@@ -92,6 +103,8 @@ final class MagicLink: Model, Content, @unchecked Sendable {
         self.contractorId = contractorId
         self.createdById = createdById
         self.slug = slug
+        self.previewMode = previewMode
+        self.previewExpiresAt = previewExpiresAt
     }
 
     var isExpired: Bool {
@@ -109,5 +122,11 @@ final class MagicLink: Model, Content, @unchecked Sendable {
 
     var requiresPIN: Bool {
         return pinHash != nil
+    }
+
+    /// True once a preview link's 1h TTL has elapsed.
+    var isPreviewExpired: Bool {
+        guard let previewExpiresAt = previewExpiresAt else { return false }
+        return Date() > previewExpiresAt
     }
 }
