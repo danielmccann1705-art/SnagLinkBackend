@@ -71,6 +71,9 @@ func routes(_ app: Application) throws {
         Uploads:
         - POST /api/v1/uploads/photo - Upload a photo (multipart form data)
 
+        Config:
+        - GET /api/v1/config/feature-flags - Remote feature flags (auth optional)
+
         Devices:
         - POST /api/v1/devices/register - Register device for push notifications (auth required)
         - DELETE /api/v1/devices/unregister - Unregister device token (auth required)
@@ -142,6 +145,7 @@ func routes(_ app: Application) throws {
     try app.register(collection: TeamController())
     try app.register(collection: UserProfileController())
     try app.register(collection: ApprovalController())
+    try app.register(collection: ConfigController())
 }
 
 // MARK: - Response Models

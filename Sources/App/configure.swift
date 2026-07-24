@@ -52,6 +52,8 @@ public func configure(_ app: Application) async throws {
         // B4: tier counter + onboarding link tracking.
         app.migrations.add(AddOnboardingLinkConsumedToUsers())
         app.migrations.add(CreateMagicLinkSends())
+        // B6: remote feature flags.
+        app.migrations.add(CreateFeatureFlags())
 
         try await app.autoMigrate()
     } else {
