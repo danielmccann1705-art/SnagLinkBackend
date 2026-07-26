@@ -80,14 +80,20 @@ func routes(_ app: Application) throws {
         """
     }
 
-    // MARK: - Apple App Site Association
+    // MARK: - Apple App Site Association (B7)
+    // Serves the AASA with no extension + application/json so iOS opens the app for our
+    // universal-link paths. `/auth/*` is the magic-link sign-in path (B1); `/m/*` is the
+    // contractor magic link. TEAMID 52ZZHYHM62 — confirm with the iOS team before deploy.
     app.get(".well-known", "apple-app-site-association") { req -> Response in
         let json = """
         {
           "applinks": {
             "details": [{
               "appIDs": ["52ZZHYHM62.com.snaglist.app"],
-              "components": [{ "/": "/m/*" }]
+              "components": [
+                { "/": "/auth/*" },
+                { "/": "/m/*" }
+              ]
             }]
           },
           "appclips": {
