@@ -71,6 +71,10 @@ func routes(_ app: Application) throws {
         Uploads:
         - POST /api/v1/uploads/photo - Upload a photo (multipart form data)
 
+        Analytics:
+        - POST /api/v1/events - Batch analytics events (auth optional; see ANALYTICS_EVENTS.md)
+        - POST /api/v1/diagnostics - MetricKit diagnostic payloads (auth optional)
+
         Config:
         - GET /api/v1/config/feature-flags - Remote feature flags (auth optional)
 
@@ -150,6 +154,7 @@ func routes(_ app: Application) throws {
     try app.register(collection: TradeController())
     try app.register(collection: TeamController())
     try app.register(collection: UserProfileController())
+    try app.register(collection: AnalyticsController())
     try app.register(collection: ApprovalController())
     try app.register(collection: ConfigController())
 }
