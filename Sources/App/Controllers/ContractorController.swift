@@ -20,6 +20,7 @@ struct ContractorController: RouteCollection {
 
         var query = Contractor.query(on: req.db)
             .filter(\.$ownerId == userId)
+            .filter(\.$platformManaged == false)
             .sort(\.$companyName)
 
         if !includeArchived {
@@ -93,6 +94,7 @@ struct ContractorController: RouteCollection {
         guard let contractor = try await Contractor.query(on: req.db)
             .filter(\.$id == id)
             .filter(\.$ownerId == userId)
+            .filter(\.$platformManaged == false)
             .first() else {
             throw Abort(.notFound, reason: "Contractor not found")
         }

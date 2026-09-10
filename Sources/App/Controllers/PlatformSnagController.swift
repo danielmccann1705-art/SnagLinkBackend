@@ -10,6 +10,7 @@ struct PlatformSnagController: RouteCollection {
         snags.get(":snagId", use: get)
         snags.patch(":snagId", use: edit)
         snags.post(":snagId", "publish", use: publish)
+        snags.post(":snagId", "assignment", use: assign)
         snags.post(":snagId", "archive", use: archive)
         snags.post(":snagId", "restore", use: restore)
     }
@@ -60,15 +61,24 @@ struct PlatformSnagController: RouteCollection {
     }
     @Sendable func create(req: Request) async throws -> PlatformSnagResponse {
         let body = try req.content.decode(SnagCreateCommand.self)
-        return try await mutate(req: req, command: body, metadata: body.mutation, action: .edit) { db, project, _, actorID in
-            try await PlatformSnagService.create(body, project: project, actorID: actorID, on: db)
+        return try await mutate(req: req, command: body, metadata: body.mutation, action: body.fields["dueDate"] == nil && body.fields["dueOn"] == nil ? .edit : .assign) { db, project, actions, actorID in
+            guard body.fields["dueDate"] == nil && body.fields["dueOn"] == nil || actions.contains(.assign) else { throw Abort(.forbidden, reason: "Only a project manager can set or clear deadlines") }
+            return try await PlatformSnagService.create(body, project: project, actorID: actorID, on: db)
         }
     }
     @Sendable func edit(req: Request) async throws -> PlatformSnagResponse {
         let body = try req.content.decode(SnagEditCommand.self), snagID = try id("snagId", req)
-        return try await mutate(req: req, command: body, metadata: body.mutation, action: .edit) { db, project, _, actorID in
+        return try await mutate(req: req, command: body, metadata: body.mutation, action: body.fields["dueDate"] == nil && body.fields["dueOn"] == nil ? .edit : .assign) { db, project, actions, actorID in
+            guard body.fields["dueDate"] == nil && body.fields["dueOn"] == nil || actions.contains(.assign) else { throw Abort(.forbidden, reason: "Only a project manager can set or clear deadlines") }
             let snag = try await PlatformSnagService.find(snagID, projectID: project.requireID(), on: db)
             return try await PlatformSnagService.edit(body, snag: snag, project: project, actorID: actorID, on: db)
+        }
+    }
+    @Sendable func assign(req: Request) async throws -> PlatformSnagResponse {
+        let body = try req.content.decode(SnagEditCommand.self), snagID = try id("snagId", req)
+        return try await mutate(req: req, command: body, metadata: body.mutation, action: .assign) { db, project, _, actorID in
+            let snag = try await PlatformSnagService.find(snagID, projectID: project.requireID(), on: db)
+            return try await PlatformSnagService.assign(body, snag: snag, project: project, actorID: actorID, on: db)
         }
     }
     @Sendable func publish(req: Request) async throws -> PlatformSnagResponse {

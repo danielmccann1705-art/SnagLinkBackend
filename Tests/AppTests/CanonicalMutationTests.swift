@@ -199,7 +199,7 @@ final class CanonicalMutationTests: XCTestCase {
         XCTAssertEqual(start.status, .ok, start.body.string)
         let first = try start.content.decode(RegisterSnapshotPage.self)
         XCTAssertEqual(first.total, 102); XCTAssertEqual(first.items.count, 100); XCTAssertNil(first.changesCursor)
-        XCTAssertEqual(first.coverage, ["project", "snags"])
+        XCTAssertEqual(first.coverage, ["project", "snags", "contractors", "trades"])
         let last = records.last!
         let update = try await request(.PATCH, path + "/snags/\(last.snag.id)", user: owner, body: ["mutation": metadata(), "expectedRevision": 1, "fields": ["title": "Changed while download was open"]])
         XCTAssertEqual(update.status, .ok)
@@ -301,6 +301,167 @@ final class CanonicalMutationTests: XCTestCase {
         let delta = try await request(.GET, path + "/changes?cursor=\(snapshot.changesCursor!)", user: owner)
         let changes = try delta.content.decode(ProjectChangePage.self)
         XCTAssertEqual(changes.changes.map(\.id), [saved.snag.id]); XCTAssertFalse(changes.changes.contains { $0.id == abandonedID })
+    }
+
+    func testProjectMemberCannotSetDeadlineDuringCreateOrEdit() async throws {
+        let owner = try await user(), member = try await user(), project = try await project(owner, company: true)
+        try await join(member, owner: owner, project: project, role: "member")
+        let path = "api/v2/projects/\(project.project.id)/snags"
+        let create = try await request(.POST, path, user: member, body: ["mutation": metadata(), "id": UUID().uuidString, "fields": ["title": "Fix threshold", "dueDate": "2026-09-21T09:00:00Z"]])
+        XCTAssertEqual(create.status, .forbidden)
+        let original = try await snag(owner, project: project, fields: ["title": "Fix threshold", "dueDate": "2026-09-21T09:00:00Z"])
+        let edit = try await request(.PATCH, path + "/\(original.snag.id)", user: member, body: ["mutation": metadata(), "expectedRevision": 1, "fields": ["dueDate": NSNull()]])
+        XCTAssertEqual(edit.status, .forbidden)
+        let exact = try await request(.PATCH, path + "/\(original.snag.id)", user: member, body: ["mutation": metadata(), "expectedRevision": 1, "fields": ["dueOn": "2026-09-30"]])
+        XCTAssertEqual(exact.status, .forbidden)
+        let saved = try await Snag.find(original.snag.id, on: app.db); XCTAssertNotNil(saved?.dueDate); XCTAssertEqual(saved?.revision, 1)
+    }
+
+    private func directory(_ owner: User, project: PlatformProjectResponse, type: String, fields: [String: Any], id: UUID = UUID(), expected: Int = 0) async throws -> DirectoryResponse {
+        let path = "api/v2/workspaces/\(project.workspaceId)/\(type)" + (expected == 0 ? "" : "/\(id)")
+        let response = try await request(expected == 0 ? .POST : .PATCH, path, user: owner,
+                                         body: ["mutation": metadata(), "id": id.uuidString, "expectedRevision": expected, "projectId": project.project.id.uuidString, "fields": fields])
+        XCTAssertEqual(response.status, .ok, response.body.string)
+        return try response.content.decode(DirectoryResponse.self)
+    }
+    func testDirectoryUsesScopedRelationsAndPreservesExplicitClears() async throws {
+        let owner = try await user(), project = try await project(owner, company: true)
+        let trade = try await directory(owner, project: project, type: "trades", fields: ["name": "Joinery", "colorHex": "8D6E63"])
+        let contractor = try await directory(owner, project: project, type: "contractors", fields: ["companyName": "Synthetic Joinery", "email": "joinery@example.test", "notes": "Access via site office", "tradeIds": [trade.id.uuidString]])
+        let linked = try await VerifiedIdentityService.sql(app.db).raw("SELECT trade_id FROM contractor_trades WHERE contractor_id = \(bind: contractor.id)").all()
+        XCTAssertEqual(try linked.map { try $0.decode(column: "trade_id", as: UUID.self) }, [trade.id])
+        let clear = try await directory(owner, project: project, type: "contractors", fields: ["email": NSNull(), "tradeIds": []], id: contractor.id, expected: 1)
+        let data = try PlatformMutationService.decode(ContractorResponse.self, PlatformMutationService.encode(clear.data))
+        XCTAssertNil(data.email); XCTAssertTrue(data.tradeIds.isEmpty); XCTAssertEqual(data.notes, "Access via site office"); XCTAssertEqual(clear.revision, 2)
+        let stale = try await request(.PATCH, "api/v2/workspaces/\(project.workspaceId)/contractors/\(contractor.id)", user: owner,
+                                      body: ["mutation": metadata(), "id": contractor.id.uuidString, "expectedRevision": 1, "fields": ["companyName": "Old name"]])
+        XCTAssertEqual(stale.status, .conflict); XCTAssertTrue(stale.body.string.contains("revision_conflict"))
+    }
+    func testManagerDirectoryAccessDoesNotGrantMemberWriteOrAnotherCompanyScope() async throws {
+        let owner = try await user(), manager = try await user(), member = try await user(), project = try await project(owner, company: true), other = try await self.project(owner, company: true)
+        try await join(manager, owner: owner, project: project, role: "manager")
+        try await join(member, owner: owner, project: project, role: "member")
+        let entry = try await directory(manager, project: project, type: "contractors", fields: ["companyName": "Manager added contractor"])
+        let path = "api/v2/workspaces/\(project.workspaceId)/contractors"
+        let read = try await request(.GET, path + "?projectId=\(project.project.id)", user: member)
+        XCTAssertEqual(read.status, .ok)
+        let denied = try await request(.PATCH, path + "/\(entry.id)", user: member, body: ["mutation": metadata(), "id": entry.id.uuidString, "expectedRevision": 1, "projectId": project.project.id.uuidString, "fields": ["notes": "Not permitted"]])
+        XCTAssertEqual(denied.status, .forbidden)
+        let cross = try await request(.GET, "api/v2/workspaces/\(other.workspaceId)/contractors?projectId=\(project.project.id)", user: owner)
+        XCTAssertEqual(cross.status, .notFound)
+    }
+    func testCrossWorkspaceTradeAndAssignmentRejectedByServiceAndDatabase() async throws {
+        let owner = try await user(), first = try await project(owner, company: true), second = try await project(owner, company: true)
+        let foreignTrade = try await directory(owner, project: second, type: "trades", fields: ["name": "Electrical"])
+        let foreignContractor = try await directory(owner, project: second, type: "contractors", fields: ["companyName": "Other company contractor"])
+        let invalid = try await request(.POST, "api/v2/workspaces/\(first.workspaceId)/contractors", user: owner,
+                                        body: ["mutation": metadata(), "id": UUID().uuidString, "expectedRevision": 0, "fields": ["companyName": "Bad relation", "tradeIds": [foreignTrade.id.uuidString]]])
+        XCTAssertEqual(invalid.status, .badRequest)
+        let snag = try await snag(owner, project: first)
+        let assignment = try await request(.POST, "api/v2/projects/\(first.project.id)/snags/\(snag.snag.id)/assignment", user: owner,
+                                           body: ["mutation": metadata(), "expectedRevision": 1, "fields": ["contractorId": foreignContractor.id.uuidString]])
+        XCTAssertEqual(assignment.status, .badRequest)
+        do {
+            try await app.db.transaction { db in try await VerifiedIdentityService.sql(db).raw("UPDATE snags SET contractor_id = \(bind: foreignContractor.id) WHERE id = \(bind: snag.snag.id)").run() }
+            XCTFail("Database must reject cross-workspace assignment independently")
+        } catch { /* Constraint rejection; never dump SQL/provider details. */ }
+        let saved = try await Snag.find(snag.snag.id, on: app.db); XCTAssertNil(saved?.contractorId); XCTAssertEqual(saved?.revision, 1)
+    }
+    func testAssignmentClearAndRetryRetainOneHistoryPerOperation() async throws {
+        let owner = try await user(), project = try await project(owner, company: true), snag = try await snag(owner, project: project)
+        let contractor = try await directory(owner, project: project, type: "contractors", fields: ["companyName": "Synthetic Decorating"])
+        let path = "api/v2/projects/\(project.project.id)/snags/\(snag.snag.id)/assignment"
+        let command: [String: Any] = ["mutation": metadata(), "expectedRevision": 1, "fields": ["contractorId": contractor.id.uuidString]]
+        for _ in 0..<2 { let response = try await request(.POST, path, user: owner, body: command); XCTAssertEqual(response.status, .ok) }
+        let clear = try await request(.POST, path, user: owner, body: ["mutation": metadata(), "expectedRevision": 2, "fields": ["contractorId": NSNull()]])
+        XCTAssertEqual(clear.status, .ok)
+        let result = try clear.content.decode(PlatformSnagResponse.self)
+        XCTAssertNil(result.snag.contractorId); XCTAssertNil(result.snag.assignedAt); XCTAssertEqual(result.revision, 3)
+        let history = try await VerifiedIdentityService.sql(app.db).raw("SELECT from_contractor_id, to_contractor_id FROM assignment_history WHERE snag_id = \(bind: snag.snag.id) ORDER BY snag_revision").all()
+        XCTAssertEqual(history.count, 2)
+        XCTAssertEqual(try history[0].decode(column: "to_contractor_id", as: UUID?.self), contractor.id)
+        XCTAssertEqual(try history[1].decode(column: "from_contractor_id", as: UUID?.self), contractor.id)
+        XCTAssertNil(try history[1].decode(column: "to_contractor_id", as: UUID?.self))
+    }
+    func testWorkspaceDirectoryIncludedInSnapshotAndSubsequentChangesButNotLegacyLists() async throws {
+        let owner = try await user(), project = try await project(owner)
+        let trade = try await directory(owner, project: project, type: "trades", fields: ["name": "Plumbing"])
+        let contractor = try await directory(owner, project: project, type: "contractors", fields: ["companyName": "Synthetic Plumbing", "tradeIds": [trade.id.uuidString]])
+        let start = try await request(.POST, "api/v2/projects/\(project.project.id)/register-snapshots", user: owner)
+        let snapshot = try start.content.decode(RegisterSnapshotPage.self)
+        XCTAssertEqual(Set(snapshot.items.map(\.type)), ["project", "contractor", "trade"])
+        _ = try await directory(owner, project: project, type: "contractors", fields: ["notes": "Site gate code shared separately"], id: contractor.id, expected: 1)
+        let delta = try await request(.GET, "api/v2/projects/\(project.project.id)/changes?cursor=\(snapshot.changesCursor!)", user: owner)
+        let changes = try delta.content.decode(ProjectChangePage.self)
+        XCTAssertEqual(changes.changes.count, 1); XCTAssertEqual(changes.changes.first?.type, "contractor")
+        let oldContractors = try await request(.GET, "api/v1/contractors", user: owner)
+        let oldTrades = try await request(.GET, "api/v1/trades", user: owner)
+        XCTAssertFalse(oldContractors.body.string.contains(contractor.id.uuidString)); XCTAssertFalse(oldTrades.body.string.contains(trade.id.uuidString))
+    }
+
+
+    func testExactCostsSurviveDatabaseResponseAndExplicitNullWithoutRounding() async throws {
+        let owner = try await user(), project = try await project(owner)
+        let initial = try await snag(owner, project: project, fields: ["title": "Make good oak threshold", "costEstimateDecimal": "1200.100001", "actualCostDecimal": "0", "dueOn": "2026-10-25"])
+        XCTAssertEqual(initial.canonical?.costEstimateDecimal, "1200.100001")
+        XCTAssertEqual(initial.canonical?.actualCostDecimal, "0")
+        XCTAssertEqual(initial.canonical?.dueOn, "2026-10-25")
+        let stored = try await Snag.find(initial.snag.id, on: app.db)
+        XCTAssertEqual(stored?.costEstimateDecimal, Decimal(string: "1200.100001"))
+        XCTAssertEqual(stored?.actualCostDecimal, Decimal.zero)
+        let path = "api/v2/projects/\(project.project.id)/snags/\(initial.snag.id)"
+        let result = try await request(.PATCH, path, user: owner, body: ["mutation": metadata(), "expectedRevision": 1, "fields": ["actualCostDecimal": NSNull(), "dueOn": NSNull()]])
+        XCTAssertEqual(result.status, .ok, result.body.string)
+        let updated = try result.content.decode(PlatformSnagResponse.self)
+        XCTAssertNil(updated.canonical?.actualCostDecimal); XCTAssertNil(updated.snag.actualCost)
+        XCTAssertNil(updated.canonical?.dueOn); XCTAssertNil(updated.snag.dueDate)
+        XCTAssertEqual(updated.canonical?.costEstimateDecimal, "1200.100001")
+    }
+    func testInvalidOrAmbiguousExactValuesCannotConsumeReferenceOrCreateRecord() async throws {
+        let owner = try await user(), project = try await project(owner)
+        let cases: [[String: Any]] = [
+            ["costEstimateDecimal": 12.25], ["costEstimateDecimal": "1.0000001"],
+            ["actualCostDecimal": "1,200.50"], ["actualCostDecimal": "-1"],
+            ["actualCostDecimal": "1000000000.000001"], ["actualCostDecimal": "NaN"],
+            ["costEstimateDecimal": "1e3"], ["costEstimate": 1, "costEstimateDecimal": "1"],
+            ["dueOn": "2026-02-29"], ["dueOn": "2026-04-31"],
+            ["dueOn": "2026-10-25T00:00:00Z"], ["dueOn": "2026-01-01", "dueDate": NSNull()]
+        ]
+        for var fields in cases {
+            fields["title"] = "Synthetic invalid value"
+            let result = try await request(.POST, "api/v2/projects/\(project.project.id)/snags", user: owner,
+                body: ["mutation": metadata(), "id": UUID().uuidString, "fields": fields])
+            XCTAssertEqual(result.status, .badRequest, result.body.string)
+        }
+        let valid = try await snag(owner, project: project, fields: ["title": "Valid leap-day deadline", "dueOn": "2028-02-29"])
+        XCTAssertEqual(valid.displayNumber, 1); XCTAssertEqual(valid.canonical?.dueOn, "2028-02-29")
+    }
+    func testCandidateTimestampAdapterUsesWorkspaceCalendarAndDateOnlyNeverShifts() async throws {
+        let owner = try await user(), project = try await project(owner)
+        let timestamp = try await snag(owner, project: project, fields: ["title": "Late evening site inspection", "dueDate": "2026-03-29T23:30:00Z"])
+        XCTAssertEqual(timestamp.canonical?.dueOn, "2026-03-30") // British Summer Time
+        let calendar = try await snag(owner, project: project, fields: ["title": "Clock change day", "dueOn": "2026-03-29"])
+        let response = try await request(.GET, "api/v2/projects/\(project.project.id)/snags/\(calendar.snag.id)", user: owner)
+        XCTAssertEqual(try response.content.decode(PlatformSnagResponse.self).canonical?.dueOn, "2026-03-29")
+    }
+    func testDatabaseRejectsInvalidCalendarAndCostEvenWhenServiceIsBypassed() async throws {
+        let owner = try await user(), project = try await project(owner), initial = try await snag(owner, project: project)
+        for sqlValue in ["invalid-date", "2026-02-29"] {
+            do {
+                try await app.db.transaction { db in
+                    try await VerifiedIdentityService.sql(db).raw("UPDATE snags SET due_on = \(bind: sqlValue) WHERE id = \(bind: initial.snag.id)").run()
+                }
+                XCTFail("Invalid calendar date reached storage")
+            } catch {}
+        }
+        do {
+            try await app.db.transaction { db in
+                try await VerifiedIdentityService.sql(db).raw("UPDATE snags SET actual_cost_decimal = -1 WHERE id = \(bind: initial.snag.id)").run()
+            }
+            XCTFail("Negative cost reached storage")
+        } catch {}
+        let stored = try await Snag.find(initial.snag.id, on: app.db)
+        XCTAssertNil(stored?.dueOn); XCTAssertNil(stored?.actualCostDecimal)
     }
 
 }

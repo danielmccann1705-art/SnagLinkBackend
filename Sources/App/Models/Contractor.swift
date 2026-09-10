@@ -31,6 +31,10 @@ final class Contractor: Model, Content, @unchecked Sendable {
     @Field(key: "owner_id")
     var ownerId: UUID
 
+    @OptionalField(key: "workspace_id") var workspaceId: UUID?
+    @Field(key: "revision") var revision: Int64
+    @Field(key: "platform_managed") var platformManaged: Bool
+
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
 
@@ -59,5 +63,7 @@ final class Contractor: Model, Content, @unchecked Sendable {
         self.isArchived = isArchived
         self.tradeIds = tradeIds
         self.ownerId = ownerId
+        self.revision = 1
+        self.platformManaged = false
     }
 }

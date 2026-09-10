@@ -42,8 +42,23 @@ struct SnagArchiveCommand: Content {
     let reason: String
 }
 struct SnagPublishCommand: Content { let mutation: MutationMetadata; let expectedRevision: Int64 }
+struct CanonicalSnagValues: Content {
+    let dueOn: String?
+    let costEstimateDecimal: String?
+    let actualCostDecimal: String?
+    let currency: String
+    init(_ snag: Snag) {
+        dueOn = snag.dueOn
+        costEstimateDecimal = snag.costEstimateDecimal.map { NSDecimalNumber(decimal: $0).stringValue }
+        actualCostDecimal = snag.actualCostDecimal.map { NSDecimalNumber(decimal: $0).stringValue }
+        currency = snag.currency
+    }
+}
 struct PlatformSnagResponse: Content {
     let snag: SnagResponse
+    /// Authoritative exact values for new clients. Optional only to decode stored
+    /// pre-parity candidate receipts; clients must refetch when absent.
+    let canonical: CanonicalSnagValues?
     let revision: Int64
     let workflowRevision: Int64
     let displayNumber: Int64?
@@ -52,6 +67,7 @@ struct PlatformSnagResponse: Content {
     let archiveReason: String?
     init(_ snag: Snag) {
         self.snag = SnagResponse(from: snag); revision = snag.revision; workflowRevision = snag.workflowRevision
+        canonical = CanonicalSnagValues(snag)
         displayNumber = snag.displayNumber; publishedAt = snag.publishedAt; archivedAt = snag.archivedAt; archiveReason = snag.archiveReason
     }
 }

@@ -18,6 +18,7 @@ struct TradeController: RouteCollection {
 
         let trades = try await Trade.query(on: req.db)
             .filter(\.$ownerId == userId)
+            .filter(\.$platformManaged == false)
             .sort(\.$sortOrder)
             .all()
 
@@ -55,6 +56,7 @@ struct TradeController: RouteCollection {
         guard let trade = try await Trade.query(on: req.db)
             .filter(\.$id == id)
             .filter(\.$ownerId == userId)
+            .filter(\.$platformManaged == false)
             .first() else {
             throw Abort(.notFound, reason: "Trade not found")
         }
@@ -82,6 +84,7 @@ struct TradeController: RouteCollection {
         guard let trade = try await Trade.query(on: req.db)
             .filter(\.$id == id)
             .filter(\.$ownerId == userId)
+            .filter(\.$platformManaged == false)
             .first() else {
             throw Abort(.notFound, reason: "Trade not found")
         }

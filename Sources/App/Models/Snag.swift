@@ -37,6 +37,10 @@ final class Snag: Model, Content, @unchecked Sendable {
     @OptionalField(key: "actual_cost")
     var actualCost: Double?
 
+    @OptionalField(key: "due_on") var dueOn: String?
+    @OptionalField(key: "cost_estimate_decimal") var costEstimateDecimal: Decimal?
+    @OptionalField(key: "actual_cost_decimal") var actualCostDecimal: Decimal?
+
     @Field(key: "currency")
     var currency: String
 
@@ -67,6 +71,7 @@ final class Snag: Model, Content, @unchecked Sendable {
     @Field(key: "tags")
     var tags: [String]
 
+    @OptionalField(key: "workspace_id") var workspaceId: UUID?
     @Field(key: "revision") var revision: Int64
     @Field(key: "workflow_revision") var workflowRevision: Int64
     @OptionalField(key: "display_number") var displayNumber: Int64?
