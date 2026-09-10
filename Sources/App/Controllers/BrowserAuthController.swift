@@ -138,7 +138,7 @@ struct BrowserAuthController: RouteCollection {
         // Fragment is not sent on landing GET or in HTTP referrers. Only the
         // explicit confirmation POST consumes the token. No arbitrary redirects.
         do {
-            try await NotificationService.sendMagicSignInEmail(to: email, name: nil, magicLinkURL: config.origin + path + "#token=" + raw, client: req.client)
+            try await IdentityMailService.send(email: email, url: config.origin + path + "#token=" + raw, config: config, req: req)
         } catch {
             // Fail explicitly without leaking the recipient or provider error/token.
             throw Abort(.serviceUnavailable, reason: "We could not send a verification email. Try again shortly")

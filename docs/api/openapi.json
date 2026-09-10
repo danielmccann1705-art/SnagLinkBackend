@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Snaglist implemented platform API",
-    "version": "0.4.0-candidate",
+    "version": "0.5.0-candidate",
     "description": "Implemented v2 foundation, not the complete unified-platform API. New snag responses include canonical calendar deadlines and exact decimal costs; nested legacy timestamp/number fields are compatibility mirrors. Complete field/graph parity, evidence/workflow/private media, reports/jobs, company billing and account deletion remain under implementation. V1 recovery endpoints remain outside this contract."
   },
   "servers": [
@@ -2841,7 +2841,7 @@
       "get": {
         "operationId": "listSnags",
         "summary": "Read a bounded filtered register page",
-        "description": "Managed project read. 50 rows/page sorted by server display number then UUID. Empty filtered page is not a deletion.",
+        "description": "Current authorised managed-project view, 50 rows/page. Case-insensitive literal substring search covers reference, title, description and location. Filters apply on the server. Due filters use the workspace calendar: overdue excludes closed; next7 includes today and ends before day 7. Sort ties use display number and UUID; missing dates sort last in either direction. Rows, matching total and unfiltered project summary share the access transaction. This is live offset pagination, not an immutable sync snapshot; concurrent edits can move rows between pages. Empty results never imply deletion. Contractor labels describe only contractors used on this page, including archived directory entries.",
         "security": [
           {
             "browserSession": []
@@ -2866,7 +2866,17 @@
             "required": false,
             "schema": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 10000
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
             }
           },
           {
@@ -2874,6 +2884,7 @@
             "in": "query",
             "required": false,
             "schema": {
+              "type": "string",
               "enum": [
                 "open",
                 "in_progress",
@@ -2884,11 +2895,85 @@
             }
           },
           {
+            "name": "priority",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "critical"
+              ]
+            }
+          },
+          {
+            "name": "contractorId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Workspace contractor UUID, or unassigned; other UUIDs return no matches without disclosing the other workspace."
+            }
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 500
+            }
+          },
+          {
+            "name": "due",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "overdue",
+                "today",
+                "next7",
+                "none"
+              ]
+            }
+          },
+          {
             "name": "archived",
             "in": "query",
             "required": false,
             "schema": {
               "type": "boolean"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "reference",
+                "due",
+                "updated",
+                "priority"
+              ],
+              "default": "reference"
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
             }
           }
         ],
@@ -6784,12 +6869,28 @@
           },
           "hasMore": {
             "type": "boolean"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "summary": {
+            "$ref": "#/components/schemas/RegisterSummary"
+          },
+          "contractors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RegisterContractorLabel"
+            }
           }
         },
         "required": [
           "items",
           "page",
-          "hasMore"
+          "hasMore",
+          "total",
+          "summary",
+          "contractors"
         ]
       },
       "SnagRevisionConflict": {
@@ -7450,6 +7551,123 @@
           "identifier",
           "reason",
           "current"
+        ]
+      },
+      "SnagRegisterQuery": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "q": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "in_progress",
+              "awaiting_review",
+              "changes_requested",
+              "closed"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "contractorId": {
+            "type": "string",
+            "description": "Workspace contractor UUID, or unassigned; other UUIDs return no matches without disclosing the other workspace."
+          },
+          "location": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "due": {
+            "type": "string",
+            "enum": [
+              "overdue",
+              "today",
+              "next7",
+              "none"
+            ]
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "sort": {
+            "type": "string",
+            "enum": [
+              "reference",
+              "due",
+              "updated",
+              "priority"
+            ],
+            "default": "reference"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "default": "asc"
+          }
+        }
+      },
+      "RegisterSummary": {
+        "type": "object",
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "awaitingReview": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "overdue": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "total",
+          "awaitingReview",
+          "overdue"
+        ]
+      },
+      "RegisterContractorLabel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "companyName": {
+            "type": "string"
+          },
+          "contactName": {
+            "type": "string",
+            "nullable": true
+          },
+          "isArchived": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "companyName",
+          "isArchived"
         ]
       }
     }

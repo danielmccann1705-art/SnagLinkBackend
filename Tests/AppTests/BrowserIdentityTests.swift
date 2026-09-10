@@ -57,6 +57,20 @@ final class BrowserIdentityTests: XCTestCase {
         XCTAssertEqual(count, 0, "Raw session credential must not be persisted")
     }
 
+    func testMissingMailProviderCannotReportThatSignInOrVerificationWasSent() async throws {
+        XCTAssertNil(Environment.get("RESEND_API_KEY"), "This suite must not use a live mail provider")
+        let email = "undelivered-\(UUID())@example.test"
+        let requested = try await request(.POST, "api/v2/auth/email", body: ["email": email])
+        XCTAssertEqual(requested.status, .serviceUnavailable)
+        XCTAssertTrue(requested.headers["set-cookie"].isEmpty)
+        XCTAssertFalse(requested.body.string.contains(email))
+        let (cookie, session) = try await signedIn()
+        let linked = try await request(.POST, "api/v2/account/email/request", body: ["email": email], cookie: cookie, csrf: session.csrfToken)
+        XCTAssertEqual(linked.status, .serviceUnavailable)
+        let emails = try await VerifiedIdentityService.verifiedEmails(for: session.user.id, on: app.db)
+        XCTAssertFalse(emails.contains(email))
+    }
+
     func testLandingGETDoesNotConsumeAndWrongBrowserDoesNotConsume() async throws {
         let raw = try await challenge()
         let get = try await request(.GET, "api/v2/auth/verify?token=" + raw)

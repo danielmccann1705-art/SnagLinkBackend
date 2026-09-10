@@ -2,7 +2,7 @@ import Vapor
 import Fluent
 
 struct PlatformSnagController: RouteCollection {
-    struct Page: Content { let items: [PlatformSnagResponse]; let page: Int; let hasMore: Bool }
+    typealias Page = SnagRegisterService.Page
     func boot(routes: RoutesBuilder) throws {
         let snags = routes.grouped("api", "v2", "projects", ":projectId", "snags").grouped(PlatformAuthMiddleware())
         snags.get(use: list)
@@ -20,20 +20,10 @@ struct PlatformSnagController: RouteCollection {
     }
     @Sendable func list(req: Request) async throws -> Page {
         let projectID = try id("projectId", req), actorID = try req.requireAuthenticatedUserId()
-        let page = (try? req.query.get(Int.self, at: "page")) ?? 1
-        guard (1...10000).contains(page) else { throw Abort(.badRequest, reason: "Invalid page") }
-        let archived = (try? req.query.get(Bool.self, at: "archived")) ?? false
+        let filters = try req.query.decode(SnagRegisterQuery.self)
         return try await req.db.transaction { db in
             let (project, _) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
-            try PlatformMutationService.requireManaged(project)
-            var query = Snag.query(on: db).filter(\.$projectId == projectID)
-            query = archived ? query.filter(\.$archivedAt != nil) : query.filter(\.$archivedAt == nil)
-            if let status = try? req.query.get(String.self, at: "status") {
-                guard ["open", "in_progress", "awaiting_review", "changes_requested", "closed"].contains(status) else { throw Abort(.badRequest, reason: "Invalid status") }
-                query = query.filter(\.$status == status)
-            }
-            let snags = try await query.sort(\.$displayNumber).sort(\.$id).range(((page - 1) * 50)..<(page * 50 + 1)).all()
-            return Page(items: snags.prefix(50).map(PlatformSnagResponse.init), page: page, hasMore: snags.count > 50)
+            return try await SnagRegisterService.list(filters, project: project, on: db)
         }
     }
     @Sendable func get(req: Request) async throws -> PlatformSnagResponse {

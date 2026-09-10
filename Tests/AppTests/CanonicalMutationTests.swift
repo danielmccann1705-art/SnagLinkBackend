@@ -592,4 +592,76 @@ final class CanonicalMutationTests: XCTestCase {
         XCTAssertEqual(current.revision, 2)
     }
 
+    func testRegisterSearchIsLiteralCaseInsensitiveAndRemainsInsideProject() async throws {
+        let owner = try await user(), project = try await project(owner), other = try await self.project(owner)
+        let wanted = try await snag(owner, project: project, fields: ["title": "Re-seal 100%_ finish", "description": "Builder's note: uneven edge", "location": "Plot 12 · Kitchen", "priority": "high"])
+        _ = try await snag(owner, project: project, fields: ["title": "Other finish", "location": "Plot 13 · Kitchen", "priority": "low"])
+        _ = try await snag(owner, project: other, fields: ["title": "Re-seal 100%_ finish", "location": "Plot 12 · Kitchen", "priority": "high"])
+        let path = "api/v2/projects/\(project.project.id)/snags"
+        for term in ["100%_", "BUILDER'S", "plot 12", wanted.snag.reference.lowercased()] {
+            let encoded = term.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+            let response = try await request(.GET, path + "?q=" + encoded, user: owner)
+            XCTAssertEqual(response.status, .ok, response.body.string)
+            let page = try response.content.decode(PlatformSnagController.Page.self)
+            XCTAssertEqual(page.items.map(\.snag.id), [wanted.snag.id]); XCTAssertEqual(page.total, 1)
+            XCTAssertEqual(page.summary.total, 2)
+        }
+        let combined = try await request(.GET, path + "?location=plot%2012&priority=high&contractorId=unassigned", user: owner)
+        XCTAssertEqual(try combined.content.decode(PlatformSnagController.Page.self).items.map(\.snag.id), [wanted.snag.id])
+        let stranger = try await user()
+        let denied = try await request(.GET, path + "?q=finish", user: stranger)
+        XCTAssertEqual(denied.status, .notFound)
+    }
+
+    func testRegisterUsesWorkspaceCalendarForOverdueAndPlacesMissingDatesLast() async throws {
+        let owner = try await user(), envelope = try await project(owner)
+        let dueYesterday = try await snag(owner, project: envelope, fields: ["title": "Window seal", "dueOn": "2026-09-10"])
+        let dueToday = try await snag(owner, project: envelope, fields: ["title": "Door closer", "dueOn": "2026-09-11"])
+        let noDate = try await snag(owner, project: envelope, fields: ["title": "Paint reveal"])
+        let closed = try await snag(owner, project: envelope, fields: ["title": "Historical closure fixture", "dueOn": "2026-09-09"])
+        // Workflow state fixture only; this is not an integration-journey seed.
+        try await VerifiedIdentityService.sql(app.db).raw("UPDATE snags SET status = 'closed' WHERE id = \(bind: closed.snag.id)").run()
+        let project = try await Project.find(envelope.project.id, on: app.db)!
+        let now = ISO8601DateFormatter().date(from: "2026-09-10T23:30:00Z")!
+        let overdue = try await SnagRegisterService.list(.init(due: "overdue"), project: project, on: app.db, now: now)
+        XCTAssertEqual(overdue.items.map(\.snag.id), [dueYesterday.snag.id])
+        XCTAssertEqual(overdue.summary.overdue, 1)
+        let today = try await SnagRegisterService.list(.init(due: "today"), project: project, on: app.db, now: now)
+        XCTAssertEqual(today.items.map(\.snag.id), [dueToday.snag.id])
+        let ascending = try await SnagRegisterService.list(.init(sort: "due"), project: project, on: app.db, now: now)
+        XCTAssertEqual(ascending.items.map(\.snag.id), [closed.snag.id, dueYesterday.snag.id, dueToday.snag.id, noDate.snag.id])
+        let descending = try await SnagRegisterService.list(.init(sort: "due", direction: "desc"), project: project, on: app.db, now: now)
+        XCTAssertEqual(descending.items.map(\.snag.id), [dueToday.snag.id, dueYesterday.snag.id, closed.snag.id, noDate.snag.id])
+    }
+
+    func testRegisterHasBoundedPagesAccurateFilteredCountsAndContractorLabels() async throws {
+        let owner = try await user(), project = try await project(owner)
+        let contractor = try await directory(owner, project: project, type: "contractors", fields: ["companyName": "Willow Joinery & Refurbishment Ltd"])
+        var ids: [UUID] = []
+        for index in 1...51 {
+            let value = try await snag(owner, project: project, fields: ["title": "Synthetic inspection item \(index)", "priority": index == 51 ? "critical" : "medium"])
+            ids.append(value.snag.id)
+        }
+        let path = "api/v2/projects/\(project.project.id)/snags"
+        _ = try await request(.POST, path + "/\(ids[50])/assignment", user: owner, body: ["mutation": metadata(), "expectedRevision": 1, "fields": ["contractorId": contractor.id.uuidString]])
+        let first = try await request(.GET, path, user: owner).content.decode(PlatformSnagController.Page.self)
+        let second = try await request(.GET, path + "?page=2", user: owner).content.decode(PlatformSnagController.Page.self)
+        XCTAssertEqual(first.items.count, 50); XCTAssertTrue(first.hasMore); XCTAssertEqual(first.total, 51)
+        XCTAssertEqual(second.items.map(\.snag.id), [ids[50]]); XCTAssertFalse(second.hasMore)
+        XCTAssertTrue(Set(first.items.map(\.snag.id)).isDisjoint(with: second.items.map(\.snag.id)))
+        XCTAssertEqual(second.contractors.first?.companyName, "Willow Joinery & Refurbishment Ltd")
+        let filtered = try await request(.GET, path + "?contractorId=\(contractor.id)&sort=priority&direction=desc", user: owner).content.decode(PlatformSnagController.Page.self)
+        XCTAssertEqual(filtered.total, 1); XCTAssertEqual(filtered.summary.total, 51)
+        let empty = try await request(.GET, path + "?q=no-match", user: owner).content.decode(PlatformSnagController.Page.self)
+        XCTAssertEqual(empty.total, 0); XCTAssertEqual(empty.summary.total, 51); XCTAssertFalse(empty.hasMore)
+    }
+
+    func testRegisterRejectsMalformedFiltersInsteadOfSilentlyBroadeningResults() async throws {
+        let owner = try await user(), project = try await project(owner)
+        for query in ["page=bad", "page=0", "archived=perhaps", "status=approved", "priority=urgent", "due=yesterday", "sort=title", "direction=up", "contractorId=invalid"] {
+            let response = try await request(.GET, "api/v2/projects/\(project.project.id)/snags?" + query, user: owner)
+            XCTAssertEqual(response.status, .badRequest, query + ": " + response.body.string)
+        }
+    }
+
 }
