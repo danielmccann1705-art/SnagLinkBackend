@@ -7657,8 +7657,14 @@
             "type": "string"
           },
           "contactName": {
-            "type": "string",
-            "nullable": true
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "isArchived": {
             "type": "boolean"
