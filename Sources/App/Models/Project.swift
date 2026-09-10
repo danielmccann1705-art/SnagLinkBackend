@@ -52,6 +52,11 @@ final class Project: Model, Content, @unchecked Sendable {
     @OptionalField(key: "team_id")
     var teamId: UUID?
 
+    @OptionalField(key: "workspace_id") var workspaceId: UUID?
+    @Field(key: "revision") var revision: Int64
+    @Field(key: "platform_managed") var platformManaged: Bool
+    @OptionalField(key: "archived_at") var archivedAt: Date?
+
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
 
@@ -94,5 +99,7 @@ final class Project: Model, Content, @unchecked Sendable {
         self.longitude = longitude
         self.ownerId = ownerId
         self.teamId = teamId
+        self.revision = 1
+        self.platformManaged = false
     }
 }

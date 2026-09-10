@@ -31,12 +31,19 @@ struct UploadController: RouteCollection {
     @Sendable
     func uploadPhoto(req: Request) async throws -> UploadPhotoResponse {
         // Authentication: require JWT or magic link token
-        let isJWTAuth = req.headers.bearerAuthorization != nil &&
-            (try? req.jwt.verify(as: UserJWTPayload.self)) != nil
+        var isJWTAuth = false
+        if req.headers.bearerAuthorization != nil {
+            _ = try await JWTAuthMiddleware.authenticate(req)
+            isJWTAuth = true
+        }
         var isTokenAuth = false
         if !isJWTAuth {
             if let token = req.query[String.self, at: "token"] {
-                _ = try await TokenValidationService.validateMagicLink(token: token, on: req.db)
+                let link = try await TokenValidationService.validateMagicLink(token: token, on: req.db)
+                try PINSessionService.requireVerified(req, link: link)
+                guard !link.previewMode, link.accessLevel != AccessLevel.view.rawValue else {
+                    throw Abort(.forbidden, reason: "This link does not allow photo uploads")
+                }
                 isTokenAuth = true
             }
         }

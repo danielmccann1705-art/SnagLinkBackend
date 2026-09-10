@@ -27,6 +27,9 @@ final class FeatureFlagsEndpointTests: XCTestCase {
         guard dbAvailable else { return }
         app = try await Application.make(.testing)
         try await configure(app)
+        // This fixture owns this key in disposable test databases; clean it so
+        // repeated suites cannot inherit a previous test run's override.
+        try await FeatureFlag.query(on: app.db).filter(\.$key == "useNewDesign").delete()
     }
 
     override func tearDown() async throws {

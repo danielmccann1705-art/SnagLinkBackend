@@ -243,6 +243,9 @@ struct SyncMagicLinkRequest: Content {
     let token: String
     let accessLevel: String
     let hasPIN: Bool
+    /// Existing iOS stores contain SHA256(PIN + salt), unlike the older server format.
+    let pinHash: String?
+    let pinSalt: String?
     let expiresAt: Date
     let snagIds: [UUID]
     let projectId: UUID
@@ -260,6 +263,7 @@ struct MagicLinkSyncResponse: Content {
     let success: Bool
     let token: String
     let shortUrl: String
+    let pinProtectionVerified: Bool
 }
 
 struct MagicLinkAnalyticsResponse: Content {

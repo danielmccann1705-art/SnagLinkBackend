@@ -33,6 +33,9 @@ final class TeamInvite: Model, Content, @unchecked Sendable {
     @Field(key: "token")
     var token: String
 
+    @OptionalField(key: "token_hash") var tokenHash: String?
+    @OptionalField(key: "accepted_user_id") var acceptedUserId: UUID?
+
     @Field(key: "team_id")
     var teamId: UUID
 

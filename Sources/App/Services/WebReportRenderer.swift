@@ -306,7 +306,7 @@ struct WebReportRenderer {
             <div class="progress-bar-wrap">
                 <div class="progress-bar" style="width: \(completionPercent)%"></div>
             </div>
-            <p class="progress-label" id="progressLabel">\(data.completedCount) of \(data.openCount + data.inProgressCount + data.completedCount) snags completed &mdash; \(completionPercent)%</p>
+            <p class="progress-label" id="progressLabel">\(data.completedCount) of \(data.openCount + data.inProgressCount + data.completedCount) snags approved &mdash; \(completionPercent)%</p>
         </header>
         """
     }
@@ -316,15 +316,15 @@ struct WebReportRenderer {
         <div class="stats-bar">
             <div class="stat stat-open">
                 <div class="stat-value" id="statOpen">\(data.openCount)</div>
-                <div class="stat-label">Open</div>
+                <div class="stat-label">Needs work</div>
             </div>
             <div class="stat stat-progress">
                 <div class="stat-value" id="statProgress">\(data.inProgressCount)</div>
-                <div class="stat-label">In Progress</div>
+                <div class="stat-label">In progress / review</div>
             </div>
             <div class="stat stat-complete">
                 <div class="stat-value" id="statComplete">\(data.completedCount)</div>
-                <div class="stat-label">Completed</div>
+                <div class="stat-label">Approved</div>
             </div>
         </div>
         """
@@ -346,11 +346,11 @@ struct WebReportRenderer {
 
     private static func renderSnagCard(_ snag: SnagData, globalPhotoIndexStart: Int, canInteract: Bool = false) -> String {
         let statusColor = statusColorCSS(snag.status)
-        let statusLabel = snag.status.replacingOccurrences(of: "_", with: " ").capitalized
+        let statusLabel = SnagStatus.reportTitle(snag.status)
         let priorityColor = priorityColorCSS(snag.priority)
         let priorityLabel = snag.priority.capitalized
         let snagIdAttr = snag.id.map { " data-snag-id=\"\($0.htmlEscaped)\"" } ?? ""
-        let isActionable = snag.status == "open" || snag.status == "in_progress"
+        let isActionable = SnagStatus.contractorCanSubmit(snag.status)
 
         var metaItems = ""
         if let location = snag.location, !location.isEmpty {
@@ -376,23 +376,23 @@ struct WebReportRenderer {
         // Action buttons for interactive mode
         var actionsHTML = ""
         if canInteract, let snagId = snag.id, isActionable {
-            if snag.status == "open" {
+            if ["open", "sent", "opened", "cold", "overdue"].contains(snag.status) {
                 actionsHTML = """
                 <div class="snag-actions">
                     <button class="action-btn action-start" onclick="snagAction('start','\(snagId.htmlEscaped)',this)">Start Work</button>
-                    <button class="action-btn action-complete" onclick="snagAction('complete','\(snagId.htmlEscaped)',this)">Mark Complete</button>
+                    <button class="action-btn action-complete" onclick="snagAction('complete','\(snagId.htmlEscaped)',this)">Submit for review</button>
                 </div>
                 """
-            } else if snag.status == "in_progress" {
+            } else {
                 actionsHTML = """
                 <div class="snag-actions">
-                    <button class="action-btn action-complete" onclick="snagAction('complete','\(snagId.htmlEscaped)',this)">Mark Complete</button>
+                    <button class="action-btn action-complete" onclick="snagAction('complete','\(snagId.htmlEscaped)',this)">Submit for review</button>
                 </div>
                 """
             }
         }
 
-        // Completion form (hidden by default, shown when "Mark Complete" is tapped)
+        // Completion form (hidden by default, shown when "Submit for review" is tapped)
         var completionFormHTML = ""
         if canInteract, let snagId = snag.id, isActionable {
             completionFormHTML = """
@@ -517,7 +517,7 @@ struct WebReportRenderer {
     private static func renderOGMeta(data: ReportData, firstPhotoURL: String?) -> String {
         let totalCount = data.openCount + data.inProgressCount + data.completedCount
         let ogTitle = "\(data.projectName) - Snaglist Report"
-        let ogDescription = "\(totalCount) snags - \(data.completedCount) completed, \(data.openCount) open"
+        let ogDescription = "\(totalCount) snags - \(data.completedCount) approved, \(data.openCount) needing work"
         let ogURL = "\(data.baseURL)/m/\(data.slug)"
 
         var meta = """
@@ -644,8 +644,9 @@ struct WebReportRenderer {
         switch status {
         case "open": return "#6B7280"
         case "in_progress": return "#CA8A04"
-        case "resolved", "verified", "closed": return "#16A34A"
-        case "rejected": return "#DC2626"
+        case "approved", "resolved", "verified", "closed": return "#16A34A"
+        case "submitted", "awaitingApproval", "complete", "completed": return "#9A6700"
+        case "rejected", "sentBack": return "#DC2626"
         default: return "#6B7280"
         }
     }
@@ -1171,7 +1172,7 @@ struct WebReportRenderer {
                     });
                     var result=await resp.json();
                     if(result.success||resp.ok){
-                        updateCardStatus(snagId,'completed');
+                        updateCardStatus(snagId,'submitted');
                         hideForm(snagId);
                         updateStats();
                         // Show success message
@@ -1203,8 +1204,8 @@ struct WebReportRenderer {
                 // Update status badge
                 var badge=card.querySelector('.status-badge');
                 if(badge){
-                    var colors={open:'#DC2626',in_progress:'#CA8A04',completed:'#16A34A',closed:'#16A34A',resolved:'#16A34A'};
-                    var labels={open:'Open',in_progress:'In Progress',completed:'Completed',closed:'Closed',resolved:'Resolved'};
+                    var colors={open:'#DC2626',in_progress:'#CA8A04',submitted:'#9A6700',awaitingApproval:'#9A6700',sentBack:'#DC2626',approved:'#16A34A',closed:'#16A34A',resolved:'#16A34A'};
+                    var labels={open:'Open',in_progress:'In progress',submitted:'Submitted for review',awaitingApproval:'Awaiting approval',sentBack:'Sent back',approved:'Approved',closed:'Approved',resolved:'Approved'};
                     var c=colors[newStatus]||'#6B7280';
                     badge.style.background=c+'18';
                     badge.style.color=c;
@@ -1215,13 +1216,13 @@ struct WebReportRenderer {
                 if(newStatus==='in_progress'&&actions){
                     var b=document.createElement('button');
                     b.className='action-btn action-complete';
-                    b.textContent='Mark Complete';
+                    b.textContent='Submit for review';
                     b.onclick=function(){snagAction('complete',snagId,b);};
                     actions.innerHTML='';
                     actions.appendChild(b);
-                } else if(newStatus==='completed'||newStatus==='closed'){
+                } else if(['submitted','awaitingApproval','approved','closed'].includes(newStatus)){
                     if(actions)actions.style.display='none';
-                    card.classList.add('completed');
+                    if(['approved','closed'].includes(newStatus))card.classList.add('completed');
                 }
             }
 
@@ -1230,16 +1231,16 @@ struct WebReportRenderer {
                 var o=0,p=0,c=0;
                 cards.forEach(function(card){
                     var s=card.getAttribute('data-status');
-                    if(s==='open')o++;
-                    else if(s==='in_progress')p++;
-                    else c++;
+                    if(['approved','closed','resolved','verified'].includes(s))c++;
+                    else if(['draft','open','sentBack','rejected','overdue'].includes(s))o++;
+                    else p++;
                 });
                 var total=cards.length;
                 var pct=total>0?Math.round(c/total*100):0;
                 var bar=document.querySelector('.progress-bar');
                 if(bar)bar.style.width=pct+'%';
                 var label=document.getElementById('progressLabel');
-                if(label)label.textContent=c+' of '+total+' snags completed \\u2014 '+pct+'%';
+                if(label)label.textContent=c+' of '+total+' snags approved \\u2014 '+pct+'%';
                 var so=document.getElementById('statOpen');if(so)so.textContent=o;
                 var sp=document.getElementById('statProgress');if(sp)sp.textContent=p;
                 var sc=document.getElementById('statComplete');if(sc)sc.textContent=c;
@@ -1250,7 +1251,7 @@ struct WebReportRenderer {
                 var allDone=true;
                 cards.forEach(function(card){
                     var s=card.getAttribute('data-status');
-                    if(s==='open'||s==='in_progress')allDone=false;
+                    if(!['submitted','awaitingApproval','approved','closed','resolved','verified'].includes(s))allDone=false;
                 });
                 if(allDone&&cards.length>0){
                     showCelebration(cards.length);
@@ -1265,8 +1266,8 @@ struct WebReportRenderer {
                 var card=document.createElement('div');
                 card.style.cssText='background:#fff;border-radius:20px;padding:40px 32px;text-align:center;max-width:400px;width:100%';
                 card.innerHTML='<div style="font-size:48px;margin-bottom:12px">&#127881;</div>'
-                    +'<h2 style="font-size:22px;font-weight:800;color:#111827;margin-bottom:8px">All snags completed!</h2>'
-                    +'<p style="color:#6B7280;font-size:15px;margin-bottom:20px">'+count+' snags submitted for review</p>'
+                    +'<h2 style="font-size:22px;font-weight:800;color:#111827;margin-bottom:8px">Your updates are submitted</h2>'
+                    +'<p style="color:#6B7280;font-size:15px;margin-bottom:20px">The manager will review submitted work before approval.</p>'
                     +'<a href="https://apps.apple.com/app/id6758858102?ct=magic_link_complete" style="display:inline-block;background:#F97316;color:#fff;text-decoration:none;padding:14px 28px;border-radius:12px;font-size:15px;font-weight:600;margin-bottom:12px">Get Snaglist</a><br>';
                 var dismissBtn=document.createElement('button');
                 dismissBtn.textContent='Dismiss';

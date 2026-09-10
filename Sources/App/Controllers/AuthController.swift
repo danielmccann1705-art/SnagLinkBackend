@@ -1,9 +1,12 @@
 import Vapor
 import Fluent
+import FluentSQL
 @preconcurrency import JWT
 import Crypto
 
 struct AuthController: RouteCollection {
+    // This server authenticates the Snaglist iOS app. Never skip audience validation.
+    static let appleApplicationIdentifier = "com.snaglist.app"
     func boot(routes: RoutesBuilder) throws {
         let auth = routes.grouped("api", "v1", "auth")
         auth.post("apple", use: appleSignIn)
@@ -26,7 +29,7 @@ struct AuthController: RouteCollection {
         do {
             appleToken = try await req.jwt.apple.verify(
                 input.identityToken,
-                applicationIdentifier: Environment.get("APPLE_APP_ID")
+                applicationIdentifier: Self.appleApplicationIdentifier
             ).get()
         } catch {
             throw Abort(.unauthorized, reason: "Invalid Apple identity token")
@@ -35,13 +38,8 @@ struct AuthController: RouteCollection {
         let appleUserId = appleToken.subject.value
         let email = appleToken.email
 
-        // Find or create user
-        let user: User
-        if let existing = try await User.query(on: req.db).filter(\.$appleUserId == appleUserId).first() {
-            user = existing
-        } else {
-            user = User(appleUserId: appleUserId, email: email, name: input.firstName)
-            try await user.save(on: req.db)
+        let user = try await req.db.transaction { db in
+            try await VerifiedIdentityService.resolveApple(subject: appleUserId, email: email, name: input.firstName, on: db)
         }
 
         return try issueAuthResponse(for: user, on: req)
@@ -114,43 +112,29 @@ struct AuthController: RouteCollection {
         }
 
         let tokenHash = SHA256Hasher.hash(token: rawToken)
-        guard let authToken = try await MagicLinkAuthToken.query(on: req.db)
-            .filter(\.$tokenHash == tokenHash)
-            .first()
-        else {
-            throw Abort(.gone, reason: "This sign-in link is invalid or has expired")
-        }
+        let user = try await req.db.transaction { db -> User in
+            guard let sql = db as? SQLDatabase else { throw Abort(.serviceUnavailable) }
+            // Serialize consumption across processes, not only within one Worker.
+            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "signin-token:" + tokenHash), 0))").run()
+            guard let authToken = try await MagicLinkAuthToken.query(on: db)
+                .filter(\.$tokenHash == tokenHash)
+                .first()
+            else {
+                throw Abort(.gone, reason: "This sign-in link is invalid or has expired")
+            }
 
-        if authToken.isConsumed {
-            throw Abort(.gone, reason: "This sign-in link has already been used", identifier: "consumed")
-        }
-        if authToken.isExpired {
-            throw Abort(.gone, reason: "This sign-in link has expired", identifier: "expired")
-        }
+            if authToken.isConsumed {
+                throw Abort(.gone, reason: "This sign-in link has already been used", identifier: "consumed")
+            }
+            if authToken.isExpired {
+                throw Abort(.gone, reason: "This sign-in link has expired", identifier: "expired")
+            }
 
-        // Single-use: mark consumed before issuing the session.
-        authToken.consumedAt = Date()
-        try await authToken.save(on: req.db)
+            // Single-use: mark consumed before issuing the session.
+            authToken.consumedAt = Date()
+            try await authToken.save(on: db)
 
-        let email = authToken.email
-
-        // Find an existing account by email (portable across providers — an email previously
-        // used for Sign in with Apple resolves to the same account), else create one.
-        let user: User
-        if let existing = try await User.query(on: req.db)
-            .filter(\.$email == email)
-            .sort(\.$createdAt, .ascending)
-            .first()
-        {
-            user = existing
-        } else {
-            user = User(
-                appleUserId: nil,
-                email: email,
-                name: authToken.requestedName,
-                authProvider: .magicLink
-            )
-            try await user.save(on: req.db)
+            return try await VerifiedIdentityService.resolveEmail(authToken.email, name: authToken.requestedName, on: db)
         }
 
         return try issueAuthResponse(for: user, on: req)
@@ -158,42 +142,14 @@ struct AuthController: RouteCollection {
 
     // MARK: - Email recognition
 
-    /// `GET /api/v1/auth/recognise?email=…`
-    /// No auth. Returns whether the email maps to a known account, plus minimal display data.
-    /// Privacy: the "not recognised" response shape is identical regardless of why (no such
-    /// user, invalid input, etc.) so it can't be used to probe account state.
+    /// Compatibility response. Unauthenticated email recognition must not expose
+    /// account existence, display names or project counts. Verification supplies
+    /// that information only after control of an identity has been established.
     @Sendable
     func recogniseEmail(req: Request) async throws -> EmailRecognitionResponse {
-        // Rate limit: 10/min per IP to frustrate enumeration.
         let ip = IPAddressExtractor.extract(from: req)
         try await RateLimitService.enforce(key: "recognise:\(ip)", action: .emailRecognise, on: req.db)
-
-        guard let rawEmail = try? req.query.get(String.self, at: "email") else {
-            return EmailRecognitionResponse.notRecognised
-        }
-        let email = EmailValidator.normalize(rawEmail)
-        guard EmailValidator.isValidFormat(email) else {
-            return EmailRecognitionResponse.notRecognised
-        }
-
-        guard let user = try await User.query(on: req.db)
-            .filter(\.$email == email)
-            .sort(\.$createdAt, .ascending)
-            .first(),
-            let userId = user.id
-        else {
-            return EmailRecognitionResponse.notRecognised
-        }
-
-        let projectCount = try await Project.query(on: req.db)
-            .filter(\.$ownerId == userId)
-            .count()
-
-        return EmailRecognitionResponse(
-            recognised: true,
-            displayName: user.name,
-            projectCount: projectCount
-        )
+        return .notRecognised
     }
 
     // MARK: - Helpers
@@ -214,7 +170,9 @@ struct AuthController: RouteCollection {
         let jwtPayload = UserJWTPayload(
             subject: SubjectClaim(value: user.id!.uuidString),
             expiration: ExpirationClaim(value: Date().addingTimeInterval(30 * 24 * 60 * 60)), // 30 days
-            userId: user.id!
+            userId: user.id!,
+            authVersion: user.authVersion,
+            authenticatedAt: Date()
         )
         let token = try req.jwt.sign(jwtPayload)
 

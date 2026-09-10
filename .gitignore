@@ -22,7 +22,7 @@ DerivedData/
 # Swift Package Manager
 .build/
 Packages/
-Package.resolved
+# This executable server commits Package.resolved for repeatable deployments.
 
 # Environment
 .env
@@ -56,3 +56,6 @@ test-results/
 
 # Docker
 docker-compose.override.yml
+
+# Cloudflare local account/build cache
+.wrangler/

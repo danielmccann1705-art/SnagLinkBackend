@@ -27,6 +27,9 @@ final class AuthRecogniseEndpointTests: XCTestCase {
         guard dbAvailable else { return }
         app = try await Application.make(.testing)
         try await configure(app)
+        // Each test exercises one independent IP budget in the disposable DB.
+        // Other test methods must not consume the ten attempts under test.
+        try await RateLimitEntry.query(on: app.db).filter(\.$action == RateLimitAction.emailRecognise.rawValue).delete()
     }
 
     override func tearDown() async throws {
@@ -34,7 +37,7 @@ final class AuthRecogniseEndpointTests: XCTestCase {
         app = nil
     }
 
-    func testRecognisedEmailReturnsDisplayNameAndProjectCount() async throws {
+    func testKnownEmailDoesNotDiscloseIdentityOrProjectCount() async throws {
         try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
         let email = "known-\(UUID().uuidString)@example.com"
         let user = User(appleUserId: nil, email: email, name: "Kendall Builds", authProvider: .magicLink)
@@ -45,9 +48,9 @@ final class AuthRecogniseEndpointTests: XCTestCase {
         try await app.test(.GET, "api/v1/auth/recognise?email=\(email)", afterResponse: { res async in
             XCTAssertEqual(res.status, .ok)
             let body = try? res.content.decode(EmailRecognitionResponse.self)
-            XCTAssertEqual(body?.recognised, true)
-            XCTAssertEqual(body?.displayName, "Kendall Builds")
-            XCTAssertEqual(body?.projectCount, 1)
+            XCTAssertEqual(body?.recognised, false)
+            XCTAssertNil(body?.displayName)
+            XCTAssertNil(body?.projectCount)
         })
     }
 

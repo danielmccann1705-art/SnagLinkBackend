@@ -57,10 +57,12 @@ struct DeviceController: RouteCollection {
     /// Removes a device token (e.g., on logout)
     @Sendable
     func unregisterDevice(req: Request) async throws -> HTTPStatus {
+        let userId = try req.requireAuthenticatedUserId()
         let input = try req.content.decode(UnregisterDeviceRequest.self)
 
         try await DeviceToken.query(on: req.db)
             .filter(\.$deviceToken == input.deviceToken)
+            .filter(\.$userId == userId)
             .delete()
 
         return .noContent

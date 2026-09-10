@@ -4,6 +4,17 @@ import Fluent
 struct PINVerificationService {
     static let maxAttempts = 5
     static let lockoutDuration: TimeInterval = 60 * 60 // 1 hour
+    static let iosHashPrefix = "ios-sha256-v1:"
+
+    /// Import the existing on-device verifier without persisting a plaintext PIN.
+    /// A successful PIN entry upgrades it to bcrypt through the normal verification path.
+    static func importIOSHash(_ hash: String, salt: String) throws -> String {
+        guard hash.count == 64, hash.allSatisfy({ "0123456789abcdef".contains($0) }),
+              Data(base64Encoded: salt)?.count == 16 else {
+            throw Abort(.badRequest, reason: "Invalid PIN protection data. Create a new protected link.")
+        }
+        return iosHashPrefix + hash
+    }
 
     /// Verifies a PIN for a magic link with brute-force protection.
     /// Supports both bcrypt (new) and SHA256 (legacy) hashes.
@@ -33,7 +44,12 @@ struct PINVerificationService {
             guard let pinSalt = magicLink.pinSalt else {
                 throw Abort(.badRequest, reason: "This magic link does not require a PIN")
             }
-            isValid = SHA256Hasher.verify(pin: pin, salt: pinSalt, storedHash: pinHash)
+            if pinHash.hasPrefix(iosHashPrefix) {
+                let expected = SHA256Hasher.hash(token: pin + pinSalt)
+                isValid = ConstantTimeComparison.compare(expected, String(pinHash.dropFirst(iosHashPrefix.count)))
+            } else {
+                isValid = SHA256Hasher.verify(pin: pin, salt: pinSalt, storedHash: pinHash)
+            }
         } else {
             // Bcrypt verification
             isValid = try Bcrypt.verify(pin, created: pinHash)

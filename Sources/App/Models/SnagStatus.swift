@@ -34,6 +34,33 @@ enum SnagStatus: String, Codable, CaseIterable {
         return raw
     }
 
+    static func isApproved(_ raw: String) -> Bool {
+        ["approved", "resolved", "verified"].contains(normalize(raw))
+    }
+
+    static func needsWork(_ raw: String) -> Bool {
+        ["draft", "open", "sentBack", "overdue"].contains(normalize(raw))
+    }
+
+    static func isInProgressOrReview(_ raw: String) -> Bool {
+        !isApproved(raw) && !needsWork(raw)
+    }
+
+    static func contractorCanSubmit(_ raw: String) -> Bool {
+        ["open", "sent", "opened", "cold", "overdue", "in_progress", "sentBack"].contains(normalize(raw))
+    }
+
+    static func reportTitle(_ raw: String) -> String {
+        switch normalize(raw) {
+        case "approved", "resolved", "verified": return "Approved"
+        case "submitted", "complete", "completed": return "Submitted for review"
+        case "awaitingApproval": return "Awaiting approval"
+        case "sentBack": return "Sent back"
+        case "in_progress": return "In progress"
+        default: return raw.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
     /// `cold` and `overdue` are derived at read time, never written to the database.
     /// `overdue` is fully derivable server-side; `cold` requires a magic-link "sent" timestamp
     /// that the server `Snag` model does not track, so cold remains client-derived only (the

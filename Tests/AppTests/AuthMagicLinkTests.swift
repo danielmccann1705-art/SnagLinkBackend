@@ -92,6 +92,31 @@ final class AuthMagicLinkEndpointTests: XCTestCase {
         return raw
     }
 
+    func testConcurrentVerificationConsumesTokenOnlyOnce() async throws {
+        try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
+        let email = "concurrent-\(UUID())@example.com"
+        let raw = try await seedToken(email: email)
+        let application = app!
+        let codes = try await withThrowingTaskGroup(of: UInt.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    var code: UInt = 0
+                    try await application.test(.POST, "api/v1/auth/magic-link/verify", beforeRequest: { req in
+                        try req.content.encode(["token": raw])
+                    }, afterResponse: { response async in code = response.status.code })
+                    return code
+                }
+            }
+            var values: [UInt] = []
+            for try await code in group { values.append(code) }
+            return values
+        }
+        XCTAssertEqual(codes.filter { $0 == 200 }.count, 1)
+        XCTAssertEqual(codes.filter { $0 == 410 }.count, 7)
+        let count = try await User.query(on: app.db).filter(\.$email == EmailValidator.normalize(email)).count()
+        XCTAssertEqual(count, 1)
+    }
+
     func testRequestStoresTokenAndReturns204() async throws {
         try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
         let email = "req-\(UUID().uuidString)@example.com"
@@ -100,7 +125,9 @@ final class AuthMagicLinkEndpointTests: XCTestCase {
         }, afterResponse: { res async in
             XCTAssertEqual(res.status, .noContent)
         })
-        let count = try await MagicLinkAuthToken.query(on: app.db).filter(\.$email == email).count()
+        // Requests deliberately contain an uppercase UUID; storage normalizes email.
+        let count = try await MagicLinkAuthToken.query(on: app.db)
+            .filter(\.$email == EmailValidator.normalize(email)).count()
         XCTAssertEqual(count, 1)
     }
 
@@ -151,7 +178,7 @@ final class AuthMagicLinkEndpointTests: XCTestCase {
             let body = try? res.content.decode(AuthResponse.self)
             XCTAssertNotNil(body)
             XCTAssertFalse(body?.token.isEmpty ?? true)
-            XCTAssertEqual(body?.user.email, email)
+            XCTAssertEqual(body?.user.email, EmailValidator.normalize(email))
             XCTAssertNil(body?.user.appleUserId)
             XCTAssertEqual(body?.user.authProvider, AuthProvider.magicLink.rawValue)
             XCTAssertEqual(body?.isNewUser, true)

@@ -23,7 +23,7 @@ struct ProjectController: RouteCollection {
         let status = try? req.query.get(String.self, at: "status")
 
         var query = Project.query(on: req.db)
-            .filter(\.$ownerId == userId)
+            .filter(\.$ownerId == userId).filter(LegacyProjectAccess.personalRecords(.projects))
             .sort(\.$updatedAt, .descending)
 
         if let status = status {
@@ -123,7 +123,7 @@ struct ProjectController: RouteCollection {
 
         guard let project = try await Project.query(on: req.db)
             .filter(\.$id == id)
-            .filter(\.$ownerId == userId)
+            .filter(\.$ownerId == userId).filter(LegacyProjectAccess.personalRecords(.projects))
             .first() else {
             throw Abort(.notFound, reason: "Project not found")
         }

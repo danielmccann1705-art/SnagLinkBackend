@@ -67,6 +67,13 @@ final class Snag: Model, Content, @unchecked Sendable {
     @Field(key: "tags")
     var tags: [String]
 
+    @Field(key: "revision") var revision: Int64
+    @Field(key: "workflow_revision") var workflowRevision: Int64
+    @OptionalField(key: "display_number") var displayNumber: Int64?
+    @OptionalField(key: "published_at") var publishedAt: Date?
+    @OptionalField(key: "archived_at") var archivedAt: Date?
+    @OptionalField(key: "archive_reason") var archiveReason: String?
+
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?
 
@@ -117,5 +124,7 @@ final class Snag: Model, Content, @unchecked Sendable {
         self.assignedAt = assignedAt
         self.ownerId = ownerId
         self.tags = tags
+        self.revision = 1
+        self.workflowRevision = 1
     }
 }

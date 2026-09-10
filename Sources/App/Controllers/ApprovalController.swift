@@ -29,14 +29,14 @@ struct ApprovalController: RouteCollection {
         let offset = (page - 1) * perPage
 
         let base = Snag.query(on: req.db)
-            .filter(\.$ownerId == userId)
+            .filter(\.$ownerId == userId).filter(LegacyProjectAccess.personalRecords(.snags))
             .filter(\.$status ~~ Self.pendingStatuses)
 
         let totalCount = try await base.count()
 
         // Oldest first by default (longest-waiting submissions surface at the top).
         let snags = try await Snag.query(on: req.db)
-            .filter(\.$ownerId == userId)
+            .filter(\.$ownerId == userId).filter(LegacyProjectAccess.personalRecords(.snags))
             .filter(\.$status ~~ Self.pendingStatuses)
             .sort(\.$updatedAt, .ascending)
             .offset(offset)
@@ -90,7 +90,23 @@ struct ApprovalController: RouteCollection {
 
         snag.status = "approved"
         snag.closedAt = Date()
-        try await snag.save(on: req.db)
+        try await req.db.transaction { db in
+            try await SnagWorkflowService.lockProject(snag.projectId, on: db)
+            guard let current = try await Snag.find(snag.id!, on: db),
+                  ["submitted", "awaitingApproval"].contains(SnagStatus.normalize(current.status)) else {
+                throw Abort(.conflict, reason: "This snag is no longer awaiting review. Refresh before continuing.")
+            }
+            try await SnagWorkflowService.setStatus("approved", snagId: snag.id!, ownerId: userId, projectId: snag.projectId, on: db)
+            let links = try await MagicLink.query(on: db).filter(\.$createdById == userId)
+                .filter(\.$projectId == snag.projectId).all().compactMap(\.id)
+            if !links.isEmpty {
+                for completion in try await Completion.query(on: db).filter(\.$snagId == snag.id!)
+                    .filter(\.$magicLinkId ~~ links).filter(\.$status == .pending).all() {
+                    completion.approve(by: userId, userName: "Project Manager")
+                    try await completion.save(on: db)
+                }
+            }
+        }
 
         notifyContractor(snag: snag, approved: true, note: nil, req: req)
 
@@ -108,10 +124,26 @@ struct ApprovalController: RouteCollection {
         let snag = try await ownedSnag(req: req, userId: userId)
 
         snag.status = "sentBack"
-        try await snag.save(on: req.db)
+        try await req.db.transaction { db in
+            try await SnagWorkflowService.lockProject(snag.projectId, on: db)
+            guard let current = try await Snag.find(snag.id!, on: db),
+                  ["submitted", "awaitingApproval"].contains(SnagStatus.normalize(current.status)) else {
+                throw Abort(.conflict, reason: "This snag is no longer awaiting review. Refresh before continuing.")
+            }
+            try await SnagWorkflowService.setStatus("sentBack", snagId: snag.id!, ownerId: userId, projectId: snag.projectId, on: db)
+            let links = try await MagicLink.query(on: db).filter(\.$createdById == userId)
+                .filter(\.$projectId == snag.projectId).all().compactMap(\.id)
+            if !links.isEmpty {
+                for completion in try await Completion.query(on: db).filter(\.$snagId == snag.id!)
+                    .filter(\.$magicLinkId ~~ links).filter(\.$status == .pending).all() {
+                    completion.reject(by: userId, userName: "Project Manager", reason: body.reason.rawValue)
+                    try await completion.save(on: db)
+                }
+            }
+            let record = SnagSendBack(snagId: snag.id!, reason: body.reason, note: body.note, sentBackBy: userId)
+            try await record.save(on: db)
+        }
 
-        let record = SnagSendBack(snagId: snag.id!, reason: body.reason, note: body.note, sentBackBy: userId)
-        try await record.save(on: req.db)
 
         notifyContractor(snag: snag, approved: false, note: body.note, req: req)
 
@@ -128,7 +160,7 @@ struct ApprovalController: RouteCollection {
         }
         guard let snag = try await Snag.query(on: req.db)
             .filter(\.$id == id)
-            .filter(\.$ownerId == userId)
+            .filter(\.$ownerId == userId).filter(LegacyProjectAccess.personalRecords(.snags))
             .first() else {
             throw Abort(.notFound, reason: "Snag not found")
         }

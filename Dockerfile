@@ -1,18 +1,22 @@
 # Build stage
-FROM swift:6.0-jammy as builder
+FROM swift:6.0-jammy AS builder
 
 WORKDIR /app
 
 # Copy package files first for better caching
 COPY Package.swift Package.resolved* ./
 
+# SwiftPM validates every target path, including tests, during a product build.
+# Tests stay in the builder; the runtime image receives only the App executable.
+COPY Tests ./Tests
+
 # Resolve and fetch dependencies
 RUN swift package resolve
 
 # Pre-build dependencies in a cached layer
 RUN mkdir -p Sources/App && \
-    echo 'import Vapor; @main struct Placeholder { static func main() async throws { print("x") } }' > Sources/App/main.swift && \
-    (swift build -c release --product App -j 1 || true) && \
+    echo 'import Vapor; print("dependency cache")' > Sources/App/main.swift && \
+    swift build -c release --product App -j 1 && \
     rm -rf Sources
 
 # Copy actual source code
@@ -24,7 +28,7 @@ RUN swift build -c release --product App -j 1
 # Runtime stage
 FROM swift:6.0-jammy-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends imagemagick && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends imagemagick curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN useradd --create-home --user-group vapor

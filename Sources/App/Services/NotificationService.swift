@@ -14,7 +14,9 @@ struct NotificationService {
     }
 
     private static let resendBaseURL = "https://api.resend.com"
-    private static let fromEmail = "Snaglist <notifications@snaglist.app>"
+    private static var fromEmail: String {
+        Environment.get("EMAIL_FROM") ?? "Snaglist <notifications@snaglist.app>"
+    }
 
     // MARK: - Email Types
 
@@ -22,6 +24,7 @@ struct NotificationService {
         case apiKeyNotConfigured
         case sendFailed(String)
         case invalidResponse
+        case recipientNotAllowed
 
         var status: HTTPResponseStatus {
             switch self {
@@ -31,6 +34,8 @@ struct NotificationService {
                 return .internalServerError
             case .invalidResponse:
                 return .internalServerError
+            case .recipientNotAllowed:
+                return .forbidden
             }
         }
 
@@ -42,6 +47,8 @@ struct NotificationService {
                 return "Failed to send email: \(message)"
             case .invalidResponse:
                 return "Invalid response from email service"
+            case .recipientNotAllowed:
+                return "Email delivery is restricted in this environment"
             }
         }
     }
@@ -365,6 +372,9 @@ struct NotificationService {
         apiKey: String,
         client: Client
     ) async throws {
+        guard EmailDeliveryPolicy.allows(email, configuredRecipients: Environment.get("EMAIL_ALLOWED_RECIPIENTS")) else {
+            throw EmailError.recipientNotAllowed
+        }
         let request = ResendEmailRequest(
             from: fromEmail,
             to: [email],

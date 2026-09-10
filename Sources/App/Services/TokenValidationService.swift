@@ -44,6 +44,8 @@ struct TokenValidationService {
             throw ValidationError.locked
         }
 
+        try await LegacyProjectAccess.requireAvailable(projectID: magicLink.projectId, ownerID: magicLink.createdById, on: db)
+
         return magicLink
     }
 
@@ -58,7 +60,7 @@ struct TokenValidationService {
         on db: Database
     ) async throws -> TeamInvite {
         guard let invite = try await TeamInvite.query(on: db)
-            .filter(\.$token == token)
+            .group(.or, { $0.filter(\.$tokenHash == SHA256Hasher.hash(token: token)).filter(\.$token == token) })
             .first() else {
             throw ValidationError.notFound
         }

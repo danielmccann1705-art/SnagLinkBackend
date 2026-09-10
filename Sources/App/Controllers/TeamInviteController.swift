@@ -52,47 +52,15 @@ struct TeamInviteController: RouteCollection {
         let createRequest = try req.content.decode(CreateTeamInviteRequest.self)
         try createRequest.validate()
 
-        // Check for existing pending invite
-        let existingInvite = try await TeamInvite.query(on: req.db)
-            .filter(\.$email == createRequest.email)
-            .filter(\.$teamId == createRequest.teamId)
-            .filter(\.$status == InviteStatus.pending.rawValue)
-            .first()
-
-        if existingInvite != nil {
-            throw Abort(.conflict, reason: "A pending invite already exists for this email")
+        guard createRequest.role != "viewer" else {
+            throw Abort(.conflict, reason: "Ask an admin to invite a Member using the current app")
         }
-
-        // Generate secure token
-        let token = try SecureTokenGenerator.generate()
-
-        // Calculate expiration (default 7 days)
-        let expiresInDays = createRequest.expiresInDays ?? 7
-        let expiresAt = Calendar.current.date(byAdding: .day, value: expiresInDays, to: Date())!
-
-        let invite = TeamInvite(
-            email: createRequest.email.lowercased(),
-            role: TeamRole(rawValue: createRequest.role)!,
-            token: token,
-            teamId: createRequest.teamId,
-            expiresAt: expiresAt,
-            invitedByUserId: userId,
-            invitedByName: createRequest.inviterName
-        )
-
-        try await invite.save(on: req.db)
-
-        // Log creation
-        try await AuditService.logTeamInviteAction(
-            invite: invite,
-            eventType: .teamInviteCreated,
-            userId: userId,
-            request: req,
-            success: true,
-            on: req.db
-        )
-
-        return TeamInviteResponse(from: invite, includeToken: true)
+        let result = try await req.db.transaction { db in
+            try await WorkspaceInvitationService.issue(workspaceID: createRequest.teamId,
+                email: createRequest.email, role: createRequest.role == "admin" ? "admin" : "member",
+                projects: [], actorID: userId, on: db)
+        }
+        return TeamInviteResponse(from: result.0, rawToken: result.1, legacyRoles: true)
     }
 
     /// Lists pending invites for the authenticated user's email
@@ -101,22 +69,12 @@ struct TeamInviteController: RouteCollection {
     func listPending(req: Request) async throws -> [TeamInviteResponse] {
         let userId = try req.requireAuthenticatedUserId()
 
-        guard let user = try await User.find(userId, on: req.db) else {
-            throw Abort(.notFound, reason: "User not found")
-        }
-
-        guard let email = user.email else {
-            throw Abort(.badRequest, reason: "No email associated with your account")
-        }
-
+        let emails = try await VerifiedIdentityService.verifiedEmails(for: userId, on: req.db)
+        guard !emails.isEmpty else { return [] }
         let invites = try await TeamInvite.query(on: req.db)
-            .filter(\.$email == email.lowercased())
-            .filter(\.$status == InviteStatus.pending.rawValue)
-            .filter(\.$expiresAt > Date())
-            .sort(\.$createdAt, .descending)
-            .all()
-
-        return invites.map { TeamInviteResponse(from: $0, includeToken: false) }
+            .filter(\.$email ~~ emails).filter(\.$status == InviteStatus.pending.rawValue)
+            .filter(\.$expiresAt > Date()).sort(\.$createdAt, .descending).limit(100).all()
+        return invites.map { TeamInviteResponse(from: $0, legacyRoles: true) }
     }
 
     /// Accepts a team invite
@@ -129,31 +87,11 @@ struct TeamInviteController: RouteCollection {
             throw Abort(.badRequest, reason: "Token is required")
         }
 
-        let invite = try await TokenValidationService.validateTeamInvite(
-            token: token,
-            on: req.db
-        )
-
-        // Update status
-        invite.status = InviteStatus.accepted.rawValue
-        try await invite.save(on: req.db)
-
-        // Log acceptance
-        try await AuditService.logTeamInviteAction(
-            invite: invite,
-            eventType: .teamInviteAccepted,
-            userId: userId,
-            request: req,
-            success: true,
-            on: req.db
-        )
-
-        return TeamInviteActionResponse(
-            success: true,
-            message: "Invite accepted successfully",
-            teamId: invite.teamId,
-            role: invite.role
-        )
+        let invite = try await req.db.transaction { db in
+            try await WorkspaceInvitationService.accept(token: token, actorID: userId, on: db)
+        }
+        return TeamInviteActionResponse(success: true, message: "You have joined the company", teamId: invite.teamId,
+                                        role: invite.role == "member" ? "editor" : invite.role)
     }
 
     /// Declines a team invite
@@ -166,31 +104,18 @@ struct TeamInviteController: RouteCollection {
             throw Abort(.badRequest, reason: "Token is required")
         }
 
-        let invite = try await TokenValidationService.validateTeamInvite(
-            token: token,
-            on: req.db
-        )
-
-        // Update status
-        invite.status = InviteStatus.declined.rawValue
-        try await invite.save(on: req.db)
-
-        // Log decline
-        try await AuditService.logTeamInviteAction(
-            invite: invite,
-            eventType: .teamInviteDeclined,
-            userId: userId,
-            request: req,
-            success: true,
-            on: req.db
-        )
-
-        return TeamInviteActionResponse(
-            success: true,
-            message: "Invite declined",
-            teamId: nil,
-            role: nil
-        )
+        try await req.db.transaction { db in
+            let initial = try await WorkspaceInvitationService.resolve(token: token, on: db)
+            try await WorkspaceAccessService.lock(initial.teamId, on: db)
+            let invite = try await WorkspaceInvitationService.resolve(token: token, on: db)
+            let emails = try await VerifiedIdentityService.verifiedEmails(for: userId, on: db)
+            guard emails.contains(EmailValidator.normalize(invite.email)) else { throw Abort(.forbidden, reason: "Verify the invited email first") }
+            guard invite.isPending, !invite.isExpired else { throw Abort(.gone) }
+            invite.status = InviteStatus.declined.rawValue
+            try await invite.save(on: db)
+            try await WorkspaceAccessService.activity(workspaceID: invite.teamId, actorID: userId, action: "invitation_declined", targetID: invite.requireID(), on: db)
+        }
+        return TeamInviteActionResponse(success: true, message: "Invitation declined", teamId: nil, role: nil)
     }
 
     /// Revokes a team invite
@@ -204,33 +129,9 @@ struct TeamInviteController: RouteCollection {
             throw Abort(.badRequest, reason: "Invalid team invite ID")
         }
 
-        guard let invite = try await TeamInvite.find(id, on: req.db) else {
-            throw Abort(.notFound, reason: "Team invite not found")
+        try await req.db.transaction { db in
+            try await WorkspaceInvitationService.revoke(invitationID: id, actorID: userId, on: db)
         }
-
-        // Verify the user is the one who created the invite
-        guard invite.invitedByUserId == userId else {
-            throw Abort(.forbidden, reason: "You do not have permission to revoke this invite")
-        }
-
-        // Can only revoke pending invites
-        guard invite.status == InviteStatus.pending.rawValue else {
-            throw Abort(.badRequest, reason: "Can only revoke pending invites")
-        }
-
-        invite.status = InviteStatus.revoked.rawValue
-        try await invite.save(on: req.db)
-
-        // Log revocation
-        try await AuditService.logTeamInviteAction(
-            invite: invite,
-            eventType: .teamInviteRevoked,
-            userId: userId,
-            request: req,
-            success: true,
-            on: req.db
-        )
-
         return .noContent
     }
 }

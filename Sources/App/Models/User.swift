@@ -27,10 +27,18 @@ final class User: Model, Content, @unchecked Sendable {
     @Field(key: "auth_provider")
     var authProvider: String
 
-    /// Subscription tier ("free" / "pro"), updated by the client after a RevenueCat
-    /// purchase/restore. Drives the server-side magic-link allowance (B4).
+    @Field(key: "lifecycle_state")
+    var lifecycleState: String
+
+    @Field(key: "auth_version")
+    var authVersion: Int
+
+    /// Cached server-verified subscription tier, never assigned from a client claim.
     @Field(key: "subscription_tier")
     var subscriptionTier: String
+
+    @OptionalField(key: "subscription_verified_until")
+    var subscriptionVerifiedUntil: Date?
 
     /// Flips true on the user's first magic-link send and never resets. That first
     /// (onboarding) send is exempt from the monthly counter (B4).
@@ -52,6 +60,8 @@ final class User: Model, Content, @unchecked Sendable {
         self.email = email
         self.name = name
         self.authProvider = AuthProvider.apple.rawValue
+        self.lifecycleState = "active"
+        self.authVersion = 0
         self.subscriptionTier = SubscriptionTier.free.rawValue
         self.onboardingLinkConsumed = false
     }
@@ -69,6 +79,8 @@ final class User: Model, Content, @unchecked Sendable {
         self.email = email
         self.name = name
         self.authProvider = authProvider.rawValue
+        self.lifecycleState = "active"
+        self.authVersion = 0
         self.subscriptionTier = SubscriptionTier.free.rawValue
         self.onboardingLinkConsumed = false
     }

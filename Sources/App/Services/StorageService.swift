@@ -139,6 +139,21 @@ enum StorageService {
         }
     }
 
+    /// Only app-owned synced-photo keys may be removed by snag deletion.
+    static func deleteOwnedSyncedPhoto(key: String, app: Application) async throws {
+        let key = key.hasPrefix("/") ? String(key.dropFirst()) : key
+        guard key.hasPrefix("uploads/synced-photos/"), !key.contains(".."), !key.contains("\\") else {
+            throw Abort(.badRequest, reason: "Invalid synced-photo storage key")
+        }
+        switch backend {
+        case .r2:
+            _ = try await _s3Client.deleteObject(.init(bucket: bucketName, key: key))
+        case .local:
+            let url = URL(fileURLWithPath: app.directory.publicDirectory).appendingPathComponent(key)
+            if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+        }
+    }
+
     // MARK: - Shutdown
 
     /// Cleanly shuts down the AWS HTTP client. Call before app shutdown.

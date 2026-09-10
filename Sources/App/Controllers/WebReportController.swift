@@ -11,6 +11,20 @@ struct WebReportController: RouteCollection {
         m.post(":slug", "verify", use: verifyPIN)
         m.get(":slug", "photos.zip", use: downloadPhotosZip)
 
+        // Older contractor emails used /link/:token. Redirect through the real
+        // viewer so PIN, expiry and revocation checks remain in one place.
+        routes.get("link", ":token") { req -> Response in
+            let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+            guard let token = req.parameters.get("token"),
+                  let segment = token.addingPercentEncoding(withAllowedCharacters: allowed) else {
+                throw Abort(.badRequest)
+            }
+            let response = req.redirect(to: "/m/\(segment)", redirectType: .temporary)
+            response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+            response.headers.replaceOrAdd(name: "Referrer-Policy", value: "no-referrer")
+            return response
+        }
+
         // B2: preview link viewer (unsent link, submissions disabled)
         routes.get("preview", ":token", use: renderPreview)
 
@@ -113,7 +127,7 @@ struct WebReportController: RouteCollection {
         }
 
         // Parse report JSON
-        guard let jsonData = syncedReport.reportJSON.data(using: .utf8) else {
+        guard let jsonData = (try await SnagDeletionService.visibleReportJSON(syncedReport.reportJSON, ownerId: magicLink.createdById, projectId: magicLink.projectId, on: req.db)).data(using: .utf8) else {
             return htmlResponse(WebReportRenderer.renderError(type: .notSynced))
         }
 
@@ -137,11 +151,8 @@ struct WebReportController: RouteCollection {
                 .sort(\.$sortOrder)
                 .all()
         } else {
-            // Fallback: snag IDs missing from report JSON, query by token
-            syncedPhotos = try await SyncedPhoto.query(on: req.db)
-                .filter(\.$magicLinkToken == token)
-                .sort(\.$sortOrder)
-                .all()
+            // A report with no active snags must not expose stale photo files.
+            syncedPhotos = []
         }
 
         let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.dev"
@@ -233,10 +244,10 @@ struct WebReportController: RouteCollection {
         }
 
         // Calculate status counts
-        let openCount = snagDataItems.filter { $0.status == "open" }.count
-        let inProgressCount = snagDataItems.filter { $0.status == "in_progress" }.count
+        let openCount = snagDataItems.filter { SnagStatus.needsWork($0.status) }.count
+        let inProgressCount = snagDataItems.filter { SnagStatus.isInProgressOrReview($0.status) }.count
         let completedCount = snagDataItems.filter {
-            $0.status == "resolved" || $0.status == "verified" || $0.status == "closed" || $0.status == "completed"
+            SnagStatus.isApproved($0.status)
         }.count
 
         let dateFormatter = DateFormatter()
@@ -336,7 +347,7 @@ struct WebReportController: RouteCollection {
         guard let syncedReport = try await SyncedReport.query(on: req.db)
             .filter(\.$magicLinkToken == token)
             .first(),
-            let jsonData = syncedReport.reportJSON.data(using: .utf8) else {
+            let jsonData = (try await SnagDeletionService.visibleReportJSON(syncedReport.reportJSON, ownerId: magicLink.createdById, projectId: magicLink.projectId, on: req.db)).data(using: .utf8) else {
             throw Abort(.notFound, reason: "Report not found")
         }
 
@@ -369,10 +380,8 @@ struct WebReportController: RouteCollection {
                 .sort(\.$sortOrder)
                 .all()
         } else {
-            syncedPhotos = try await SyncedPhoto.query(on: req.db)
-                .filter(\.$magicLinkToken == token)
-                .sort(\.$sortOrder)
-                .all()
+            // A report with no active snags must not expose stale photo files.
+            syncedPhotos = []
         }
 
         guard !syncedPhotos.isEmpty else {
@@ -522,45 +531,12 @@ struct WebReportController: RouteCollection {
 
     // MARK: - Cookie-based PIN Session
 
-    private static let cookieName = "snaglist_pin"
-    private static let cookieTTL: TimeInterval = 2 * 60 * 60 // 2 hours
-
-    /// Checks if the request has a valid HMAC-signed PIN cookie for this magic link.
     private func isPINVerified(req: Request, magicLink: MagicLink) -> Bool {
-        guard let cookieValue = req.cookies[Self.cookieName]?.string else { return false }
-
-        let parts = cookieValue.split(separator: ":", maxSplits: 2)
-        guard parts.count == 2,
-              let timestamp = TimeInterval(parts[0]),
-              let linkId = magicLink.id?.uuidString else {
-            return false
-        }
-
-        // Check TTL
-        let age = Date().timeIntervalSince1970 - timestamp
-        guard age >= 0 && age < Self.cookieTTL else { return false }
-
-        // Verify HMAC
-        let expectedSig = computeHMAC(timestamp: String(parts[0]), linkId: linkId)
-        return String(parts[1]) == expectedSig
+        PINSessionService.isVerified(req, link: magicLink)
     }
 
-    /// Sets a signed cookie on the response for PIN verification session.
     private func setPINVerifiedCookie(on response: inout Response, magicLink: MagicLink, req: Request) {
-        guard let linkId = magicLink.id?.uuidString else { return }
-        let timestamp = String(Int(Date().timeIntervalSince1970))
-        let signature = computeHMAC(timestamp: timestamp, linkId: linkId)
-        let cookieValue = "\(timestamp):\(signature)"
-
-        let cookie = HTTPCookies.Value(
-            string: cookieValue,
-            expires: Date().addingTimeInterval(Self.cookieTTL),
-            maxAge: Int(Self.cookieTTL),
-            isSecure: true,
-            isHTTPOnly: true,
-            sameSite: .lax
-        )
-        response.cookies[Self.cookieName] = cookie
+        PINSessionService.attach(to: &response, link: magicLink)
     }
 
     // MARK: - CSRF Token
@@ -597,18 +573,6 @@ struct WebReportController: RouteCollection {
         let expectedSig = HMAC<SHA256>.authenticationCode(for: Data(message.utf8), using: key)
         let expectedString = Data(expectedSig).base64EncodedString()
         return String(parts[1]) == expectedString
-    }
-
-    /// Computes HMAC-SHA256 using JWT_SECRET as the key.
-    private func computeHMAC(timestamp: String, linkId: String) -> String {
-        let secret = Environment.get("JWT_SECRET") ?? ""
-        let message = "\(timestamp):\(linkId)"
-        let key = SymmetricKey(data: Data(secret.utf8))
-        let signature = HMAC<SHA256>.authenticationCode(
-            for: Data(message.utf8),
-            using: key
-        )
-        return Data(signature).base64EncodedString()
     }
 
     // MARK: - Debug

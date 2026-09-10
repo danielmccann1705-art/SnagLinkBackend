@@ -47,6 +47,9 @@ struct MagicLinkController: RouteCollection {
         let rateLimited = magicLinks.grouped(RateLimitMiddleware(action: .tokenLookup))
         rateLimited.get(":linkId", "validate", use: validateToken)
         rateLimited.post(":linkId", "verify-pin", use: verifyPIN)
+        // Compatibility paths used by the shipped iOS app and App Clip.
+        rateLimited.get("token", ":linkId", "validate", use: validateToken)
+        rateLimited.post("token", ":linkId", "verify-pin", use: verifyPIN)
         rateLimited.get(":linkId", "snags", use: getSnags)
         rateLimited.get(":linkId", "pdf", use: downloadPDF)
         rateLimited.get(":linkId", "qr", use: generateQRCode)
@@ -58,6 +61,7 @@ struct MagicLinkController: RouteCollection {
         authenticated.post(":linkId", "send", use: sendLink)  // B4
         authenticated.get(use: list)
         authenticated.delete(":linkId", use: revoke)
+        authenticated.post(":linkId", "revoke", use: revokeByToken)
         authenticated.get(":linkId", "analytics", use: getAnalytics)
 
         // Authenticated sync routes for iOS app
@@ -99,7 +103,7 @@ struct MagicLinkController: RouteCollection {
             if let syncedReport = try await SyncedReport.query(on: req.db)
                 .filter(\.$magicLinkToken == magicLink.token)
                 .first(),
-               let jsonData = syncedReport.reportJSON.data(using: .utf8) {
+               let jsonData = (try await SnagDeletionService.visibleReportJSON(syncedReport.reportJSON, ownerId: magicLink.createdById, projectId: magicLink.projectId, on: req.db)).data(using: .utf8) {
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
                 if let report = try? decoder.decode(SyncedReportJSON.self, from: jsonData) {
@@ -133,7 +137,7 @@ struct MagicLinkController: RouteCollection {
     /// Verifies a PIN for a magic link
     /// POST /api/v1/magic-links/:token/verify-pin
     @Sendable
-    func verifyPIN(req: Request) async throws -> PINVerificationResponse {
+    func verifyPIN(req: Request) async throws -> Response {
         guard let token = req.parameters.get("linkId") else {
             throw Abort(.badRequest, reason: "Token is required")
         }
@@ -176,7 +180,9 @@ struct MagicLinkController: RouteCollection {
                     on: req.db
                 )
 
-                return PINVerificationResponse.success(magicLink: magicLink)
+                var response = try await PINVerificationResponse.success(magicLink: magicLink).encodeResponse(for: req)
+                PINSessionService.attach(to: &response, link: magicLink)
+                return response
             } else {
                 // Log failed verification
                 try await AuditService.logPINVerification(
@@ -186,7 +192,7 @@ struct MagicLinkController: RouteCollection {
                     on: req.db
                 )
 
-                return PINVerificationResponse.failure(reason: "Invalid PIN")
+                return try await PINVerificationResponse.failure(reason: "Invalid PIN").encodeResponse(for: req)
             }
         } catch let error as AbortError {
             // Log failed attempt
@@ -218,6 +224,7 @@ struct MagicLinkController: RouteCollection {
     func create(req: Request) async throws -> MagicLinkResponse {
         let userId = try req.requireAuthenticatedUserId()
         let createRequest = try req.content.decode(CreateMagicLinkRequest.self)
+        try await LegacyProjectAccess.requireAvailable(projectID: createRequest.projectId, ownerID: userId, on: req.db)
         try createRequest.validate()
 
         // Generate secure token
@@ -264,7 +271,7 @@ struct MagicLinkController: RouteCollection {
         // Send email notification if contractor email provided
         if let contractorEmail = createRequest.contractorEmail, !contractorEmail.isEmpty {
             let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.dev"
-            let magicLinkURL = "\(baseURL)/link/\(token)"
+            let magicLinkURL = "\(baseURL)/m/\(slug)"
 
             // Fire-and-forget: don't block response on email sending
             Task {
@@ -296,6 +303,7 @@ struct MagicLinkController: RouteCollection {
     func createPreview(req: Request) async throws -> PreviewMagicLinkResponse {
         let userId = try req.requireAuthenticatedUserId()
         let previewRequest = try req.content.decode(PreviewMagicLinkRequest.self)
+        try await LegacyProjectAccess.requireAvailable(projectID: previewRequest.projectId, ownerID: userId, on: req.db)
         try previewRequest.validate()
 
         let token = try SecureTokenGenerator.generate()
@@ -363,6 +371,7 @@ struct MagicLinkController: RouteCollection {
         }
 
         // First-ever send is the free onboarding link: exempt + uncounted.
+        let tier = try await SubscriptionVerificationService.currentTier(user: user, on: req)
         if !user.onboardingLinkConsumed {
             user.onboardingLinkConsumed = true
             try await user.save(on: req.db)
@@ -370,7 +379,6 @@ struct MagicLinkController: RouteCollection {
         }
 
         // Free tier: enforce the monthly cap.
-        let tier = SubscriptionTier(rawValue: user.subscriptionTier) ?? .free
         if tier == .free {
             let count = try await UsageService.currentMonthSendCount(userId: userId, on: req.db)
             guard count < UsageService.freeMonthlyLimit else {
@@ -400,7 +408,7 @@ struct MagicLinkController: RouteCollection {
         let offset = (page - 1) * perPage
 
         let magicLinks = try await MagicLink.query(on: req.db)
-            .filter(\.$createdById == userId)
+            .filter(\.$createdById == userId).filter(LegacyProjectAccess.personalRecords(.magicLinks))
             .sort(\.$createdAt, .descending)
             .offset(offset)
             .limit(perPage)
@@ -430,9 +438,7 @@ struct MagicLinkController: RouteCollection {
         }
 
         // Already revoked
-        if magicLink.isRevoked {
-            throw Abort(.badRequest, reason: "Magic link is already revoked")
-        }
+        if magicLink.isRevoked { return .noContent }
 
         magicLink.revokedAt = Date()
         try await magicLink.save(on: req.db)
@@ -451,6 +457,25 @@ struct MagicLinkController: RouteCollection {
         return .noContent
     }
 
+    /// Compatibility with the token-based native retry queue. Expired/revoked links
+    /// remain revocable; token possession alone never authorizes this operation.
+    @Sendable
+    func revokeByToken(req: Request) async throws -> ReportSyncResponse {
+        let userId = try req.requireAuthenticatedUserId()
+        guard let token = req.parameters.get("linkId"),
+              let link = try await MagicLink.query(on: req.db).filter(\.$token == token)
+                .filter(\.$createdById == userId).filter(LegacyProjectAccess.personalRecords(.magicLinks)).first() else {
+            throw Abort(.notFound, reason: "Magic link not found")
+        }
+        if !link.isRevoked {
+            link.revokedAt = Date()
+            try await link.save(on: req.db)
+            try await AuditService.log(eventType: .magicLinkRevoked, resourceType: .magicLink,
+                resourceId: link.id, userId: userId, request: req, success: true, on: req.db)
+        }
+        return ReportSyncResponse(success: true, message: "Link revoked", syncedAt: Date())
+    }
+
     /// Gets snags accessible via a magic link
     /// GET /api/v1/magic-links/:token/snags
     @Sendable
@@ -465,6 +490,8 @@ struct MagicLinkController: RouteCollection {
             on: req.db
         )
 
+        try PINSessionService.requireVerified(req, link: magicLink)
+
         // Record access
         try await TokenValidationService.recordAccess(
             magicLink: magicLink,
@@ -478,7 +505,7 @@ struct MagicLinkController: RouteCollection {
 
         // Look up synced report data for this magic link
         guard let syncedReport = try await SyncedReport.query(on: req.db)
-            .filter(\.$magicLinkToken == token)
+            .filter(\.$magicLinkToken == magicLink.token)
             .first() else {
             // No synced report yet — return empty response
             return SnagListResponse(
@@ -496,7 +523,7 @@ struct MagicLinkController: RouteCollection {
         }
 
         // Parse the stored report JSON
-        guard let jsonData = syncedReport.reportJSON.data(using: .utf8) else {
+        guard let jsonData = (try await SnagDeletionService.visibleReportJSON(syncedReport.reportJSON, ownerId: magicLink.createdById, projectId: magicLink.projectId, on: req.db)).data(using: .utf8) else {
             throw Abort(.internalServerError, reason: "Failed to read report data")
         }
 
@@ -559,9 +586,9 @@ struct MagicLinkController: RouteCollection {
         }
 
         // Calculate status counts before filtering
-        let openCount = snags.filter { $0.status == "open" }.count
-        let inProgressCount = snags.filter { $0.status == "in_progress" }.count
-        let completedCount = snags.filter { $0.status == "resolved" || $0.status == "verified" || $0.status == "closed" }.count
+        let openCount = snags.filter { SnagStatus.needsWork($0.status) }.count
+        let inProgressCount = snags.filter { SnagStatus.isInProgressOrReview($0.status) }.count
+        let completedCount = snags.filter { SnagStatus.isApproved($0.status) }.count
 
         // Filter by status if provided
         if let status = statusFilter {
@@ -634,6 +661,8 @@ struct MagicLinkController: RouteCollection {
             on: req.db
         )
 
+        try PINSessionService.requireVerified(req, link: magicLink)
+
         // Record access
         try await TokenValidationService.recordAccess(
             magicLink: magicLink,
@@ -646,7 +675,7 @@ struct MagicLinkController: RouteCollection {
         guard let syncedReport = try await SyncedReport.query(on: req.db)
             .filter(\.$magicLinkToken == magicLink.token)
             .first(),
-            let jsonData = syncedReport.reportJSON.data(using: .utf8) else {
+            let jsonData = (try await SnagDeletionService.visibleReportJSON(syncedReport.reportJSON, ownerId: magicLink.createdById, projectId: magicLink.projectId, on: req.db)).data(using: .utf8) else {
             throw Abort(.notFound, reason: "Report data not yet synced. Please sync from the app first.")
         }
 
@@ -683,7 +712,7 @@ struct MagicLinkController: RouteCollection {
 
         var snagRows = ""
         for (index, snag) in snags.enumerated() {
-            let statusColor = snag.status == "open" ? "#dc2626" : (snag.status == "in_progress" ? "#ca8a04" : "#16a34a")
+            let statusColor = SnagStatus.isApproved(snag.status) ? "#16a34a" : (SnagStatus.needsWork(snag.status) ? "#dc2626" : "#9a6700")
             let priorityColor = snag.priority == "critical" ? "#dc2626" : (snag.priority == "high" ? "#ea580c" : (snag.priority == "medium" ? "#2563eb" : "#6b7280"))
 
             snagRows += """
@@ -695,7 +724,7 @@ struct MagicLinkController: RouteCollection {
                 </td>
                 <td style="padding: 12px 8px;">\((snag.location ?? "-").htmlEscaped)</td>
                 <td style="padding: 12px 8px;">
-                    <span style="display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; background: \(statusColor)20; color: \(statusColor);">\(snag.status.replacingOccurrences(of: "_", with: " ").uppercased())</span>
+                    <span style="display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; background: \(statusColor)20; color: \(statusColor);">\(SnagStatus.reportTitle(snag.status).htmlEscaped)</span>
                 </td>
                 <td style="padding: 12px 8px;">
                     <span style="display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; background: \(priorityColor)20; color: \(priorityColor);">\(snag.priority.uppercased())</span>
@@ -705,9 +734,9 @@ struct MagicLinkController: RouteCollection {
             """
         }
 
-        let openCount = snags.filter { $0.status == "open" }.count
-        let inProgressCount = snags.filter { $0.status == "in_progress" }.count
-        let completedCount = snags.filter { $0.status == "resolved" || $0.status == "verified" || $0.status == "closed" }.count
+        let openCount = snags.filter { SnagStatus.needsWork($0.status) }.count
+        let inProgressCount = snags.filter { SnagStatus.isInProgressOrReview($0.status) }.count
+        let completedCount = snags.filter { SnagStatus.isApproved($0.status) }.count
 
         let htmlContent = """
         <!DOCTYPE html>
@@ -854,6 +883,16 @@ struct MagicLinkController: RouteCollection {
     func syncFromiOS(req: Request) async throws -> MagicLinkSyncResponse {
         let userId = try req.requireAuthenticatedUserId()
         let syncRequest = try req.content.decode(SyncMagicLinkRequest.self)
+        try await LegacyProjectAccess.requireAvailable(projectID: syncRequest.projectId, ownerID: userId, on: req.db)
+        guard let accessLevel = AccessLevel(rawValue: syncRequest.accessLevel) else {
+            throw Abort(.badRequest, reason: "Invalid access level")
+        }
+        let importedHash: String?
+        if let hash = syncRequest.pinHash, let salt = syncRequest.pinSalt, syncRequest.hasPIN {
+            importedHash = try PINVerificationService.importIOSHash(hash, salt: salt)
+        } else if syncRequest.pinHash != nil || syncRequest.pinSalt != nil {
+            throw Abort(.badRequest, reason: "Incomplete PIN protection data")
+        } else { importedHash = nil }
 
         let baseURL = Environment.get("BASE_URL") ?? "https://snaglist.dev"
 
@@ -861,6 +900,20 @@ struct MagicLinkController: RouteCollection {
         if let existing = try await MagicLink.query(on: req.db)
             .filter(\.$token == syncRequest.token)
             .first() {
+            guard existing.createdById == userId else { throw Abort(.notFound, reason: "Magic link not found") }
+            guard !existing.isRevoked else { throw Abort(.gone, reason: "This link has been revoked. Create a new link to share again.") }
+            guard existing.projectId == syncRequest.projectId else { throw Abort(.conflict, reason: "A shared link cannot be moved to another project") }
+            guard !existing.requiresPIN || syncRequest.hasPIN else {
+                throw Abort(.conflict, reason: "PIN protection cannot be removed by synchronization")
+            }
+            if syncRequest.hasPIN && !existing.requiresPIN {
+                guard let importedHash else {
+                    throw Abort(.badRequest, reason: "Update the app to publish this PIN-protected link safely")
+                }
+                existing.pinHash = importedHash
+                existing.pinSalt = syncRequest.pinSalt
+            }
+            // Never replace an existing verifier: it may already have been upgraded to bcrypt.
             // Update existing fields
             existing.accessLevel = syncRequest.accessLevel
             existing.expiresAt = syncRequest.expiresAt
@@ -873,16 +926,22 @@ struct MagicLinkController: RouteCollection {
             return MagicLinkSyncResponse(
                 success: true,
                 token: existing.token,
-                shortUrl: "\(baseURL)/m/\(slugOrToken)"
+                shortUrl: "\(baseURL)/m/\(slugOrToken)",
+                pinProtectionVerified: !syncRequest.hasPIN || existing.requiresPIN
             )
         }
 
         // Create new magic link with iOS-provided token
         let slug = try await generateUniqueSlug(contractorName: syncRequest.contractorName, on: req.db)
+        guard !syncRequest.hasPIN || importedHash != nil else {
+            throw Abort(.badRequest, reason: "Update the app to publish this PIN-protected link safely")
+        }
 
         let magicLink = MagicLink(
             token: syncRequest.token,
-            accessLevel: AccessLevel(rawValue: syncRequest.accessLevel) ?? .view,
+            accessLevel: accessLevel,
+            pinHash: importedHash,
+            pinSalt: syncRequest.hasPIN ? syncRequest.pinSalt : nil,
             expiresAt: syncRequest.expiresAt,
             snagIds: syncRequest.snagIds,
             projectId: syncRequest.projectId,
@@ -896,7 +955,8 @@ struct MagicLinkController: RouteCollection {
         return MagicLinkSyncResponse(
             success: true,
             token: magicLink.token,
-            shortUrl: "\(baseURL)/m/\(slug)"
+            shortUrl: "\(baseURL)/m/\(slug)",
+            pinProtectionVerified: !syncRequest.hasPIN || magicLink.requiresPIN
         )
     }
 
@@ -915,7 +975,7 @@ struct MagicLinkController: RouteCollection {
         // Verify magic link exists and belongs to this user
         guard let magicLink = try await MagicLink.query(on: req.db)
             .filter(\.$token == token)
-            .filter(\.$createdById == userId)
+            .filter(\.$createdById == userId).filter(LegacyProjectAccess.personalRecords(.magicLinks))
             .first() else {
             throw Abort(.notFound, reason: "Magic link not found")
         }
@@ -926,34 +986,41 @@ struct MagicLinkController: RouteCollection {
             throw Abort(.badRequest, reason: "Invalid request body")
         }
 
-        // Upsert: update if exists, create if not
-        if let existing = try await SyncedReport.query(on: req.db)
-            .filter(\.$magicLinkToken == magicLink.token)
-            .first() {
-            existing.reportJSON = jsonString
-            try await existing.save(on: req.db)
-        } else {
-            let report = SyncedReport(
-                magicLinkToken: magicLink.token,
-                reportJSON: jsonString
-            )
-            try await report.save(on: req.db)
-        }
+        guard !magicLink.isRevoked else { throw Abort(.gone, reason: "This link has been revoked") }
+        try await req.db.transaction { db in
+            try await SnagWorkflowService.lockProject(magicLink.projectId, on: db)
+            let filteredJSON = try await SnagDeletionService.visibleReportJSON(jsonString, ownerId: magicLink.createdById, projectId: magicLink.projectId, on: db)
 
-        // Extract snag IDs from the report and update magic link if snagIds is empty
-        if magicLink.snagIds.isEmpty,
-           let jsonData = jsonString.data(using: .utf8),
-           let report = try? JSONDecoder().decode(SyncedReportJSON.self, from: jsonData),
-           let snags = report.snags {
-            let snagIds = snags.compactMap { $0.id }
-            if !snagIds.isEmpty {
-                magicLink.snagIds = snagIds
-                try await magicLink.save(on: req.db)
-                req.logger.info("Updated magic link snagIds with \(snagIds.count) IDs from synced report")
+            // Upsert: update if exists, create if not
+            if let existing = try await SyncedReport.query(on: db)
+                .filter(\.$magicLinkToken == magicLink.token)
+                .first() {
+                existing.reportJSON = filteredJSON
+                try await existing.save(on: db)
+            } else {
+                let report = SyncedReport(
+                    magicLinkToken: magicLink.token,
+                    reportJSON: filteredJSON
+                )
+                try await report.save(on: db)
             }
+
+            // Extract snag IDs from the report and update magic link if snagIds is empty
+            if magicLink.snagIds.isEmpty,
+               let jsonData = filteredJSON.data(using: .utf8),
+               let report = try? JSONDecoder().decode(SyncedReportJSON.self, from: jsonData),
+               let snags = report.snags {
+                let snagIds = snags.compactMap { $0.id }
+                if !snagIds.isEmpty {
+                    magicLink.snagIds = snagIds
+                    try await magicLink.save(on: db)
+                    req.logger.info("Updated magic link snagIds with \(snagIds.count) IDs from synced report")
+                }
+            }
+
         }
 
-        req.logger.info("Report data synced for magic link: \(token.prefix(8))...")
+        req.logger.info("Report data synced")
 
         return ReportSyncResponse(
             success: true,
@@ -977,7 +1044,7 @@ struct MagicLinkController: RouteCollection {
         // Verify magic link exists and belongs to this user
         guard let magicLink = try await MagicLink.query(on: req.db)
             .filter(\.$token == token)
-            .filter(\.$createdById == userId)
+            .filter(\.$createdById == userId).filter(LegacyProjectAccess.personalRecords(.magicLinks))
             .first() else {
             throw Abort(.notFound, reason: "Magic link not found")
         }
@@ -1006,6 +1073,8 @@ struct MagicLinkController: RouteCollection {
               let metadata = try? photoDecoder.decode(PhotoMetadata.self, from: metadataData) else {
             throw Abort(.badRequest, reason: "Invalid photo metadata")
         }
+
+        try await SnagDeletionService.requireActive(metadata.snagId, ownerId: magicLink.createdById, projectId: magicLink.projectId, on: req.db)
 
         // Upload file via StorageService
         let fileExtension = "jpg"
@@ -1079,7 +1148,7 @@ struct MagicLinkController: RouteCollection {
         // Verify magic link exists and belongs to this user
         guard let magicLink = try await MagicLink.query(on: req.db)
             .filter(\.$token == token)
-            .filter(\.$createdById == userId)
+            .filter(\.$createdById == userId).filter(LegacyProjectAccess.personalRecords(.magicLinks))
             .first() else {
             throw Abort(.notFound, reason: "Magic link not found")
         }

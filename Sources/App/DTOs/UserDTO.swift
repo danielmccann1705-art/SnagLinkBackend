@@ -3,7 +3,7 @@ import Vapor
 struct UpdateUserProfileRequest: Content {
     let name: String?
     let email: String?
-    /// B4: client pushes its RevenueCat entitlement ("free"/"pro") here after purchase/restore.
+    /// Purchase/restore hint. The server independently verifies the account's entitlement.
     let subscriptionTier: String?
 }
 

@@ -75,4 +75,18 @@ final class AnalyticsEventsTests: XCTestCase {
         let stored = try await AnalyticsEvent.query(on: app.db).filter(\.$eventName == name).first()
         XCTAssertEqual(stored?.userId, userId, "authed event should link to the user")
     }
+    func testRevokedBearerCannotSubmitAttributedOrAnonymousFallbackEvent() async throws {
+        try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
+        let (userID, token) = try await makeToken()
+        try await app.db.transaction { db in try await BrowserSessionService.revokeAll(for: userID, on: db) }
+        let name = "revoked_\(UUID())"
+        let batch = AnalyticsController.EventBatch(events: [.init(name: name, properties: nil, deviceId: nil, appVersion: "test", timestamp: nil)])
+        try await app.test(.POST, "api/v1/events", beforeRequest: { req in
+            req.headers.bearerAuthorization = .init(token: token)
+            try req.content.encode(batch)
+        }, afterResponse: { response async in XCTAssertEqual(response.status, .unauthorized) })
+        let count = try await AnalyticsEvent.query(on: app.db).filter(\.$eventName == name).count()
+        XCTAssertEqual(count, 0)
+    }
+
 }

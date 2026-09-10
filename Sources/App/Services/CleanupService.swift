@@ -14,6 +14,8 @@ struct CleanupService {
     static func runCleanup(app: Application) async throws {
         let db = app.db
 
+        try await SnagDeletionService.cleanupFiles(app: app)
+
         // Clean up expired rate limit entries
         try await RateLimitService.cleanup(on: db)
 

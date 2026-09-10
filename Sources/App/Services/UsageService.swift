@@ -43,7 +43,8 @@ struct UsageService {
     }
 
     static func buildUsage(user: User, on db: Database) async throws -> UsageResponse {
-        let tier = SubscriptionTier(rawValue: user.subscriptionTier) ?? .free
+        let tier: SubscriptionTier = user.subscriptionTier == "pro" &&
+            (user.subscriptionVerifiedUntil ?? .distantPast) > Date() ? .pro : .free
         let count = try await currentMonthSendCount(userId: user.id!, on: db)
         return UsageResponse(
             linksRemainingThisMonth: linksRemaining(tier: tier, count: count),

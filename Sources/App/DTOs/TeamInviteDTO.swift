@@ -43,12 +43,12 @@ struct TeamInviteResponse: Content {
     let invitedByName: String?
     let createdAt: Date?
 
-    init(from invite: TeamInvite, includeToken: Bool = false) {
+    init(from invite: TeamInvite, includeToken: Bool = false, rawToken: String? = nil, legacyRoles: Bool = false) {
         self.id = invite.id!
         self.email = invite.email
-        self.role = invite.role
+        self.role = legacyRoles && invite.role == "member" ? "editor" : invite.role
         self.status = invite.status
-        self.token = includeToken ? invite.token : "***"
+        self.token = rawToken ?? (includeToken && invite.tokenHash == nil ? invite.token : "***")
         self.teamId = invite.teamId
         self.expiresAt = invite.expiresAt
         self.invitedByUserId = invite.invitedByUserId
@@ -70,7 +70,7 @@ struct TeamInviteValidationResponse: Content {
         return TeamInviteValidationResponse(
             valid: true,
             email: invite.email,
-            role: invite.role,
+            role: invite.role == "member" ? "editor" : invite.role,
             teamId: invite.teamId,
             invitedByName: invite.invitedByName,
             expiresAt: invite.expiresAt,

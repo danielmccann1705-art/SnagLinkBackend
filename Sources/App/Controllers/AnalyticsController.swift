@@ -37,7 +37,7 @@ struct AnalyticsController: RouteCollection {
         let batch = try req.content.decode(EventBatch.self)
 
         // Optional auth — link to user if Bearer token present
-        let userId: UUID? = req.authenticatedUserId
+        let userId = try await optionalActor(req)
 
         var saved = 0
         for event in batch.events {
@@ -64,6 +64,12 @@ struct AnalyticsController: RouteCollection {
         return EventResponse(success: true, received: saved)
     }
 
+    private func optionalActor(_ req: Request) async throws -> UUID? {
+        guard req.headers.first(name: .authorization) != nil else { return nil }
+        // Public ingestion permits absent credentials, never unverified attribution.
+        return try await JWTAuthMiddleware.authenticate(req).userId
+    }
+
     // MARK: - Ingest Diagnostics (MetricKit payloads)
 
     func ingestDiagnostics(req: Request) async throws -> HTTPStatus {
@@ -74,7 +80,7 @@ struct AnalyticsController: RouteCollection {
         let bodyString = String(buffer: body)
         let kind = req.headers.first(name: "X-Diagnostic-Kind") ?? "unknown"
 
-        let userId: UUID? = req.authenticatedUserId
+        let userId = try await optionalActor(req)
 
         let event = AnalyticsEvent(
             eventName: "metrickit_\(kind)",

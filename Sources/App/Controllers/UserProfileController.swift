@@ -18,6 +18,7 @@ struct UserProfileController: RouteCollection {
         guard let user = try await User.find(userId, on: req.db) else {
             throw Abort(.notFound, reason: "User not found")
         }
+        _ = try await SubscriptionVerificationService.currentTier(user: user, on: req)
         return try await UsageService.buildUsage(user: user, on: req.db)
     }
 
@@ -42,13 +43,18 @@ struct UserProfileController: RouteCollection {
 
         let updateReq = try req.content.decode(UpdateUserProfileRequest.self)
 
+        // Profile fields cannot establish control of a sign-in identity. The
+        // verified-email linking flow must own any future address change.
+        if let email = updateReq.email,
+           EmailValidator.normalize(email) != user.email.map(EmailValidator.normalize) {
+            throw Abort(.conflict, reason: "Verify a new email address before changing your sign-in email")
+        }
         if let name = updateReq.name { user.name = name }
-        if let email = updateReq.email { user.email = email }
         if let tierRaw = updateReq.subscriptionTier {
-            guard let tier = SubscriptionTier(rawValue: tierRaw) else {
+            guard SubscriptionTier(rawValue: tierRaw) != nil else {
                 throw Abort(.badRequest, reason: "Invalid subscription tier. Must be 'free' or 'pro'")
             }
-            user.subscriptionTier = tier.rawValue
+            _ = try await SubscriptionVerificationService.refresh(user: user, on: req)
         }
 
         try await user.save(on: req.db)

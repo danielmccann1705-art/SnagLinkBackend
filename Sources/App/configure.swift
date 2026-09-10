@@ -55,6 +55,13 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateMagicLinkSends())
         // B6: remote feature flags.
         app.migrations.add(CreateFeatureFlags())
+        app.migrations.add(CreateSnagDeletion())
+        app.migrations.add(CreateContentReport())
+        app.migrations.add(AddSubscriptionVerification())
+        app.migrations.add(CreatePlatformIdentity())
+        app.migrations.add(CreateWorkspaceAccess())
+        app.migrations.add(CreateCanonicalMutations())
+        app.migrations.add(CreateRegisterSnapshots())
 
         try await app.autoMigrate()
     } else {
@@ -69,9 +76,7 @@ public func configure(_ app: Application) async throws {
     app.jwt.signers.use(.hs256(key: jwtSecret))
 
     // MARK: - Apple Sign In (JWKS-based verification)
-    if let appleAppId = Environment.get("APPLE_APP_ID") {
-        app.jwt.apple.applicationIdentifier = appleAppId
-    }
+    app.jwt.apple.applicationIdentifier = AuthController.appleApplicationIdentifier
 
     // MARK: - JSON Date Encoding
     let encoder = JSONEncoder()
@@ -89,9 +94,11 @@ public func configure(_ app: Application) async throws {
     ))
 
     // MARK: - Middleware
+    // Replace defaults that log raw paths and error URLs (legacy links carry tokens).
+    app.middleware = .init()
+    app.middleware.use(PrivateRequestLoggingMiddleware())
     // CORS must be added before other middleware
     app.middleware.use(cors, at: .beginning)
-    app.middleware.use(ErrorMiddleware.default(environment: app.environment))
 
     // File middleware for serving uploaded photos (only needed when using local storage)
     if StorageService.backend == .local {

@@ -45,7 +45,7 @@ final class SnagStatusUnitTests: XCTestCase {
 
 // MARK: - Endpoint integration tests (require DATABASE_URL)
 
-/// B3: snag writes accept legacy + new status strings; the adapter maps legacy→new. Skipped
+/// B3: creation accepts legacy + new status strings; review changes use dedicated commands. Skipped
 /// without `DATABASE_URL`; runs in CI (§5.T5).
 final class SnagStatusBackcompatEndpointTests: XCTestCase {
     var app: Application!
@@ -110,7 +110,7 @@ final class SnagStatusBackcompatEndpointTests: XCTestCase {
         })
     }
 
-    func testUpdateMapsLegacyClosedToApproved() async throws {
+    func testLegacyClosedPatchCannotBypassReviewCommand() async throws {
         try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
         let (token, projectId) = try await makeUserWithProject()
         var snagId: UUID?
@@ -125,9 +125,9 @@ final class SnagStatusBackcompatEndpointTests: XCTestCase {
             req.headers.bearerAuthorization = .init(token: token)
             try req.content.encode(["status": "closed"])
         }, afterResponse: { res async in
-            XCTAssertEqual(res.status, .ok)
-            let body = try? res.content.decode(SnagResponse.self)
-            XCTAssertEqual(body?.status, "approved") // closed → approved
+            XCTAssertEqual(res.status, .conflict)
         })
+        let unchanged = try await Snag.find(snagId, on: app.db)
+        XCTAssertEqual(unchanged?.status, "open")
     }
 }

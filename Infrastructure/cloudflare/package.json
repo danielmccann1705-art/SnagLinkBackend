@@ -1,0 +1,13 @@
+{
+  "name": "snaglist-cloudflare-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "types": "wrangler types --env staging",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs",
+    "check": "npm run test && npm run types && npm run typecheck && wrangler deploy --env staging --dry-run"
+  },
+  "dependencies": { "@cloudflare/containers": "0.3.7" },
+  "devDependencies": { "wrangler": "4.130.0", "typescript": "5.9.3" }
+}
