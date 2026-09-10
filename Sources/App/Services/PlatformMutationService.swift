@@ -34,11 +34,20 @@ struct PlatformMutationService {
                                      revision: Int64, kind: String, fields: [String], payload: T, actorID: UUID, on db: Database) async throws {
         try await WorkspaceAccessService.lock(workspaceID, on: db)
         let sql = try VerifiedIdentityService.sql(db)
+        // PostgreSQL LOCAL settings are connection/transaction scoped, reset on
+        // commit/rollback, and shared across every change emitted by this command.
+        let setting = try await sql.raw("SELECT current_setting('snaglist.change_group', true) AS value").first()!.decode(column: "value", as: String?.self)
+        let groupID = setting.flatMap(UUID.init(uuidString:)) ?? UUID()
+        if setting != groupID.uuidString {
+            _ = try await sql.raw("SELECT set_config('snaglist.change_group', \(bind: groupID.uuidString), true)").first()
+        }
+        let groupCount = try await sql.raw("SELECT count(*) AS n FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND transaction_group = \(bind: groupID)").first()!.decode(column: "n", as: Int.self)
+        guard groupCount < 1000 else { throw Abort(.payloadTooLarge, reason: "Split this operation into smaller batches. No changes were committed", identifier: "change_group_too_large") }
         guard let row = try await sql.raw("UPDATE teams SET change_sequence = change_sequence + 1 WHERE id = \(bind: workspaceID) RETURNING change_sequence").first() else { throw Abort(.notFound) }
         let sequence = try row.decode(column: "change_sequence", as: Int64.self)
         try await sql.raw("""
-            INSERT INTO platform_changes (workspace_id, sequence, project_id, entity_type, entity_id, revision, kind, changed_fields, payload_json, actor_id, created_at)
-            VALUES (\(bind: workspaceID), \(bind: sequence), \(bind: projectID), \(bind: type), \(bind: entityID), \(bind: revision), \(bind: kind), \(bind: fields.sorted()), \(bind: encode(payload)), \(bind: actorID), \(bind: Date()))
+            INSERT INTO platform_changes (workspace_id, sequence, project_id, entity_type, entity_id, revision, kind, changed_fields, payload_json, actor_id, created_at, transaction_group)
+            VALUES (\(bind: workspaceID), \(bind: sequence), \(bind: projectID), \(bind: type), \(bind: entityID), \(bind: revision), \(bind: kind), \(bind: fields.sorted()), \(bind: encode(payload)), \(bind: actorID), \(bind: Date()), \(bind: groupID))
             """).run()
     }
     static func checkRevision(_ expected: Int64, snag: Snag, workspaceID: UUID, on db: Database) async throws {

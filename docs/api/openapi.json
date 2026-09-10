@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Snaglist implemented platform API",
-    "version": "0.6.0-candidate",
-    "description": "Implemented v2 foundation, not the complete unified-platform API. New snag responses include canonical calendar deadlines and exact decimal costs; nested legacy timestamp/number fields are compatibility mirrors. Complete field/graph parity, canonical workflow, contractor media grants and full drawing/annotation media, reports/jobs, company billing and account deletion remain under implementation. V1 recovery endpoints remain outside this contract. Internal-account capture uploads, private JPEG gateway and attached-media snapshot manifests are implemented; private R2 configuration and Linux image processing still require deployment verification."
+    "version": "0.7.0-candidate",
+    "description": "Implemented v2 foundation, not the complete unified-platform API. New snag responses include canonical calendar deadlines and exact decimal costs; nested legacy timestamp/number fields are compatibility mirrors. Complete field/graph parity, contractor workflow/media grants and full drawing/annotation media, reports/jobs, company billing and account deletion remain under implementation. V1 recovery endpoints remain outside this contract. Internal-account capture uploads, private JPEG gateway and attached-media snapshot manifests are implemented; private R2 configuration and Linux image processing still require deployment verification. Internal canonical workflow, completion/review snapshot history and transaction-grouped deltas are implemented and compile; database verification is pending. This is not a production readiness claim."
   },
   "servers": [
     {
@@ -6844,6 +6844,1260 @@
           }
         }
       }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/workflow/start": {
+      "post": {
+        "operationId": "workflowStart",
+        "summary": "Start work",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SnagRevisionConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WorkflowConflict"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowStartCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/workflow/submit": {
+      "post": {
+        "operationId": "workflowSubmit",
+        "summary": "Submit completion for review",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SnagRevisionConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WorkflowConflict"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowSubmitCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/workflow/accept": {
+      "post": {
+        "operationId": "workflowAccept",
+        "summary": "Accept the pending completion and close the snag",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SnagRevisionConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WorkflowConflict"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowAcceptCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/workflow/send-back": {
+      "post": {
+        "operationId": "workflowSendBack",
+        "summary": "Request more work and retain the submitted evidence",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SnagRevisionConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WorkflowConflict"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowSendBackCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/workflow/reopen": {
+      "post": {
+        "operationId": "workflowReopen",
+        "summary": "Reopen accepted work with a reason",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SnagRevisionConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WorkflowConflict"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowReopenCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/workflow/internal-fix": {
+      "post": {
+        "operationId": "workflowInternalFix",
+        "summary": "Record a manager-completed and accepted fix",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SnagRevisionConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WorkflowConflict"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowInternalFixCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/workflow": {
+      "get": {
+        "operationId": "readWorkflowHistory",
+        "summary": "Read authorised completion attempts and decisions",
+        "description": "Internal read permission. Newest-first deterministic pages contain up to 25 attempts and 50 decisions; hasMore covers either list. The current pending attempt is returned separately with any current evidence waiver, even when earlier history is paginated. No public contractor identities or grant access are inferred. Candidate database verification pending.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowHistory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SnagRevisionConflict"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -8148,7 +9402,7 @@
               {
                 "type": "string",
                 "pattern": "^(0|[1-9][0-9]{0,9})(\\.[0-9]{1,6})?$",
-                "description": "Exact decimal major currency units, 0\u20131000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
+                "description": "Exact decimal major currency units, 0–1000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
               },
               {
                 "type": "null"
@@ -8160,7 +9414,7 @@
               {
                 "type": "string",
                 "pattern": "^(0|[1-9][0-9]{0,9})(\\.[0-9]{1,6})?$",
-                "description": "Exact decimal major currency units, 0\u20131000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
+                "description": "Exact decimal major currency units, 0–1000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
               },
               {
                 "type": "null"
@@ -8466,7 +9720,8 @@
           "items",
           "total",
           "expiresAt"
-        ]
+        ],
+        "description": "New manifests explicitly cover project, snags, contractors, trades, attachedMedia, completionAttempts and reviewDecisions. Existing immutable manifests retain their original coverage. Not yet the complete native graph: drawings, annotations, comments and remaining native field parity follow."
       },
       "ProjectChangePage": {
         "type": "object",
@@ -8498,6 +9753,10 @@
                 },
                 "data": {
                   "$ref": "#/components/schemas/JSONValue"
+                },
+                "transactionGroup": {
+                  "type": "string",
+                  "format": "uuid"
                 }
               },
               "required": [
@@ -8506,9 +9765,11 @@
                 "revision",
                 "kind",
                 "changedFields",
-                "data"
+                "data",
+                "transactionGroup"
               ]
-            }
+            },
+            "maxItems": 1100
           },
           "cursor": {
             "type": "string"
@@ -8521,7 +9782,8 @@
           "changes",
           "cursor",
           "hasMore"
-        ]
+        ],
+        "description": "Pages target 100 changes but include the full final transaction group (bounded to at most 1,100 rows). Apply each group atomically in the local store before advancing its cursor. Rows predating this migration retain per-row groups; a fresh snapshot includes canonical completion history."
       },
       "CanonicalSnagValues": {
         "type": "object",
@@ -8543,7 +9805,7 @@
               {
                 "type": "string",
                 "pattern": "^(0|[1-9][0-9]{0,9})(\\.[0-9]{1,6})?$",
-                "description": "Exact decimal major currency units, 0\u20131000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
+                "description": "Exact decimal major currency units, 0–1000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
               },
               {
                 "type": "null"
@@ -8555,7 +9817,7 @@
               {
                 "type": "string",
                 "pattern": "^(0|[1-9][0-9]{0,9})(\\.[0-9]{1,6})?$",
-                "description": "Exact decimal major currency units, 0\u20131000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
+                "description": "Exact decimal major currency units, 0–1000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
               },
               {
                 "type": "null"
@@ -8989,6 +10251,537 @@
           "snagId",
           "asset",
           "count"
+        ]
+      },
+      "CompletionAttemptResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snagId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "actorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "actorKind": {
+            "type": "string",
+            "enum": [
+              "internal",
+              "internal_fix"
+            ]
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 10000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "accepted",
+              "sent_back"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "submittedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "evidenceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "maxItems": 20,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "id",
+          "snagId",
+          "number",
+          "actorId",
+          "actorKind",
+          "state",
+          "revision",
+          "submittedAt",
+          "evidenceIds"
+        ]
+      },
+      "ReviewDecisionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snagId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "attemptId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "actorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "accept",
+              "send_back",
+              "reopen",
+              "internal_fix",
+              "waiver"
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "snagId",
+          "actorId",
+          "kind",
+          "createdAt"
+        ]
+      },
+      "WorkflowResponse": {
+        "type": "object",
+        "properties": {
+          "snag": {
+            "$ref": "#/components/schemas/PlatformSnagResponse"
+          },
+          "attempt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompletionAttemptResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReviewDecisionResponse"
+            }
+          }
+        },
+        "required": [
+          "snag",
+          "decisions"
+        ]
+      },
+      "WorkflowHistory": {
+        "type": "object",
+        "properties": {
+          "snag": {
+            "$ref": "#/components/schemas/PlatformSnagResponse"
+          },
+          "pending": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompletionAttemptResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompletionAttemptResponse"
+            },
+            "maxItems": 25
+          },
+          "decisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReviewDecisionResponse"
+            },
+            "maxItems": 50
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "pendingEvidenceWaiver": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewDecisionResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "snag",
+          "attempts",
+          "decisions",
+          "page",
+          "hasMore"
+        ]
+      },
+      "WorkflowConflict": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "const": true
+          },
+          "identifier": {
+            "const": "workflow_conflict"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "current": {
+            "$ref": "#/components/schemas/PlatformSnagResponse"
+          },
+          "attempt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompletionAttemptResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "error",
+          "identifier",
+          "reason",
+          "current"
+        ]
+      },
+      "WorkflowStartCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expectedWorkflowRevision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "mutation",
+          "expectedRevision",
+          "expectedWorkflowRevision"
+        ]
+      },
+      "WorkflowSubmitCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expectedWorkflowRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "evidenceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "maxItems": 20,
+            "uniqueItems": true
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 10000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "waiverReason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000,
+                "description": "Nonempty after trimming. Preserved as an attributed decision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "mutation",
+          "expectedRevision",
+          "expectedWorkflowRevision",
+          "attemptId",
+          "evidenceIds"
+        ]
+      },
+      "WorkflowAcceptCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expectedWorkflowRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedAttemptRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "mutation",
+          "expectedRevision",
+          "expectedWorkflowRevision",
+          "attemptId",
+          "expectedAttemptRevision"
+        ]
+      },
+      "WorkflowSendBackCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expectedWorkflowRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedAttemptRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Nonempty after trimming. Preserved as an attributed decision."
+          }
+        },
+        "required": [
+          "mutation",
+          "expectedRevision",
+          "expectedWorkflowRevision",
+          "attemptId",
+          "expectedAttemptRevision",
+          "reason"
+        ]
+      },
+      "WorkflowReopenCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expectedWorkflowRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Nonempty after trimming. Preserved as an attributed decision."
+          }
+        },
+        "required": [
+          "mutation",
+          "expectedRevision",
+          "expectedWorkflowRevision",
+          "reason"
+        ]
+      },
+      "WorkflowInternalFixCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "expectedWorkflowRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "attemptId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "evidenceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "maxItems": 20,
+            "uniqueItems": true
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 10000
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "waiverReason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000,
+                "description": "Nonempty after trimming. Preserved as an attributed decision."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Nonempty after trimming. Preserved as an attributed decision."
+          }
+        },
+        "required": [
+          "mutation",
+          "expectedRevision",
+          "expectedWorkflowRevision",
+          "attemptId",
+          "evidenceIds",
+          "reason"
+        ]
+      },
+      "WorkflowCommand": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/WorkflowStartCommand"
+          },
+          {
+            "$ref": "#/components/schemas/WorkflowSubmitCommand"
+          },
+          {
+            "$ref": "#/components/schemas/WorkflowAcceptCommand"
+          },
+          {
+            "$ref": "#/components/schemas/WorkflowSendBackCommand"
+          },
+          {
+            "$ref": "#/components/schemas/WorkflowReopenCommand"
+          },
+          {
+            "$ref": "#/components/schemas/WorkflowInternalFixCommand"
+          }
         ]
       }
     }

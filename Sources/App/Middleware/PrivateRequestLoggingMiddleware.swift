@@ -8,6 +8,9 @@ struct PrivateRequestLoggingMiddleware: AsyncMiddleware {
         let response: Response
         do {
             response = try await next.respond(to: request)
+        } catch let conflict as WorkflowConflict {
+            response = Response(status: .conflict)
+            try response.content.encode(conflict.body)
         } catch let conflict as ProjectGrantConflict {
             response = Response(status: .conflict)
             try response.content.encode(conflict.body)

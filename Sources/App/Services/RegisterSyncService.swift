@@ -15,7 +15,7 @@ struct RegisterSnapshotPage: Content {
 struct ProjectChangePage: Content {
     struct Change: Content {
         let type: String; let id: UUID; let revision: Int64; let kind: String
-        let changedFields: [String]; let data: PlatformJSON
+        let changedFields: [String]; let data: PlatformJSON; let transactionGroup: UUID
     }
     let changes: [Change]
     let cursor: String
@@ -23,7 +23,7 @@ struct ProjectChangePage: Content {
 }
 
 /// Stable register download, with its workspace directory. It is not the complete
-/// native graph bootstrap: drawing/annotation graphs and completion history still follow.
+/// native graph bootstrap: drawing/annotation graphs and comments still follow.
 struct RegisterSyncService {
     static func fingerprint(_ project: Project, actorID: UUID, on db: Database) async throws -> String {
         let row = try await VerifiedIdentityService.sql(db).raw("""
@@ -47,7 +47,9 @@ struct RegisterSyncService {
         let contractorCount = try await Contractor.query(on: db).filter(\.$workspaceId == workspaceID).filter(\.$platformManaged == true).count()
         let tradeCount = try await Trade.query(on: db).filter(\.$workspaceId == workspaceID).filter(\.$platformManaged == true).count()
         let mediaCount = try await sql.raw("SELECT count(*) AS n FROM media_assets WHERE project_id = \(bind: projectID) AND attached_at IS NOT NULL AND state = 'ready'").first()!.decode(column: "n", as: Int.self)
-        let total = count + contractorCount + tradeCount + mediaCount + 1
+        let attemptCount = try await sql.raw("SELECT count(*) AS n FROM completion_attempts WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
+        let decisionCount = try await sql.raw("SELECT count(*) AS n FROM review_decisions WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
+        let total = count + contractorCount + tradeCount + mediaCount + attemptCount + decisionCount + 1
         guard total <= 10000 else { throw Abort(.payloadTooLarge, reason: "This project needs a background snapshot. No partial download was created", identifier: "snapshot_job_required") }
         // Expired private snapshots can be removed without deleting customer work.
         try await sql.raw("DELETE FROM register_snapshots WHERE actor_id = \(bind: actorID) AND expires_at < \(bind: now)").run()
@@ -57,7 +59,7 @@ struct RegisterSyncService {
         let access = try await fingerprint(project, actorID: actorID, on: db)
         let sequence = try await sql.raw("SELECT change_sequence FROM teams WHERE id = \(bind: workspaceID)").first()!.decode(column: "change_sequence", as: Int64.self)
         try await sql.raw("INSERT INTO register_snapshots (id, token_hash, actor_id, workspace_id, project_id, access_fingerprint, high_watermark, item_count, created_at, expires_at) VALUES (\(bind: id), \(bind: SHA256Hasher.hash(token: token)), \(bind: actorID), \(bind: workspaceID), \(bind: projectID), \(bind: access), \(bind: sequence), \(bind: total), \(bind: now), \(bind: expiry))").run()
-        try await sql.raw("UPDATE register_snapshots SET coverage = ARRAY['project', 'snags', 'contractors', 'trades', 'attachedMedia']::TEXT[] WHERE id = \(bind: id)").run()
+        try await sql.raw("UPDATE register_snapshots SET coverage = ARRAY['project', 'snags', 'contractors', 'trades', 'attachedMedia', 'completionAttempts', 'reviewDecisions']::TEXT[] WHERE id = \(bind: id)").run()
         try await item(snapshotID: id, position: 0, type: "project", id: projectID, value: PlatformProjectResponse(project, actions: actions), on: db)
         // Workspace writes are blocked only for this bounded transaction. HTTP page
         // requests read immutable rows, without holding a transaction open between requests.
@@ -80,6 +82,17 @@ struct RegisterSyncService {
         for row in media {
             let asset = try MediaAssetResponse(row)
             try await item(snapshotID: id, position: position, type: "media", id: asset.id, value: asset, on: db)
+            position += 1
+        }
+        let attemptRows = try await sql.raw("SELECT * FROM completion_attempts WHERE project_id = \(bind: projectID) ORDER BY snag_id, attempt_number").all()
+        for attempt in try await CanonicalWorkflowService.attempts(attemptRows, on: db) {
+            try await item(snapshotID: id, position: position, type: "completionAttempt", id: attempt.id, value: attempt, on: db)
+            position += 1
+        }
+        let decisions = try await sql.raw("SELECT * FROM review_decisions WHERE project_id = \(bind: projectID) ORDER BY snag_id, expected_workflow_revision, CASE kind WHEN 'waiver' THEN 0 ELSE 1 END, id").all()
+        for row in decisions {
+            let decision = try ReviewDecisionResponse(row)
+            try await item(snapshotID: id, position: position, type: "reviewDecision", id: decision.id, value: decision, on: db)
             position += 1
         }
         return try await page(token: token, offset: 0, projectID: projectID, actorID: actorID, on: db)
@@ -117,15 +130,29 @@ struct RegisterSyncService {
         guard project.workspaceId == workspaceID, access == (try saved.decode(column: "access_fingerprint", as: String.self)) else { throw Abort(.conflict, reason: "Your project access changed. Download the project again", identifier: "rebootstrap_required") }
         let sequence = try saved.decode(column: "sequence", as: Int64.self)
         let rows = try await sql.raw("SELECT * FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade'))) AND sequence > \(bind: sequence) ORDER BY sequence LIMIT 101").all()
-        let changes = try rows.prefix(100).map { row in
-            try ProjectChangePage.Change(type: row.decode(column: "entity_type", as: String.self), id: row.decode(column: "entity_id", as: UUID.self), revision: row.decode(column: "revision", as: Int64.self), kind: row.decode(column: "kind", as: String.self), changedFields: row.decode(column: "changed_fields", as: [String].self), data: PlatformMutationService.decode(PlatformJSON.self, row.decode(column: "payload_json", as: String.self)))
+        // A page targets 100 rows, then includes the remainder of its final
+        // transaction. A client applies each complete group in one local commit.
+        // Do not advance a cursor through half a review/evidence transition.
+        var selected = Array(rows.prefix(100))
+        if let last = selected.last {
+            let lastSequence = try last.decode(column: "sequence", as: Int64.self)
+            let groupID = try last.decode(column: "transaction_group", as: UUID.self)
+            let tail = try await sql.raw("SELECT * FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND transaction_group = \(bind: groupID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade'))) AND sequence > \(bind: lastSequence) ORDER BY sequence LIMIT 1001").all()
+            guard tail.count <= 1000 else { throw Abort(.payloadTooLarge, reason: "This historical change batch requires a new project download. Keep unsent edits", identifier: "rebootstrap_required") }
+            selected.append(contentsOf: tail)
         }
-        let last = try rows.prefix(100).last.map { try $0.decode(column: "sequence", as: Int64.self) }
-        let next: String
-        if let last { next = try await issueCursor(project: project, actorID: actorID, sequence: last, fingerprint: access, on: db) }
-        else { next = cursor }
-        return .init(changes: changes, cursor: next, hasMore: rows.count > 100)
+        let changes = try selected.map { row in
+            try ProjectChangePage.Change(type: row.decode(column: "entity_type", as: String.self), id: row.decode(column: "entity_id", as: UUID.self), revision: row.decode(column: "revision", as: Int64.self), kind: row.decode(column: "kind", as: String.self), changedFields: row.decode(column: "changed_fields", as: [String].self), data: PlatformMutationService.decode(PlatformJSON.self, row.decode(column: "payload_json", as: String.self)), transactionGroup: row.decode(column: "transaction_group", as: UUID.self))
+        }
+        let last = try selected.last.map { try $0.decode(column: "sequence", as: Int64.self) }
+        let next: String, hasMore: Bool
+        if let last {
+            next = try await issueCursor(project: project, actorID: actorID, sequence: last, fingerprint: access, on: db)
+            hasMore = try await sql.raw("SELECT sequence FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade'))) AND sequence > \(bind: last) LIMIT 1").first() != nil
+        } else { next = cursor; hasMore = false }
+        return .init(changes: changes, cursor: next, hasMore: hasMore)
     }
+
     private static func authorised(projectID: UUID, actorID: UUID, on db: Database) async throws -> (Project, Set<ProjectAccessPolicy.Action>) {
         do {
             let result = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
