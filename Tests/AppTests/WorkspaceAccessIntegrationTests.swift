@@ -103,7 +103,7 @@ final class WorkspaceAccessIntegrationTests: XCTestCase {
         XCTAssertEqual(get.status, .notFound)
         let replay = try await request(.POST, "api/v2/invitations/accept", user: member, body: ["token": issued.1])
         XCTAssertEqual(replay.status, .notFound)
-        let grants = try await VerifiedIdentityService.sql(app.db).raw("SELECT count(*) AS n FROM project_access WHERE user_id = \(bind: member.requireID()) AND workspace_id = \(bind: company.requireID())").first()!.decode(column: "n", as: Int.self)
+        let grants = try await VerifiedIdentityService.sql(app.db).raw("SELECT count(*) AS n FROM project_access WHERE state = 'active' AND user_id = \(bind: member.requireID()) AND workspace_id = \(bind: company.requireID())").first()!.decode(column: "n", as: Int.self)
         XCTAssertEqual(grants, 0)
     }
 

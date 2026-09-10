@@ -28,14 +28,15 @@ struct RegisterSyncService {
     static func fingerprint(_ project: Project, actorID: UUID, on db: Database) async throws -> String {
         let row = try await VerifiedIdentityService.sql(db).raw("""
             SELECT t.owner_user_id, t.kind, COALESCE(m.revision, 0) AS membership_revision,
-                COALESCE(m.role, '') AS membership_role, COALESCE(g.role, '') AS project_role
+                COALESCE(m.role, '') AS membership_role, COALESCE(g.role, '') AS project_role, COALESCE(g.revision, 0) AS grant_revision, COALESCE(g.state, '') AS grant_state
             FROM teams t LEFT JOIN workspace_memberships m ON m.workspace_id = t.id AND m.user_id = \(bind: actorID)
             LEFT JOIN project_access g ON g.project_id = \(bind: project.requireID()) AND g.user_id = \(bind: actorID)
             WHERE t.id = \(bind: project.workspaceId!)
             """).first()!
         let parts = try [project.workspaceId!.uuidString, row.decode(column: "owner_user_id", as: UUID.self).uuidString,
                          row.decode(column: "kind", as: String.self), String(row.decode(column: "membership_revision", as: Int64.self)),
-                         row.decode(column: "membership_role", as: String.self), row.decode(column: "project_role", as: String.self)]
+                         row.decode(column: "membership_role", as: String.self), row.decode(column: "project_role", as: String.self),
+                         String(row.decode(column: "grant_revision", as: Int64.self)), row.decode(column: "grant_state", as: String.self)]
         return SHA256Hasher.hash(token: parts.joined(separator: ":"))
     }
     static func create(projectID: UUID, actorID: UUID, on db: Database) async throws -> RegisterSnapshotPage {

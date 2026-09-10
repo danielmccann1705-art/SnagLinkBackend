@@ -101,7 +101,7 @@ struct WorkspaceAccessService {
             try await putMembership(workspaceID: workspaceID, userID: targetID, role: newRole, on: db)
         } else {
             try await VerifiedIdentityService.sql(db).raw("UPDATE workspace_memberships SET state = 'removed', revision = revision + 1, updated_at = \(bind: Date()) WHERE workspace_id = \(bind: workspaceID) AND user_id = \(bind: targetID)").run()
-            try await VerifiedIdentityService.sql(db).raw("DELETE FROM project_access WHERE workspace_id = \(bind: workspaceID) AND user_id = \(bind: targetID)").run()
+            try await VerifiedIdentityService.sql(db).raw("UPDATE project_access SET state = 'removed', revision = revision + 1, updated_at = NOW() WHERE state = 'active' AND workspace_id = \(bind: workspaceID) AND user_id = \(bind: targetID)").run()
             try await VerifiedIdentityService.sql(db).raw("UPDATE team_invites SET status = 'revoked', updated_at = \(bind: Date()) WHERE team_id = \(bind: workspaceID) AND status = 'pending' AND email IN (SELECT subject FROM user_identities WHERE user_id = \(bind: targetID) AND provider = 'email')").run()
         }
         try await activity(workspaceID: workspaceID, actorID: actorID, action: newRole == nil ? "member_removed" : "member_role_changed", targetID: targetID, detail: newRole, on: db)
@@ -157,7 +157,7 @@ struct ProjectAccessService {
         _ = try await VerifiedIdentityService.activeUser(actorID, on: db)
         let sql = try VerifiedIdentityService.sql(db)
         let member = try await sql.raw("SELECT role, state FROM workspace_memberships WHERE workspace_id = \(bind: workspaceID) AND user_id = \(bind: actorID)").first()
-        let grant = try await sql.raw("SELECT role FROM project_access WHERE workspace_id = \(bind: workspaceID) AND project_id = \(bind: projectID) AND user_id = \(bind: actorID)").first()
+        let grant = try await sql.raw("SELECT role FROM project_access WHERE state = 'active' AND workspace_id = \(bind: workspaceID) AND project_id = \(bind: projectID) AND user_id = \(bind: actorID)").first()
         let membership: ProjectAccessPolicy.Membership? = try member.flatMap { row in
             guard let role = ProjectAccessPolicy.WorkspaceRole(rawValue: try row.decode(column: "role", as: String.self)) else { return nil }
             return .init(workspaceID: workspaceID, userID: actorID, role: role, active: try row.decode(column: "state", as: String.self) == "active")
@@ -175,15 +175,8 @@ struct ProjectAccessService {
 
     static func grant(projectID: UUID, targetID: UUID, role: String, actorID: UUID, on db: Database) async throws {
         let (project, actions) = try await require(.addProjectMember, projectID: projectID, actorID: actorID, on: db)
-        guard ["manager", "member"].contains(role) else { throw Abort(.badRequest, reason: "Choose Manager or Member") }
-        guard actions.contains(.manageProjectGrants) || role == "member" else { throw Abort(.forbidden, reason: "Only a company owner or admin can assign managers") }
-        let workspaceID = project.workspaceId!
-        guard try await VerifiedIdentityService.sql(db).raw("SELECT user_id FROM workspace_memberships WHERE workspace_id = \(bind: workspaceID) AND user_id = \(bind: targetID) AND state = 'active'").first() != nil else { throw Abort(.badRequest, reason: "Add this person to the company first") }
-        let existing = try await VerifiedIdentityService.sql(db).raw("SELECT role FROM project_access WHERE project_id = \(bind: projectID) AND user_id = \(bind: targetID)").first()
-        if let existing, !actions.contains(.manageProjectGrants), try existing.decode(column: "role", as: String.self) != "member" {
-            throw Abort(.forbidden, reason: "A manager cannot change another person's project role")
-        }
-        try await VerifiedIdentityService.sql(db).raw("INSERT INTO project_access (project_id, workspace_id, user_id, role) VALUES (\(bind: projectID), \(bind: workspaceID), \(bind: targetID), \(bind: role)) ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role").run()
-        try await WorkspaceAccessService.activity(workspaceID: workspaceID, actorID: actorID, action: "project_access_granted", targetID: targetID, detail: projectID.uuidString + ":" + role, on: db)
+        let current = try await ProjectGrantService.current(projectID: projectID, targetID: targetID, on: db)
+        let command = ProjectGrantCommand(mutation: .init(operationId: UUID(), deviceId: UUID()), userId: targetID, role: role, expectedRevision: current.revision)
+        _ = try await ProjectGrantService.set(command, project: project, actorID: actorID, actions: actions, on: db)
     }
 }

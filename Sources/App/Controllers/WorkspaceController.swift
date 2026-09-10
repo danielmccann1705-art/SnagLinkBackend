@@ -7,7 +7,6 @@ struct WorkspaceController: RouteCollection {
     struct MemberBody: Content { let role: String?; let expectedRevision: Int64 }
     struct OwnerBody: Content { let userId: UUID; let expectedRevision: Int64 }
     struct InviteBody: Content { let email: String; let role: String; let projects: [InvitationProjectGrant] }
-    struct GrantBody: Content { let userId: UUID; let role: String }
     struct InviteResult: Content { let invitation: TeamInviteResponse; let invitationURL: String }
 
     func boot(routes: RoutesBuilder) throws {
@@ -22,7 +21,9 @@ struct WorkspaceController: RouteCollection {
         invitations.post("accept", use: accept)
         invitations.post("preview", use: previewInvitation)
         invitations.delete(":invitationId", use: revoke)
-        routes.grouped("api", "v2", "projects").grouped(PlatformAuthMiddleware()).post(":projectId", "members", use: grant)
+        let projects = routes.grouped("api", "v2", "projects").grouped(PlatformAuthMiddleware())
+        projects.post(":projectId", "members", use: grant)
+        projects.get(":projectId", "members", use: projectMembers)
     }
 
     @Sendable func list(req: Request) async throws -> [WorkspaceResponse] {
@@ -77,10 +78,37 @@ struct WorkspaceController: RouteCollection {
         try await req.db.transaction { db in try await WorkspaceInvitationService.revoke(invitationID: id, actorID: actor, on: db) }
         return .noContent
     }
-    @Sendable func grant(req: Request) async throws -> HTTPStatus {
-        let actor = try req.requireAuthenticatedUserId(), id = try parameter("projectId", req), body = try req.content.decode(GrantBody.self)
-        try await req.db.transaction { db in try await ProjectAccessService.grant(projectID: id, targetID: body.userId, role: body.role, actorID: actor, on: db) }
-        return .noContent
+    struct ProjectMemberPage: Content {
+        struct Member: Content { let access: ProjectGrantResponse; let name: String? }
+        let items: [Member]; let page: Int; let hasMore: Bool
+    }
+    @Sendable func projectMembers(req: Request) async throws -> ProjectMemberPage {
+        let actor = try req.requireAuthenticatedUserId(), id = try parameter("projectId", req)
+        let page = (try? req.query.get(Int.self, at: "page")) ?? 1
+        guard (1...10000).contains(page) else { throw Abort(.badRequest, reason: "Invalid page") }
+        return try await req.db.transaction { db in
+            _ = try await ProjectAccessService.require(.addProjectMember, projectID: id, actorID: actor, on: db)
+            let rows = try await VerifiedIdentityService.sql(db).raw("SELECT a.user_id, u.name FROM project_access a JOIN users u ON u.id = a.user_id WHERE a.project_id = \(bind: id) ORDER BY a.user_id LIMIT 51 OFFSET \(bind: (page - 1) * 50)").all()
+            var items: [ProjectMemberPage.Member] = []
+            for row in rows.prefix(50) {
+                let target = try row.decode(column: "user_id", as: UUID.self)
+                items.append(try await .init(access: ProjectGrantService.current(projectID: id, targetID: target, on: db), name: row.decode(column: "name", as: String?.self)))
+            }
+            return ProjectMemberPage(items: items, page: page, hasMore: rows.count > 50)
+        }
+    }
+    @Sendable func grant(req: Request) async throws -> ProjectGrantResponse {
+        let actor = try req.requireAuthenticatedUserId(), id = try parameter("projectId", req), body = try req.content.decode(ProjectGrantCommand.self)
+        let hash = try PlatformMutationService.requestHash(body, route: "POST:\(req.url.path)")
+        return try await req.db.transaction { db in
+            try await PlatformMutationService.lock(actorID: actor, mutation: body.mutation, on: db)
+            let required: ProjectAccessPolicy.Action = body.role == "member" ? .addProjectMember : .manageProjectGrants
+            let (project, actions) = try await ProjectAccessService.require(required, projectID: id, actorID: actor, on: db)
+            if let old = try await PlatformMutationService.replay(ProjectGrantResponse.self, actorID: actor, mutation: body.mutation, hash: hash, on: db) { return old }
+            let result = try await ProjectGrantService.set(body, project: project, actorID: actor, actions: actions, on: db)
+            try await PlatformMutationService.record(result, actorID: actor, workspaceID: project.workspaceId!, mutation: body.mutation, hash: hash, on: db)
+            return result
+        }
     }
     private func parameter(_ name: String, _ req: Request) throws -> UUID {
         guard let raw = req.parameters.get(name), let id = UUID(uuidString: raw) else { throw Abort(.badRequest, reason: "Invalid identifier") }

@@ -37,8 +37,16 @@ struct WorkspaceInvitationService {
             _ = try await WorkspaceAccessService.requireCompany(invite.teamId, actorID: inviter, admin: true, on: db)
         }
         guard ["admin", "member", "editor"].contains(invite.role) else { throw Abort(.conflict, reason: "Ask the company admin to replace this older invitation") }
-        let rows = try await VerifiedIdentityService.sql(db).raw("SELECT p.name, g.role FROM invitation_project_grants g JOIN projects p ON p.id = g.project_id AND p.workspace_id = g.workspace_id WHERE g.invitation_id = \(bind: invite.requireID()) AND p.archived_at IS NULL ORDER BY lower(p.name), p.id").all()
-        let grants = try rows.map { try InvitationPreview.ProjectGrant(name: $0.decode(column: "name", as: String.self), role: $0.decode(column: "role", as: String.self)) }
+        if !accepted { try await validateGrantRevisions(invite: invite, actorID: actorID, on: db) }
+        let rows = try await VerifiedIdentityService.sql(db).raw("SELECT p.id, p.name, g.role FROM invitation_project_grants g JOIN projects p ON p.id = g.project_id AND p.workspace_id = g.workspace_id WHERE g.invitation_id = \(bind: invite.requireID()) AND p.archived_at IS NULL ORDER BY lower(p.name), p.id").all()
+        var grants: [InvitationPreview.ProjectGrant] = []
+        for row in rows {
+            if accepted {
+                do { _ = try await ProjectAccessService.require(.read, projectID: row.decode(column: "id", as: UUID.self), actorID: actorID, on: db) }
+                catch let error as Abort where error.status == .notFound || error.status == .forbidden { continue }
+            }
+            grants.append(try .init(name: row.decode(column: "name", as: String.self), role: row.decode(column: "role", as: String.self)))
+        }
         return .init(companyName: company.name, invitedByName: invite.invitedByName, email: invite.email, role: invite.role == "editor" ? "member" : invite.role, projects: grants, expiresAt: invite.expiresAt, alreadyAccepted: accepted)
     }
 
@@ -64,8 +72,13 @@ struct WorkspaceInvitationService {
                                 teamId: workspaceID, expiresAt: Date().addingTimeInterval(7 * 86400), invitedByUserId: actorID, invitedByName: user.name)
         invite.role = role; invite.tokenHash = hash
         try await invite.save(on: db)
+        let recipient = try await sql.raw("SELECT user_id FROM user_identities WHERE provider = 'email' AND subject = \(bind: email)").first()
+        let recipientID = try recipient?.decode(column: "user_id", as: UUID.self)
         for grant in projects {
-            try await sql.raw("INSERT INTO invitation_project_grants (invitation_id, project_id, workspace_id, role) VALUES (\(bind: invite.requireID()), \(bind: grant.projectId), \(bind: workspaceID), \(bind: grant.role))").run()
+            let revision: Int64
+            if let recipientID { revision = try await ProjectGrantService.current(projectID: grant.projectId, targetID: recipientID, on: db).revision }
+            else { revision = 0 }
+            try await sql.raw("INSERT INTO invitation_project_grants (invitation_id, project_id, workspace_id, role, base_grant_revision) VALUES (\(bind: invite.requireID()), \(bind: grant.projectId), \(bind: workspaceID), \(bind: grant.role), \(bind: revision))").run()
         }
         try await WorkspaceAccessService.activity(workspaceID: workspaceID, actorID: actorID, action: "invitation_created", targetID: invite.requireID(), on: db)
         return (invite, token)
@@ -111,6 +124,7 @@ struct WorkspaceInvitationService {
         if existingState != "active" {
             try await WorkspaceAccessService.putMembership(workspaceID: invite.teamId, userID: actorID, role: role, on: db)
         }
+        try await validateGrantRevisions(invite: invite, actorID: actorID, on: db)
         let grants = try await sql.raw("SELECT project_id, role FROM invitation_project_grants WHERE invitation_id = \(bind: invite.requireID())").all()
         for row in grants {
             let projectID = try row.decode(column: "project_id", as: UUID.self)
@@ -120,13 +134,23 @@ struct WorkspaceInvitationService {
             }
             try await sql.raw("""
                 INSERT INTO project_access (project_id, workspace_id, user_id, role) VALUES (\(bind: projectID), \(bind: invite.teamId), \(bind: actorID), \(bind: grantRole))
-                ON CONFLICT (project_id, user_id) DO UPDATE SET role = CASE WHEN project_access.role = 'manager' THEN 'manager' ELSE EXCLUDED.role END
+                ON CONFLICT (project_id, user_id) DO UPDATE SET role = CASE WHEN project_access.state = 'active' AND project_access.role = 'manager' THEN 'manager' ELSE EXCLUDED.role END, state = 'active', revision = project_access.revision + 1, updated_at = NOW()
                 """).run()
         }
         invite.status = "accepted"; invite.acceptedUserId = actorID
         try await invite.save(on: db)
         try await WorkspaceAccessService.activity(workspaceID: invite.teamId, actorID: actorID, action: "invitation_accepted", targetID: invite.requireID(), on: db)
         return invite
+    }
+
+    private static func validateGrantRevisions(invite: TeamInvite, actorID: UUID, on db: Database) async throws {
+        let rows = try await VerifiedIdentityService.sql(db).raw("SELECT project_id, base_grant_revision FROM invitation_project_grants WHERE invitation_id = \(bind: invite.requireID())").all()
+        for row in rows {
+            let current = try await ProjectGrantService.current(projectID: row.decode(column: "project_id", as: UUID.self), targetID: actorID, on: db)
+            guard current.revision == (try row.decode(column: "base_grant_revision", as: Int64.self)) else {
+                throw Abort(.conflict, reason: "Project access changed after this invitation was issued. Ask the company admin for a new invitation", identifier: "invitation_grant_changed")
+            }
+        }
     }
 
     static func revoke(invitationID: UUID, actorID: UUID, on db: Database) async throws {

@@ -48,7 +48,7 @@ struct PlatformProjectController: RouteCollection {
             let role = try await WorkspaceAccessService.role(actorID: actor, workspace: workspace, on: db)
             var query = Project.query(on: db).filter(\.$workspaceId == workspaceID).filter(\.$archivedAt == nil)
             if workspace.kind == "company", role == "member" {
-                let ids = try await VerifiedIdentityService.sql(db).raw("SELECT project_id FROM project_access WHERE workspace_id = \(bind: workspaceID) AND user_id = \(bind: actor)").all().map { try $0.decode(column: "project_id", as: UUID.self) }
+                let ids = try await VerifiedIdentityService.sql(db).raw("SELECT project_id FROM project_access WHERE state = 'active' AND workspace_id = \(bind: workspaceID) AND user_id = \(bind: actor)").all().map { try $0.decode(column: "project_id", as: UUID.self) }
                 guard !ids.isEmpty else { return Page(items: [], page: page, hasMore: false) }
                 query = query.filter(\.$id ~~ ids)
             }

@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Snaglist implemented platform API",
-    "version": "0.3.0-candidate",
-    "description": "Current implemented v2 foundation, not the complete unified-platform API. Native full graph sync, canonical evidence/workflow/media, reports/jobs, company billing and account deletion remain under implementation. V1 recovery endpoints remain outside this contract. Dates/money in this first snag slice retain legacy timestamp/number DTOs pending explicit date-only/decimal migration; do not claim completed field parity."
+    "version": "0.4.0-candidate",
+    "description": "Implemented v2 foundation, not the complete unified-platform API. New snag responses include canonical calendar deadlines and exact decimal costs; nested legacy timestamp/number fields are compatibility mirrors. Complete field/graph parity, evidence/workflow/private media, reports/jobs, company billing and account deletion remain under implementation. V1 recovery endpoints remain outside this contract."
   },
   "servers": [
     {
@@ -1780,7 +1780,7 @@
       "post": {
         "operationId": "previewInvitation",
         "summary": "Review company and project access before accepting",
-        "description": "Verified invited email on current account required before names are disclosed. Does not consume invitation.",
+        "description": "Verified invited email on current account required before names are disclosed. Does not consume invitation. Selected project grants are bound to their revisions at issue time: an older invitation cannot restore subsequently removed or changed access.",
         "security": [
           {
             "browserSession": []
@@ -1917,7 +1917,7 @@
       "post": {
         "operationId": "acceptInvitation",
         "summary": "Atomically accept and create membership/grants",
-        "description": "Recipient verified email and still-authorised inviter required. Repeat cannot resurrect removed membership.",
+        "description": "Recipient verified email and still-authorised inviter required. Repeat cannot resurrect removed membership. Selected project grants are bound to their revisions at issue time: an older invitation cannot restore subsequently removed or changed access.",
         "security": [
           {
             "browserSession": []
@@ -2183,7 +2183,7 @@
       "post": {
         "operationId": "grantProject",
         "summary": "Give an existing company member project access",
-        "description": "Owner/Admin can set Manager/Member; assigned Manager can add Member only, never demote another Manager.",
+        "description": "Owner/Admin may add/change/remove explicit grants. Project Manager may add existing company members as Members only. Removing a project grant cannot remove company-wide Owner/Admin authority. Every command has a stable mutation ID and expected grant revision. Current actor authority is checked before receipt replay.",
         "security": [
           {
             "browserSession": []
@@ -2222,8 +2222,157 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": "Completed successfully; no response body."
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Grant revision conflict, reused operation, or company-wide access prevents effective project-only removal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/ProjectGrantConflict"
+                    },
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Committed grant result, or the same original result for a safe retry. Refetch current state after command acknowledgement.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectGrantResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectGrant"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listProjectMembers",
+        "summary": "List explicit project grants and retained removals",
+        "description": "Owner/Admin or project Manager. Includes versioned removed rows for conflict-safe administration; it is not a list of all effective company administrators or all eligible company colleagues. Returns 50 rows and hasMore.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of explicit grant metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectMemberPage"
+                }
+              }
+            }
           },
           "400": {
             "description": "Invalid input",
@@ -2302,16 +2451,6 @@
                 "schema": {
                   "$ref": "#/components/schemas/Error"
                 }
-              }
-            }
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ProjectGrant"
               }
             }
           }
@@ -5966,21 +6105,39 @@
       "ProjectGrant": {
         "type": "object",
         "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
           "userId": {
             "type": "string",
             "format": "uuid"
           },
           "role": {
-            "enum": [
-              "manager",
-              "member"
+            "anyOf": [
+              {
+                "enum": [
+                  "manager",
+                  "member"
+                ]
+              },
+              {
+                "type": "null"
+              }
             ]
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [
+          "mutation",
           "userId",
-          "role"
-        ]
+          "role",
+          "expectedRevision"
+        ],
+        "additionalProperties": false,
+        "description": "Role must be explicit: null removes access. Revision 0 creates only when no grant or retained tombstone exists. Removed rows retain increasing revisions. An old permission edit cannot recreate removed access."
       },
       "Project": {
         "type": "object",
@@ -7185,6 +7342,114 @@
         },
         "required": [
           "currency"
+        ]
+      },
+      "ProjectGrantResponse": {
+        "type": "object",
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "enum": [
+                  "manager",
+                  "member",
+                  "viewer"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "enum": [
+              "active",
+              "removed",
+              "absent"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "projectId",
+          "userId",
+          "state",
+          "revision"
+        ]
+      },
+      "ProjectMemberPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "access": {
+                  "$ref": "#/components/schemas/ProjectGrantResponse"
+                },
+                "name": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "access"
+              ]
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "page",
+          "hasMore"
+        ]
+      },
+      "ProjectGrantConflict": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "const": true
+          },
+          "identifier": {
+            "const": "project_grant_conflict"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "current": {
+            "$ref": "#/components/schemas/ProjectGrantResponse"
+          }
+        },
+        "required": [
+          "error",
+          "identifier",
+          "reason",
+          "current"
         ]
       }
     }

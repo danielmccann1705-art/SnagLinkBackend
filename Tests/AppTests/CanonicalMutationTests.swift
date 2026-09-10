@@ -464,4 +464,132 @@ final class CanonicalMutationTests: XCTestCase {
         XCTAssertNil(stored?.dueOn); XCTAssertNil(stored?.actualCostDecimal)
     }
 
+
+    private func grantCommand(_ owner: User, project: PlatformProjectResponse, target: User, role: String?, revision: Int, operation: UUID = UUID(), device: UUID = UUID()) async throws -> XCTHTTPResponse {
+        try await request(.POST, "api/v2/projects/\(project.project.id)/members", user: owner,
+            body: ["mutation": metadata(operation, device: device), "userId": try target.requireID().uuidString,
+                   "role": role as Any? ?? NSNull(), "expectedRevision": revision])
+    }
+    func testProjectRemovalBlocksReadsAndRegrantInvalidatesOldCursorEvenWithSameRole() async throws {
+        let owner = try await user(), member = try await user(), project = try await project(owner, company: true)
+        try await join(member, owner: owner, project: project, role: "member")
+        let path = "api/v2/projects/\(project.project.id)"
+        let snapshotResult = try await request(.POST, path + "/register-snapshots", user: member)
+        let snapshot = try snapshotResult.content.decode(RegisterSnapshotPage.self)
+        let removed = try await grantCommand(owner, project: project, target: member, role: nil, revision: 1)
+        XCTAssertEqual(removed.status, .ok, removed.body.string)
+        XCTAssertEqual(try removed.content.decode(ProjectGrantResponse.self).state, "removed")
+        let denied = try await request(.GET, path, user: member); XCTAssertEqual(denied.status, .notFound)
+        let delta = try await request(.GET, path + "/changes?cursor=\(snapshot.changesCursor!)", user: member)
+        XCTAssertEqual(delta.status, .forbidden); XCTAssertTrue(delta.body.string.contains("project_access_revoked"))
+        let list = try await request(.GET, "api/v2/projects?workspaceId=\(project.workspaceId)", user: member)
+        XCTAssertEqual(try list.content.decode(PlatformProjectController.Page.self).items.count, 0)
+        let restored = try await grantCommand(owner, project: project, target: member, role: "member", revision: 2)
+        XCTAssertEqual(restored.status, .ok, restored.body.string)
+        let oldCursor = try await request(.GET, path + "/changes?cursor=\(snapshot.changesCursor!)", user: member)
+        XCTAssertEqual(oldCursor.status, .conflict); XCTAssertTrue(oldCursor.body.string.contains("rebootstrap_required"))
+        let oldSnapshot = try await request(.GET, path + "/register-snapshots?snapshot=\(snapshot.snapshotToken)&offset=0", user: member)
+        XCTAssertEqual(oldSnapshot.status, .conflict)
+        let newSnapshot = try await request(.POST, path + "/register-snapshots", user: member)
+        XCTAssertEqual(newSnapshot.status, .ok)
+    }
+    func testStaleGrantCannotUndoRemovalAndRetryDoesNotDuplicateAuthorityChange() async throws {
+        let owner = try await user(), member = try await user(), project = try await project(owner, company: true)
+        try await join(member, owner: owner, project: project, role: "member")
+        let operation = UUID(), device = UUID()
+        let first = try await grantCommand(owner, project: project, target: member, role: nil, revision: 1, operation: operation, device: device)
+        let repeated = try await grantCommand(owner, project: project, target: member, role: nil, revision: 1, operation: operation, device: device)
+        XCTAssertEqual(first.status, .ok); XCTAssertEqual(repeated.status, .ok)
+        XCTAssertEqual(try repeated.content.decode(ProjectGrantResponse.self).revision, 2)
+        let stale = try await grantCommand(owner, project: project, target: member, role: "manager", revision: 1)
+        XCTAssertEqual(stale.status, .conflict, stale.body.string)
+        let conflict = try stale.content.decode(ProjectGrantConflict.Body.self)
+        XCTAssertEqual(conflict.current.state, "removed"); XCTAssertEqual(conflict.current.revision, 2)
+        let staleCreation = try await grantCommand(owner, project: project, target: member, role: "member", revision: 0)
+        XCTAssertEqual(staleCreation.status, .conflict)
+        let changedPayload = try await grantCommand(owner, project: project, target: member, role: "member", revision: 1, operation: operation, device: device)
+        XCTAssertEqual(changedPayload.status, .conflict); XCTAssertTrue(changedPayload.body.string.contains("operation_reused"))
+        let count = try await VerifiedIdentityService.sql(app.db).raw("SELECT count(*) AS n FROM workspace_activity WHERE workspace_id = \(bind: project.workspaceId) AND action = 'project_access_removed'").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(count, 1)
+    }
+    func testOnlyCompanyAdministratorCanRemoveProjectAccessAndMissingRoleCannotRemove() async throws {
+        let owner = try await user(), manager = try await user(), member = try await user(), project = try await project(owner, company: true)
+        try await join(manager, owner: owner, project: project, role: "manager")
+        try await join(member, owner: owner, project: project, role: "member")
+        let denied = try await grantCommand(manager, project: project, target: member, role: nil, revision: 1)
+        XCTAssertEqual(denied.status, .forbidden)
+        let omitted = try await request(.POST, "api/v2/projects/\(project.project.id)/members", user: owner,
+            body: ["mutation": metadata(), "userId": try member.requireID().uuidString, "expectedRevision": 1])
+        XCTAssertEqual(omitted.status, .badRequest)
+        let current = try await request(.GET, "api/v2/projects/\(project.project.id)", user: member)
+        XCTAssertEqual(current.status, .ok)
+        let rows = try await request(.GET, "api/v2/projects/\(project.project.id)/members", user: manager)
+        XCTAssertEqual(rows.status, .ok)
+        XCTAssertEqual(try rows.content.decode(WorkspaceController.ProjectMemberPage.self).items.count, 2)
+        let privateRows = try await request(.GET, "api/v2/projects/\(project.project.id)/members", user: member)
+        XCTAssertEqual(privateRows.status, .forbidden)
+    }
+    func testFreshMemberInvitationDoesNotResurrectFormerManagerPrivileges() async throws {
+        let owner = try await user(), member = try await user(), project = try await project(owner, company: true)
+        try await join(member, owner: owner, project: project, role: "manager")
+        let removed = try await grantCommand(owner, project: project, target: member, role: nil, revision: 1)
+        XCTAssertEqual(removed.status, .ok)
+        try await join(member, owner: owner, project: project, role: "member")
+        let current = try await request(.GET, "api/v2/projects/\(project.project.id)", user: member)
+        let result = try current.content.decode(PlatformProjectResponse.self)
+        XCTAssertTrue(result.capabilities.contains("edit")); XCTAssertFalse(result.capabilities.contains("review"))
+        let access = try await ProjectGrantService.current(projectID: project.project.id, targetID: member.requireID(), on: app.db)
+        XCTAssertEqual(access.role, "member"); XCTAssertEqual(access.revision, 3)
+    }
+
+    func testPendingInvitationCannotUndoLaterProjectRemoval() async throws {
+        let owner = try await user(), member = try await user(), project = try await project(owner, company: true)
+        try await join(member, owner: owner, project: project, role: "member")
+        let issued = try await app.db.transaction { db in
+            try await WorkspaceInvitationService.issue(workspaceID: project.workspaceId, email: member.email!, role: "member",
+                projects: [.init(projectId: project.project.id, role: "manager")], actorID: owner.requireID(), on: db)
+        }
+        let removed = try await grantCommand(owner, project: project, target: member, role: nil, revision: 1)
+        XCTAssertEqual(removed.status, .ok)
+        for route in ["preview", "accept"] {
+            let result = try await request(.POST, "api/v2/invitations/\(route)", user: member, body: ["token": issued.1])
+            XCTAssertEqual(result.status, .conflict, result.body.string)
+            XCTAssertTrue(result.body.string.contains("invitation_grant_changed"))
+        }
+        let current = try await ProjectGrantService.current(projectID: project.project.id, targetID: member.requireID(), on: app.db)
+        XCTAssertEqual(current.state, "removed"); XCTAssertEqual(current.revision, 2)
+        let pending = try await TeamInvite.find(issued.0.requireID(), on: app.db)
+        XCTAssertEqual(pending?.status, "pending")
+    }
+
+    func testAcceptedInvitationPreviewStopsShowingProjectAfterAccessRemoval() async throws {
+        let owner = try await user(), member = try await user(), project = try await project(owner, company: true)
+        let issued = try await app.db.transaction { db in
+            try await WorkspaceInvitationService.issue(workspaceID: project.workspaceId, email: member.email!, role: "member",
+                projects: [.init(projectId: project.project.id, role: "member")], actorID: owner.requireID(), on: db)
+        }
+        _ = try await app.db.transaction { db in try await WorkspaceInvitationService.accept(token: issued.1, actorID: member.requireID(), on: db) }
+        let before = try await request(.POST, "api/v2/invitations/preview", user: member, body: ["token": issued.1])
+        XCTAssertEqual(try before.content.decode(InvitationPreview.self).projects.count, 1)
+        _ = try await grantCommand(owner, project: project, target: member, role: nil, revision: 1)
+        let after = try await request(.POST, "api/v2/invitations/preview", user: member, body: ["token": issued.1])
+        XCTAssertEqual(after.status, .ok)
+        XCTAssertTrue(try after.content.decode(InvitationPreview.self).projects.isEmpty)
+    }
+    func testCompetingProjectPermissionEditsCannotBothCommit() async throws {
+        let owner = try await user(), member = try await user(), project = try await project(owner, company: true)
+        try await join(member, owner: owner, project: project, role: "member")
+        var statuses: [HTTPResponseStatus] = []
+        try await withThrowingTaskGroup(of: HTTPResponseStatus.self) { group in
+            for role: String? in ["manager", nil] {
+                group.addTask { try await self.grantCommand(owner, project: project, target: member, role: role, revision: 1).status }
+            }
+            for try await status in group { statuses.append(status) }
+        }
+        XCTAssertEqual(statuses.filter { $0 == .ok }.count, 1)
+        XCTAssertEqual(statuses.filter { $0 == .conflict }.count, 1)
+        let current = try await ProjectGrantService.current(projectID: project.project.id, targetID: member.requireID(), on: app.db)
+        XCTAssertEqual(current.revision, 2)
+    }
+
 }

@@ -65,6 +65,8 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateWorkspaceDirectory())
         app.migrations.add(CreateAssignmentHistory())
         app.migrations.add(CreateCanonicalValues())
+        app.migrations.add(VersionProjectGrants())
+        app.migrations.add(VersionInvitationGrants())
 
         try await app.autoMigrate()
     } else {
