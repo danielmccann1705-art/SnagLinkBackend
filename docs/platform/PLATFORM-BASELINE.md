@@ -1,30 +1,57 @@
-# Platform baseline — 10 September 2026
+# Platform baseline — 10 September 2026, source checkpoint
 
-Implementation continues under Drive brief v1.1, refreshed this turn. The existing approved native, portal, contractor and report design work is retained.
+Implementation follows the refreshed Google Drive unified-platform brief v1.1. The approved native reskin/icon, supplied Snaglistv2.zip identity, portal samples, contractor renderer and report work are preserved. This is a development candidate; no platform deployment or release occurred in this continuation.
 
-## Preserved candidate
+## Reproducible source
 
-`work/unified-platform/baseline/manifest.json` records archives, hashes, Git status and complete tracked diffs captured before new edits. The archives include tracked/untracked application source and assets, excluding credentials, local agent settings, caches and dependency builds. Backend: 166 files; iOS: 263; portal: 34.
+| Repository | Working branch | Source checkpoint |
+| --- | --- | --- |
+| `/Users/danielmccann/Desktop/Projects/SnagLinkBackend` | `feature/unified-platform` | `7b4c8cd` |
+| `/Users/danielmccann/Desktop/Projects/Snaglist/SnagLink` | `feature/unified-platform` | `c4b8360ca5f0646b387c7ee0485a87dc16b6ebfc` |
+| `/Users/danielmccann/Documents/Codex/2026-09-06/her/SnaglistPortal` | `feature/unified-portal` | `f763ae2` |
 
-Backend now uses `feature/unified-platform`, based on 022877e with the dirty recovery candidate retained. iOS now uses `feature/unified-platform`, based on 941b635 with the reskin/recovery candidate retained. Portal remains `feature/unified-portal`, starting from 026014d. Neither app/backend HEAD alone reproduces the dirty working candidate; use the source manifest/archive until the milestone commits are recorded.
+The latest source includes the previously verified identity/workspace/register foundation and private capture-media integration. The subsequent canonical workflow, history snapshots, transaction grouping and connected reviewer interface are implemented and compiled, with database/browser verification blocked. Private-media evidence belongs to backend `6d742bf` and portal `1e8e387`; it must not be attributed to the later workflow checkpoint. These are local commits, not pushed branches, merged changes or deployed images.
 
-## Environment evidence
+Original bases were backend `022877e38bc19935e5ed8fdead7ea6215abb1916`, native `941b635ce2c1ddbc1b8ee72386d600d015c695a1`, portal `026014d2f36f49220652fbd8f993072ce0fa3a73`. Prior branches were not reset. `work/unified-platform/baseline/manifest.json` records the original status, binary diffs and source/asset archives before edits. The backend's unrelated local agent settings and duplicate staging-example file remain untracked and untouched. No credentials were committed in this milestone's scan.
 
-Backend test runner uses a named disposable PostgreSQL 16 container `snaglist-platform-test-postgres`, bound only to 127.0.0.1:55439, database `snaglist_app_store_platform_identity`. It has no customer/provider credentials. Real staging verification remains outstanding; older 403/1010/client-block observations do not prove an outage.
+The native checkpoint includes 90 changed/new files, most preserving earlier approved work. The bundled upstream font licence has one original trailing-space line; it was retained unchanged. Application-source whitespace checks pass.
 
-Xcode 26.2 (17C52) was identified. Filesystem access to the iOS Git metadata, SwiftPM/Clang caches and CoreSimulator files/logs was granted. The platform branch was then created successfully. Simulator services still fail with connection-invalid/connection-refused. A generic Simulator build also failed at dependency resolution with `sandbox-exec: sandbox_apply: Operation not permitted`. Evidence: `ios-baseline-build.log`. No Simulator was erased, no caches were deleted, and no application code was changed to hide this failure.
+## Build and test evidence
 
-## Verification so far
+Backend `7b4c8cd` (workflow candidate; private-media base `6d742bf`); portal `f763ae2` (review candidate; private-photo base `1e8e387`); native `c4b8360ca5f0646b387c7ee0485a87dc16b6ebfc`. Local branches only; no deployment/release.
 
-- Identity integration: 31 passed, zero failed/skipped (11 new browser tests, 4 identity guards, 9 native email endpoint cases, 7 token/validation cases). Actual PostgreSQL, no email provider delivery.
-- Project access primitive: 13 passed in this continuation before membership wiring.
-- Combined identity/workspace run: 58 passed, zero failed/skipped. The earlier four recognition-test assertions caused by shared rate-limit state were corrected by isolating that test budget.
-- Legacy-boundary rerun: 44 passed, zero failed/skipped, including three new company/upload boundary cases.
-- Canonical write foundation: 10 new PostgreSQL integration tests passed, zero failed/skipped: concurrent retries, conflicting edits, explicit nulls, protected fields, cross-project IDs, archive/restore, contributor permissions and removed-member receipt replay. These are local API tests, not native integration evidence.
-- After the additive canonical migration, the 13 legacy/workspace tests also passed.
-- Register snapshot/delta tests: the canonical suite now passes 16 cases, including frozen pagination with intervening edits, expiry, removed/rejoined membership, archive events and rollback.
-- Full backend suite: 188 passed, zero failed/skipped after correcting an existing optional-analytics-auth defect and an old test fixture that retained a feature flag between runs.
-- Authenticated invitation preview: an additional scoped run passes all 11 workspace integration tests; the preview does not consume invitations or expose company names to the wrong recipient.
-- Portal build and 11 checks pass after real sign-in transport, timeout/cancellation/conflict handling and account/invitation confirmation forms were added. Browser inspection confirms an honest service-unavailable state while no local backend is listening.
+**Verified locally:** private original/processed media, authenticated gateway, revisioned capture attachments, real portal photo upload/thumbnail/enlarge/reload. Backend full suite 218 pass before the last register-preview addition, then seven relevant cases pass; portal build and 31 tests now pass.
 
-No platform deployment, production data change, merge, release or billing activation has occurred.
+**Implemented but unverified in the database/browser:** canonical attempts, decisions, evidence consumption, reasoned waiver/internal fix/reopen, queued notifications, completion-history snapshots, transaction-grouped deltas and the connected review workspace. All backend application/test code compiles. The eight new workflow tests failed at database setup, so none is a workflow pass. The new review workspace still needs actual browser rendering/interaction inspection; the earlier connected-photo capture is separate evidence.
+
+**Current blocker:** OrbStack/Docker's task database stopped responding and the OrbStack app shows setup requiring Dan's acceptance of its terms/privacy. A separate official PostgreSQL 16.15 source build succeeded, but the sandbox denied shared-memory initialisation. Neither path currently supplies a working test database. Existing databases/other projects were not reset. Native build still has its separate package-sandbox/CoreSimulator block.
+
+See [WORKFLOW.md](https://drive.google.com/file/d/1x8NH7hxbBjoeyv65CUVfEuE-_iytKfZB/view) for architecture, exact file/symbol references, test labels and resumption instructions; [PRIVATE-MEDIA.md](https://drive.google.com/file/d/1h3md2ZhJ4rlrJdakMHsKEwTD0o36riEP/view) for upload/storage boundaries. D1 recording/fresh native PDF, real D2 and G1–G5 remain open. Earlier dated sections are historical checkpoints, not claims that later code passed their tests.
+
+## Environment boundaries
+
+The now-unresponsive original test runtime is `snaglist-platform-test-postgres` (PostgreSQL 16), only `127.0.0.1:55439`, disposable databases `snaglist_app_store_platform_identity` , `snaglist_app_store_platform_clean` and `snaglist_app_store_platform_browser`. The existing browser server was launched against that original test runtime and listens only on 127.0.0.1:55480; Vite uses 127.0.0.1:5176. Its DEBUG-only mailbox requires development mode, loopback origin/listener/database, the exact disposable browser database and an @example.test recipient; it is omitted from release compilation. Temporary mail links are kept in a private development directory and must never enter the evidence pack or Drive. There are no customer/provider credentials in the runner. Never aim it at a remote database.
+
+The existing recovered synthetic staging Worker, Neon database, R2 storage and Resend sender remain the infrastructure baseline from 9 September. This milestone did not redeploy them or establish their current health. Production has not been cut over. Native remains version 2.0.0/build 2 in source; no new App Store Connect or installed public-version verification is implied.
+
+Staging iOS uses distinct app/Clip bundles, SwiftData location, OS media/preferences/queue sandbox and Keychain service; production purchases/push/shared widgets are disabled. See `IOS-STAGING.md`. Account-specific partitioning within an installation remains WP-06 work.
+
+## Evidence locations
+
+Workspace root: `/Users/danielmccann/Documents/Codex/2026-09-06/her`.
+
+- `outputs/app-store-prep/backend-tests/platform-fresh-schema-full.{json,log}`
+- `outputs/app-store-prep/backend-tests/platform-exact-values.{json,log}`
+- `outputs/platform/ios-staging-build.log` and `ios-staging-isolation-check.log`
+- `outputs/platform/account-unavailable-desktop.png` (earlier connection-error state)
+- `outputs/platform/connected-register-local.png` and `connected-register-conflict-local.png` (actual browser captures, synthetic API-created records)
+- `outputs/app-store-prep/backend-tests/platform-register-full.{json,log}`, `platform-browser-mail.{json,log}`
+- `work/unified-platform/local-review/manifest.json` (fixture scope, no credentials); `run.py`, `seed.py`, `mailbox.py` (local verification harness)
+- `outputs/portal-design/index.html` and its actual capture files
+- `outputs/platform/connected-register-private-photo-local.png` (actual successful photo upload before the database failure)
+- `outputs/app-store-prep/backend-tests/platform-private-media-full-final.{json,log}`, `platform-private-media-preview.{json,log}`
+- `outputs/app-store-prep/backend-tests/platform-workflow-current-build.{json,log}` (compile only); `platform-workflow-postgres16.{json,log}` (database setup failure)
+- `docs/platform/WORKFLOW.md`, `docs/platform/PRIVATE-MEDIA.md`
+- Backend `docs/api/openapi.json` (0.7.0-candidate, 42 paths / 54 operations / 60 schemas); portal `contracts/openapi.json` and `src/generated/apiTypes.ts`
+
+D1 recording/fresh native PDF, D2 and G1–G5 remain open. A local test pass or source checkpoint is not proof of staging integration, customer migration or production readiness.

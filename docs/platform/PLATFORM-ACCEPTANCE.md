@@ -1,19 +1,54 @@
-# Platform acceptance — work in progress
+# Platform acceptance — candidate, not complete
 
-G0: partial. Source archives/manifests preserved; native full build/Simulator restricted. Isolated native scheme/store migration not yet implemented.
-WP-01: verified identity/session foundation locally tested. Browser transport and sign-in form built and unavailable-service state inspected. Real provider email/browser round-trip, native verified-email UI, Apple web configuration, account deletion/provider cleanup and legacy email-only recovery remain open.
-WP-02: additive workspace/membership/grant/invitation schema, services and project capability endpoints implemented. Ten new database integration tests pass. All legacy/media/job paths and lifecycle/transfer coverage remain open; not rollout-ready.
-WP-03: project/stable-snag creation, revision-aware edits, hash-bound retry receipts, reference allocation, publication, archive/restore and atomic change rows implemented; the expanded canonical suite passes 16 local API tests, now including immutable register snapshots and per-project deltas. Full graph parity, directories/media, migration, global grant discovery and native outbox remain open.
-WP-04 through WP-11: existing recovery/design work retained; complete canonical sync, unified workflow, private media, native migration, integrated register/workbench, jobs, reports, test billing and release evidence remain underway or absent as specified in the brief.
-D1: core samples retained and inspected previously, plus real sign-in entry inspected. Continuous recording and fresh PDF comparison outstanding.
-G1/G2/G3/D2/G4/G5: not passed. No simulated or local-only result substitutes for their real environment acceptance.
+Backend `7b4c8cd` (workflow candidate; private-media base `6d742bf`); portal `f763ae2` (review candidate; private-photo base `1e8e387`); native `c4b8360ca5f0646b387c7ee0485a87dc16b6ebfc`. Local branches only; no deployment/release.
 
-## Current verification artifacts
+## Package status
 
-Local runner output: `outputs/app-store-prep/backend-tests/platform-accounts-workspaces.{json,log}` (58 pass); `platform-legacy-access.{json,log}` (44 pass); `platform-mutation-compile.{json,log}` (13 pass); `platform-canonical-mutations.{json,log}` (10 pass). These runs overlap; do not add them into a distinct-test total. All use disposable local PostgreSQL. Provider delivery, real staging and device checks are not implied.
+| Package/gate | Evidence / implemented scope | Still required |
+| --- | --- | --- |
+| WP-00 / G0 | Preserved reskin/recovery source and assets; source commits; fresh backend migrations/tests; isolated staging native configuration and compiled routing checks | Full native build/install and provider identities; exact deployed-image/migration reconciliation; real staging isolation proof |
+| WP-01 | Verified identities; native auth/version checks; one-use browser challenges, secure sessions/CSRF; linked-email proof; recipient-verified invitation preview and confirmation UI | Provider/browser/native round trip, work-email native UI, Apple web/staging registration, recent reauthentication, account deletion/provider cleanup, historical email-only recovery |
+| WP-02 | Workspace/membership/project grants; atomic verified invitations; role changes, member removal, last-owner protection and workspace ownership transfer; central project capability policy; revisioned grant removal/re-add and invitation-permission binding | Project transfer/lifecycle, global grant discovery, complete media/job/legacy-route access audit, two real internal identities sharing a project |
+| WP-03 | Stable project/snag IDs, display allocation, revision conflicts, retry receipts, publish/archive/restore; immutable bounded register snapshots/deltas; workspace contractor/trade directory, normalised trade relationships, audited assignments; exact calendar deadlines and decimal costs; bounded server search/filter/sort/count pages; attached-media snapshots tested; new completion-history snapshots and complete transaction-group deltas compile but remain database-unverified | Full project fields, folders/tags/units, media/drawings/pins/history graph, global grant discovery, durable snapshot/cursor cleanup, device/snapshot import contracts, old-reference alias migration |
+| WP-04 | Recovery guards remain regression-tested. New canonical attempt/decision, evidence/waiver/internal fix/reopen, atomic history/change/outbox source compiles; **database verification pending** | Eight workflow tests, complete legacy/contractor adapters and historical reconciliation, real reviewer interactions, notification delivery |
+| WP-05 | PIN/revoke recovery guards preserved; internal-account private media allocation, processing, gateway and revisioned capture attachment tested locally; actual browser upload verified | Scoped prepare/activate contractor grants, current-data renderer, PIN-protected grant media, reassignment revocation, orphan cleanup, Linux processing and private R2 staging verification |
+| WP-06 | Environment isolation foundation and source field audit | Account-scoped store/media/queues, durable immutable native operations, complete pull/merge, recoverable backup/import, offline conflict repair and ordinary capture integration |
+| WP-07 / D1 / G1 | Core D1 design captures and real account/register/edit/photo UI locally exercised. Connected review/history/decision UI builds; controller tests pass; **new review browser inspection pending** | Recording/fresh native PDF; Add/share/bulk and remaining workbench; ordinary iOS → second manager → no-account contractor → acceptance → matching native/report proof |
+| WP-08 / D2 | Core design language established; earlier narrow/zoom/keyboard sample checks retained | Remaining real workbench screens, preserved workflow context, full staging state/permission/conflict/responsive/accessibility inspection |
+| WP-09 | Existing renderer/report/notification code preserved | Immutable reports and manifests, durable leased jobs, delivery/reminder retries and restart evidence |
+| WP-10 / G4 | Existing personal purchase/usage verification code preserved | Verified cross-surface entitlement binding, test company billing/seats, webhook/reconciliation and commerce acceptance; no live price activation |
+| WP-11 / G3–G5 | Existing event endpoint and optional authenticated-event fix regression-tested | Verified event delivery, operations/restore/rollback rehearsal, measured performance, security/privacy/device acceptance and release package |
 
-The current source-file hash inventory is `backend-canonical-source-manifest.json`. The source remains uncommitted on `feature/unified-platform`; preserved recovery archives remain separate. Native blocker: `ios-baseline-build.log`. Actual browser connection-error capture: `account-unavailable-desktop.png`; it is not a successful sign-in proof.
+No whole package or integrated gate is marked complete by these partial results. Account/environment isolation, complete graph bootstrap and integrated workflow are different requirements.
 
-Latest expanded run: `platform-full-backend-final.{json,log}` — 188 tests, zero failures/skips. `platform-invitation-preview.{json,log}` — 11 workspace tests after adding recipient-verified preview, including one new case. Portal build and all 11 checks pass. The later invitation preview is covered by its scoped run, not retroactively by the 188-test run.
+## Actual test results
 
-Recording/native tools were retried: macOS Screenshot controls returned computer-use timeout; Xcode was located with the Snaglist project open but its accessibility/screenshot request also timed out. These are still unverified external capabilities, not passed D1/device evidence.
+**Backend locally verified private-media base:** `platform-private-media-full-final` — 218 passed, zero failed/skipped; 34.661 seconds including build, 27.988 seconds tests. `platform-private-media-preview` — seven passed, zero failed/skipped after adding the register photo preview. Results carry the source hash. Earlier fresh-schema 199, register 210 and mail 12 results remain historical evidence at their respective revisions.
+
+**Current workflow backend:** `platform-workflow-current-build` compiles the app and all tests, 8.841 seconds, no tests executed. Eight new integration cases exist. `platform-workflow-compile` failed during database connection setup for seven media cases; `platform-workflow-postgres16` failed during setup for eight workflow cases. Those failures establish the environment limitation, not product correctness or eight workflow defects. No fresh-schema workflow migration success is claimed.
+
+**Portal:** generated contract, TypeScript, production bundle and all **31 tests pass** at `f763ae2`. Six review-controller tests cover uncertainty, explicit evidence re-review after conflict, required reasons, account disposal/access removal, stale reads and pagination. The earlier four design workflow tests are still simulated-design tests. Build uses the documented Vite native config loader after the default config loader stalled on this host.
+
+**Actual local browser:** real local email challenge/cookie session; 12 API-created snags; draft retention, saved location and two-tab revision conflict/explicit comparison; empty project inspection. Then actual native-picker photo upload through allocation/processing/attachment, persisted row thumbnail, enlargement and reload; snag stayed Open. Only one synthetic identity was used. No new connected reviewer interaction, two-distinct-user G1, native capture or real staging D2 pass is claimed.
+
+**Native:** staging scheme/entitlement and compiled Foundation routing checks pass; source parsing passes. Full build remains blocked before compilation by package sandbox/CoreSimulator access. The visible old 133-pass Xcode report is dated 7 September and is not new evidence.
+
+**Runtime:** original Docker PostgreSQL on 55439 does not answer usable database requests. OrbStack setup requires Dan's terms/privacy step. A task-local source-built PostgreSQL 16.15 cannot initialise because this sandbox denies shared memory. See WORKFLOW.md. No global reset or remote/customer test execution was attempted.
+
+## Visual evidence and remaining checks
+
+Retain `outputs/portal-design/index.html`, register/detail, evidence review, contractor phone, empty/filtered/200%-zoom and missing-media captures. The design source remains the supplied ZIP/current brand guide, not the superseded assistant pack.
+
+`outputs/platform/account-unavailable-desktop.png` is an actual browser capture of the new account UI without a reachable local backend. Do not present it as successful sign-in or staging proof.
+
+Actual connected local captures are `outputs/platform/connected-register-local.png` and `connected-register-conflict-local.png`. The full-page conflict capture exposed unnecessary space above the edit fields; the empty evidence placeholder is now hidden while editing to remove that gap. A later actual capture, `outputs/platform/connected-register-private-photo-local.png`, verifies private media on the connected register. The subsequent review workspace reuses the D1 layout but has not been rendered/inspected against its new backend; do not present it as visually accepted.
+
+D1's continuous recording and fresh native PDF comparison remain open. `interrupted-walkthrough.mp4` is a still-image sequence, not a continuous workflow recording. D2 must be repeated against the real candidate, with no important visual/usability defects left unresolved.
+
+## Next acceptance sequence
+
+1. Complete canonical graph/reference/media prerequisites and workflow invariants while restoring native build access.
+2. Finish identity lifecycle, account partitioning and recoverable import/outbox; retain ambiguous legacy ownership for explicit reconciliation.
+3. Connect the established core portal screens and contractor renderer, then execute G1 with ordinary capture and two real internal identities.
+4. Run adversarial integrity/access/migration checks (G2), finish the workbench/reports/jobs and real D2/G3 checks.
+5. Verify test commerce, telemetry, restore/rollback and release readiness. Production cutover, live billing, merge and App Store submission remain separate actions.
