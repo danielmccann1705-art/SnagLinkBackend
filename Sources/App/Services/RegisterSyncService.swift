@@ -23,7 +23,7 @@ struct ProjectChangePage: Content {
 }
 
 /// Stable register download, with its workspace directory. It is not the complete
-/// native graph bootstrap: media, drawings and completion history still follow.
+/// native graph bootstrap: drawing/annotation graphs and completion history still follow.
 struct RegisterSyncService {
     static func fingerprint(_ project: Project, actorID: UUID, on db: Database) async throws -> String {
         let row = try await VerifiedIdentityService.sql(db).raw("""
@@ -46,7 +46,8 @@ struct RegisterSyncService {
         let count = try await Snag.query(on: db).filter(\.$projectId == projectID).count()
         let contractorCount = try await Contractor.query(on: db).filter(\.$workspaceId == workspaceID).filter(\.$platformManaged == true).count()
         let tradeCount = try await Trade.query(on: db).filter(\.$workspaceId == workspaceID).filter(\.$platformManaged == true).count()
-        let total = count + contractorCount + tradeCount + 1
+        let mediaCount = try await sql.raw("SELECT count(*) AS n FROM media_assets WHERE project_id = \(bind: projectID) AND attached_at IS NOT NULL AND state = 'ready'").first()!.decode(column: "n", as: Int.self)
+        let total = count + contractorCount + tradeCount + mediaCount + 1
         guard total <= 10000 else { throw Abort(.payloadTooLarge, reason: "This project needs a background snapshot. No partial download was created", identifier: "snapshot_job_required") }
         // Expired private snapshots can be removed without deleting customer work.
         try await sql.raw("DELETE FROM register_snapshots WHERE actor_id = \(bind: actorID) AND expires_at < \(bind: now)").run()
@@ -56,6 +57,7 @@ struct RegisterSyncService {
         let access = try await fingerprint(project, actorID: actorID, on: db)
         let sequence = try await sql.raw("SELECT change_sequence FROM teams WHERE id = \(bind: workspaceID)").first()!.decode(column: "change_sequence", as: Int64.self)
         try await sql.raw("INSERT INTO register_snapshots (id, token_hash, actor_id, workspace_id, project_id, access_fingerprint, high_watermark, item_count, created_at, expires_at) VALUES (\(bind: id), \(bind: SHA256Hasher.hash(token: token)), \(bind: actorID), \(bind: workspaceID), \(bind: projectID), \(bind: access), \(bind: sequence), \(bind: total), \(bind: now), \(bind: expiry))").run()
+        try await sql.raw("UPDATE register_snapshots SET coverage = ARRAY['project', 'snags', 'contractors', 'trades', 'attachedMedia']::TEXT[] WHERE id = \(bind: id)").run()
         try await item(snapshotID: id, position: 0, type: "project", id: projectID, value: PlatformProjectResponse(project, actions: actions), on: db)
         // Workspace writes are blocked only for this bounded transaction. HTTP page
         // requests read immutable rows, without holding a transaction open between requests.
@@ -72,6 +74,12 @@ struct RegisterSyncService {
         let trades = try await Trade.query(on: db).filter(\.$workspaceId == workspaceID).filter(\.$platformManaged == true).sort(\.$id).all()
         for trade in trades {
             try await item(snapshotID: id, position: position, type: "trade", id: trade.requireID(), value: WorkspaceDirectoryService.response(trade), on: db)
+            position += 1
+        }
+        let media = try await sql.raw("SELECT * FROM media_assets WHERE project_id = \(bind: projectID) AND attached_at IS NOT NULL AND state = 'ready' ORDER BY snag_id, created_at, id").all()
+        for row in media {
+            let asset = try MediaAssetResponse(row)
+            try await item(snapshotID: id, position: position, type: "media", id: asset.id, value: asset, on: db)
             position += 1
         }
         return try await page(token: token, offset: 0, projectID: projectID, actorID: actorID, on: db)
@@ -97,7 +105,7 @@ struct RegisterSyncService {
         }
         let next = offset + items.count < total ? offset + items.count : nil
         let cursor = next == nil ? try await issueCursor(project: project, actorID: actorID, sequence: snapshot.decode(column: "high_watermark", as: Int64.self), fingerprint: access, on: db) : nil
-        return .init(snapshotToken: token, coverage: ["project", "snags", "contractors", "trades"], items: items, total: total, nextOffset: next, changesCursor: cursor, expiresAt: expiry)
+        return try .init(snapshotToken: token, coverage: snapshot.decode(column: "coverage", as: [String].self), items: items, total: total, nextOffset: next, changesCursor: cursor, expiresAt: expiry)
     }
     static func changes(cursor: String, projectID: UUID, actorID: UUID, on db: Database) async throws -> ProjectChangePage {
         guard cursor.count <= 100 else { throw Abort(.badRequest) }

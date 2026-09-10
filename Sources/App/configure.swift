@@ -67,6 +67,8 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateCanonicalValues())
         app.migrations.add(VersionProjectGrants())
         app.migrations.add(VersionInvitationGrants())
+        app.migrations.add(CreatePrivateMedia())
+        app.migrations.add(AddMediaSnapshotCoverage())
 
         try await app.autoMigrate()
     } else {

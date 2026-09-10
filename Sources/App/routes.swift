@@ -152,6 +152,7 @@ func routes(_ app: Application) throws {
     try app.register(collection: WorkspaceController())
     try app.register(collection: PlatformProjectController())
     try app.register(collection: PlatformSnagController())
+    try app.register(collection: PrivateMediaController())
     try app.register(collection: RegisterSyncController())
     try app.register(collection: WorkspaceDirectoryController())
     try app.register(collection: DeviceController())

@@ -17,3 +17,6 @@ uploads
 **/*.dump
 **/*.sql.gz
 **/*.log
+
+# Private platform originals/renditions are never source or build context.
+PrivateMedia/

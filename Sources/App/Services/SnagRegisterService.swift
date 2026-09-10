@@ -37,9 +37,11 @@ enum SnagRegisterService {
         let id: UUID; let companyName: String; let contactName: String?; let isArchived: Bool
     }
     struct Summary: Content { let total: Int; let awaitingReview: Int; let overdue: Int }
+    struct EvidencePreview: Content { let snagId: UUID; let asset: MediaAssetResponse; let count: Int }
     struct Page: Content {
         let items: [PlatformSnagResponse]; let page: Int; let hasMore: Bool
         let total: Int; let summary: Summary; let contractors: [ContractorLabel]
+        let evidence: [EvidencePreview]
     }
     static func list(_ filters: SnagRegisterQuery, project: Project, on db: Database, now: Date = Date()) async throws -> Page {
         try filters.validate()
@@ -93,9 +95,18 @@ enum SnagRegisterService {
         let contractorIDs = Set(values.compactMap(\.contractorId))
         let contractors = try await Contractor.query(on: db).filter(\.$id ~~ Array(contractorIDs))
             .filter(\.$workspaceId == project.workspaceId).filter(\.$platformManaged == true).all()
+        let ids = try values.map { try $0.requireID() }
+        let photos = ids.isEmpty ? [] : try await VerifiedIdentityService.sql(db).raw("""
+            SELECT DISTINCT ON (snag_id) media_assets.*, count(*) OVER (PARTITION BY snag_id) AS photo_count
+            FROM media_assets WHERE project_id = \(bind: projectID) AND snag_id = ANY(\(bind: ids)) AND state = 'ready' AND attached_at IS NOT NULL
+            ORDER BY snag_id, CASE purpose WHEN 'capture' THEN 0 ELSE 1 END, created_at, id
+            """).all()
+        let evidence = try photos.map { row in
+            EvidencePreview(snagId: try row.decode(column: "snag_id", as: UUID.self), asset: try MediaAssetResponse(row), count: try row.decode(column: "photo_count", as: Int.self))
+        }
         return try Page(items: values.map(PlatformSnagResponse.init), page: page, hasMore: page * 50 < total,
             total: total, summary: summary, contractors: contractors.map {
                 ContractorLabel(id: try $0.requireID(), companyName: $0.companyName, contactName: $0.contactName, isArchived: $0.isArchived)
-            })
+            }, evidence: evidence)
     }
 }

@@ -156,9 +156,56 @@ enum StorageService {
 
     // MARK: - Shutdown
 
+    // MARK: - Private platform media
+
+    /// Never fall back to the historical public bucket or Public directory.
+    /// Deployment must keep both custom-domain and r2.dev access disabled on this
+    /// separate bucket; the application never returns its object addresses.
+    private static func privateBucket(app: Application) throws -> String? {
+        if let bucket = Environment.get("R2_PRIVATE_BUCKET_NAME"), !bucket.isEmpty {
+            guard bucket != Environment.get("R2_BUCKET_NAME"),
+                  ["R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"].allSatisfy({ !(Environment.get($0) ?? "").isEmpty }) else {
+                throw Abort(.serviceUnavailable, reason: "Private photo storage is not configured")
+            }
+            return bucket
+        }
+        guard app.environment == .testing || (app.environment == .development && Environment.get("PLATFORM_ENVIRONMENT") == "local") else {
+            throw Abort(.serviceUnavailable, reason: "Private photo storage is not configured")
+        }
+        return nil
+    }
+    static func requirePrivateStorage(app: Application) throws { _ = try privateBucket(app: app) }
+    private static func privatePath(_ key: String, app: Application) throws -> URL {
+        let parts = key.split(separator: "/")
+        guard parts.count == 5, parts[0] == "platform", parts[1...3].allSatisfy({ UUID(uuidString: String($0)) != nil }),
+              (parts[4] == "original" || String(parts[4]).range(of: "^view-[a-f0-9]{64}\\.jpg$", options: .regularExpression) != nil) else { throw Abort(.internalServerError, reason: "Invalid private media key") }
+        return URL(fileURLWithPath: app.directory.workingDirectory).appendingPathComponent("PrivateMedia").appendingPathComponent(key)
+    }
+    static func uploadPrivate(_ data: Data, key: String, mime: String, app: Application) async throws {
+        let path = try privatePath(key, app: app)
+        if let bucket = try privateBucket(app: app) {
+            _ = try await _s3Client.putObject(.init(body: .init(buffer: ByteBuffer(data: data)), bucket: bucket, cacheControl: "private, no-store", contentType: mime, key: key))
+        } else {
+            try await app.threadPool.runIfActive(eventLoop: app.eventLoopGroup.next()) {
+                try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                try data.write(to: path, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            }.get()
+        }
+    }
+    static func downloadPrivate(key: String, app: Application) async throws -> Data {
+        let path = try privatePath(key, app: app)
+        if let bucket = try privateBucket(app: app) {
+            let result = try await _s3Client.getObject(.init(bucket: bucket, key: key))
+            let bytes = try await result.body.collect(upTo: PrivateImageProcessor.maximumBytes)
+            return Data(buffer: bytes)
+        }
+        return try await app.threadPool.runIfActive(eventLoop: app.eventLoopGroup.next()) { try Data(contentsOf: path) }.get()
+    }
+
     /// Cleanly shuts down the AWS HTTP client. Call before app shutdown.
     static func shutdown() async throws {
-        if backend == .r2 {
+        if backend == .r2 || Environment.get("R2_PRIVATE_BUCKET_NAME") != nil {
             try await _awsClient.shutdown()
         }
     }
