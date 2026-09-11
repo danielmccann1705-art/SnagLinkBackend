@@ -39,7 +39,8 @@ final class GoogleAuthEndpointTests: XCTestCase {
     func challenge(ios: Bool = false) async throws -> (GoogleChallengeResponse, String?) {
         let response = try await request(.POST, "api/v2/auth/google/" + (ios ? "ios/challenge" : "challenge"), origin: ios ? nil : "valid")
         XCTAssertEqual(response.status, .ok, response.body.string)
-        return try (response.content.decode(GoogleChallengeResponse.self), ios ? nil : cookie(response, name: GoogleAuthController.bindingCookie))
+        let issued = try response.content.decode(GoogleChallengeResponse.self)
+        return try (issued, ios ? nil : cookie(response, name: GoogleAuthController.bindingCookie(for: issued.challengeToken)))
     }
     func token(_ challenge: GoogleChallengeResponse, subject: String, ios: Bool = false, nonce: String? = nil) throws -> String {
         let signers = JWTSigners()
@@ -63,6 +64,18 @@ final class GoogleAuthEndpointTests: XCTestCase {
         return (user, BrowserSessionService.cookieName + "=" + session.token, session.principal.csrfToken, session.principal.sessionID)
     }
 
+    func testTwoOpenGoogleSignInTabsKeepIndependentBindings() async throws {
+        let (first, firstCookie) = try await challenge()
+        let (second, secondCookie) = try await challenge()
+        XCTAssertNotEqual(GoogleAuthController.bindingCookie(for: first.challengeToken), GoogleAuthController.bindingCookie(for: second.challengeToken))
+        let cookies = try XCTUnwrap(firstCookie) + "; " + XCTUnwrap(secondCookie)
+        let subject = "two-tabs-\(UUID())"
+        let signedFirst = try await request(.POST, "api/v2/auth/google/verify", body: verifyBody(first, identity: token(first, subject: subject)), cookie: cookies)
+        let signedSecond = try await request(.POST, "api/v2/auth/google/verify", body: verifyBody(second, identity: token(second, subject: subject)), cookie: cookies)
+        XCTAssertEqual(signedFirst.status, .ok); XCTAssertEqual(signedSecond.status, .ok)
+        XCTAssertEqual(try signedFirst.content.decode(BrowserSessionResponse.self).user.id, try signedSecond.content.decode(BrowserSessionResponse.self).user.id)
+    }
+
     func testConfigurationIsDisabledWithoutExplicitEnvironmentClients() async throws {
         app.storage[GoogleIdentityConfigurationKey.self] = nil
         let response = try await request(.GET, "api/v2/auth/google/configuration", origin: nil)
@@ -78,7 +91,7 @@ final class GoogleAuthEndpointTests: XCTestCase {
         XCTAssertNil(issued.verifier)
         XCTAssertEqual(issued.clientID, provider.webClientID)
         let identity = try token(issued, subject: "google-web-\(UUID())")
-        let response = try await request(.POST, "api/v2/auth/google/verify", body: verifyBody(issued, identity: identity), cookie: binding)
+        let response = try await request(.POST, "api/v2/auth/google/verify", body: verifyBody(issued, identity: identity), cookie: #"g_state={"i_l":0,"i_ll":123}; "# + (binding ?? ""))
         XCTAssertEqual(response.status, .ok, response.body.string)
         let payload = try response.content.decode(BrowserSessionResponse.self)
         XCTAssertTrue(payload.verifiedEmails.isEmpty)

@@ -43,7 +43,7 @@ struct BrowserAuthController: RouteCollection {
         let config = try PlatformConfiguration.load(on: req.application)
         try config.requireOrigin(req)
         let input = try req.content.decode(MagicLinkVerifyBody.self)
-        guard let binding = req.cookies[BrowserSessionService.bindingCookieName]?.string else {
+        guard let binding = RequestCredentialCookie.value(BrowserSessionService.bindingCookieName, on: req) else {
             throw Abort(.conflict, reason: "Return to the browser that requested this link, or request a new link here", identifier: "verification_context_mismatch")
         }
         let result = try await req.db.transaction { db in

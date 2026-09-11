@@ -25,7 +25,11 @@ struct GoogleVerifyRequest: Content {
 struct GoogleConnectionResponse: Content { let connected: Bool }
 
 struct GoogleAuthController: RouteCollection {
-    static let bindingCookie = "__Host-snaglist_google"
+    static func bindingCookie(for challengeToken: String) -> String {
+        // Each open sign-in tab keeps its own binding. Rendering a second Google
+        // button must not invalidate the first tab's pending provider request.
+        "__Host-snaglist_google_" + SHA256Hasher.hash(token: challengeToken).prefix(24)
+    }
 
     func boot(routes: RoutesBuilder) throws {
         let auth = routes.grouped("api", "v2", "auth", "google")
@@ -55,7 +59,7 @@ struct GoogleAuthController: RouteCollection {
         let binding = try SecureTokenGenerator.generate(byteCount: 32)
         let issued = try await GoogleIdentityChallengeService.issue(purpose: .signIn, surface: .web, binding: binding, platform: platform, provider: provider, on: req.db)
         let response = try challengeResponse(issued, surface: .web, verifier: nil, provider: provider)
-        response.cookies[Self.bindingCookie] = BrowserSessionService.cookie(binding, maxAge: Int(GoogleIdentityChallengeService.lifetime))
+        response.cookies[Self.bindingCookie(for: issued.token)] = BrowserSessionService.cookie(binding, maxAge: Int(GoogleIdentityChallengeService.lifetime))
         return response
     }
 
@@ -63,7 +67,7 @@ struct GoogleAuthController: RouteCollection {
         let (platform, provider) = try settings(req)
         try platform.requireOrigin(req)
         let input = try req.content.decode(GoogleVerifyRequest.self)
-        guard input.verifier == nil, let binding = req.cookies[Self.bindingCookie]?.string else { throw contextError() }
+        guard input.verifier == nil, (32...128).contains(input.challengeToken.utf8.count), let binding = RequestCredentialCookie.value(Self.bindingCookie(for: input.challengeToken), on: req) else { throw contextError() }
         let context = try await GoogleIdentityChallengeService.context(input.challengeToken, purpose: .signIn, surface: .web, binding: binding, platform: platform, provider: provider, on: req.db)
         let proof = try await GoogleIdentityVerifier.verify(input.identityToken, surface: .web, nonceHash: context.nonceHash, challengeCreatedAt: context.createdAt, config: provider, on: req)
         let result = try await req.db.transaction { db in
@@ -75,7 +79,7 @@ struct GoogleAuthController: RouteCollection {
         let response = Response(status: .ok)
         try response.content.encode(try await BrowserAuthController().response(for: result.0, csrf: result.1.principal.csrfToken, on: req.db))
         response.cookies[BrowserSessionService.cookieName] = BrowserSessionService.cookie(result.1.token, maxAge: Int(BrowserSessionService.lifetime))
-        response.cookies[Self.bindingCookie] = BrowserSessionService.cookie("", maxAge: 0)
+        response.cookies[Self.bindingCookie(for: input.challengeToken)] = BrowserSessionService.cookie("", maxAge: 0)
         response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
         return response
     }

@@ -15,7 +15,7 @@ enum PINSessionService {
     }
 
     static func isVerified(_ req: Request, link: MagicLink, now: Date = Date()) -> Bool {
-        guard let value = req.cookies[cookieName]?.string,
+        guard let value = RequestCredentialCookie.value(cookieName, on: req),
               let id = link.id,
               let secret = Environment.get("JWT_SECRET"), !secret.isEmpty else { return false }
         let parts = value.split(separator: ":", maxSplits: 1)

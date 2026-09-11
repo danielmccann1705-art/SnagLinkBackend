@@ -98,7 +98,7 @@ enum LinkGrantService {
         }
         if verifySession, try row.decode(column: "pin_hash", as: String?.self) != nil {
             let id = try row.decode(column: "id", as: UUID.self)
-            guard let token = req.cookies[cookieName(id)]?.string, token.count <= 128,
+            guard let token = RequestCredentialCookie.value(cookieName(id), on: req), token.count <= 128,
                   try await VerifiedIdentityService.sql(db).raw("SELECT token_hash FROM link_sessions WHERE token_hash = \(bind: SHA256Hasher.hash(token: token)) AND grant_id = \(bind: id) AND expires_at > \(bind: Date())").first() != nil else { throw Abort(.forbidden, reason: "Enter the PIN provided by the project manager", identifier: "pin_required") }
         }
         return (row, project)

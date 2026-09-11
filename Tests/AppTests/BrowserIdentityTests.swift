@@ -44,6 +44,18 @@ final class BrowserIdentityTests: XCTestCase {
         return try (cookie, response.content.decode(BrowserSessionResponse.self))
     }
 
+    func testGoogleStateCookieCannotHideEmailBindingOrManagerSession() async throws {
+        let raw = try await challenge()
+        let providerCookie = #"g_state={"i_l":0,"i_ll":123456789}; "#
+        let response = try await request(.POST, "api/v2/auth/verify", body: ["token": raw],
+            cookie: providerCookie + BrowserSessionService.bindingCookieName + "=test-browser")
+        XCTAssertEqual(response.status, .ok, response.body.string)
+        guard response.status == .ok else { return }
+        let sessionCookie = try XCTUnwrap(response.headers["set-cookie"].first { $0.hasPrefix(BrowserSessionService.cookieName + "=") }?.components(separatedBy: ";").first)
+        let loaded = try await request(.GET, "api/v2/auth/session", cookie: providerCookie + sessionCookie)
+        XCTAssertEqual(loaded.status, .ok, loaded.body.string)
+    }
+
     func testVerificationCreatesHostOnlySecureSessionAndNoJWTInBody() async throws {
         let response = try await verify(challenge())
         XCTAssertEqual(response.status, .ok, response.body.string)
