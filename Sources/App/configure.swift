@@ -72,6 +72,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateCanonicalWorkflow())
         app.migrations.add(AddChangeTransactionGroups())
         app.migrations.add(CreateContractorGrants())
+        app.migrations.add(CreateGoogleIdentity())
 
         try await app.autoMigrate()
     } else {

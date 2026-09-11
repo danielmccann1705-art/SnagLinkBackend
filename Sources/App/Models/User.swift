@@ -5,6 +5,7 @@ import Vapor
 enum AuthProvider: String, Codable {
     case apple
     case magicLink = "magic_link"
+    case google
 }
 
 final class User: Model, Content, @unchecked Sendable {
