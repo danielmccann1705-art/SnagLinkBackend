@@ -1,0 +1,7 @@
+# Processor dependency notices
+
+Poppler `22.02.0-2ubuntu0.13` is derived from the exact upstream source plus Ubuntu security patches. Its source headers include GPLv2-or-later notices and its supplied GPLv2 text is preserved in `COPYING.poppler`. The Snaglist modification removes the JBIG2 decoder and adds a central rejection policy; it does not remove the original notices. The exact source archives, distro patches, local patch and build instructions are identified in the README and runtime profile.
+
+Before distributing a processor image outside the current internal acceptance environment, ensure the processor/helper package is distributed under compatible terms and recipients receive the matching corresponding source and required notices. Keep the exact modified source/build materials for the image, including later security rebuilds. This package does not relicense the existing Snaglist iOS app, portal or backend. No customer-facing binary is produced here.
+
+Pillow, libjpeg-turbo, libpng, FreeType, Fontconfig, LCMS2, OpenJPEG, zlib, DejaVu fonts, Poppler CMaps, Python and the base image also retain their own notices. The exact installed versions are in `runtime-profile.json`; distribution packages supply their copyright/licence material under `/usr/share/doc`. Preserve those notices in any subsequent minimal/runtime packaging. This list identifies the direct processing dependencies and is not a substitute for the final distributed image's complete dependency/licence inventory.
