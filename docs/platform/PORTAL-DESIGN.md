@@ -1,6 +1,16 @@
 # Snaglist portal design system
 
-## Current checkpoint — native Google implementation, 11 September 2026
+## Current checkpoint — manager Add snag, 11 September 2026
+
+Portal **ae5c7f2** (`feature/unified-portal`) now logs canonical snags from populated and empty projects, preserves drafts across ordinary project navigation and retains register filters. Create and publication are separate confirmed writes with immutable retry IDs and explicit conflict recovery. The exact source passes the production build, contract/type checks and **59 portal tests, zero failures/skips**. Actual browser use and read-only database checks verify two distinct synthetic Open records, the saved deadline and reload. The 320/390px form fits without horizontal overflow; captures use measured dimensions.
+
+Read [MANAGER-SNAG-CAPTURE.md](https://drive.google.com/file/d/1AhumBnhItkMukocURVbOEgFb0D4eB1Jr/view), the [actual capture/test bundle](https://drive.google.com/file/d/17E0-i04geR9xnSt79Y6y0VK_ll0qe0N0/view), and [NEXT-SESSION.md](https://drive.google.com/file/d/1MoUSx6EI3ghXDWT4fW8kgjgGKZBSPzV9/view) for source/files, verification limits and the dependency-ordered continuation. The report distinguishes real local Vapor/isolated Neon from deployed staging. No new photo or Contractor link was attached to these two records. Drafts are retained in this tab, not a durable offline queue.
+
+**Native Google:** application **f9fb682** builds/runs in Xcode; **148 tests pass, 10 historical tests skip, zero fail**. Actual native provider exchange remains unverified. Google web provider linking/sign-in is verified locally. **Next:** account-partitioned native data and complete sync/import; manager assignment/share/link/archive workflows; matching Linux/private-R2 staging and real native Google; complete company workbench/seats/test commerce, reports/jobs and G1/D1/D2. No whole platform/release gate passes from this slice, and no merge, push, production cutover, live billing or App Store action occurred.
+
+Earlier checkpoints below retain their dated evidence. The concise [continuation file](https://drive.google.com/file/d/1MoUSx6EI3ghXDWT4fW8kgjgGKZBSPzV9/view) describes the current outstanding work.
+
+## Earlier checkpoint — native Google implementation, 11 September 2026
 
 Native **f9fb682** (`feature/unified-platform`) now implements Google sign-in and explicit same-account connection with the official SDK. The final staging app builds and runs in Xcode 26.2; **148 tests pass, 10 historical network-dependent tests are skipped, zero fail**, including all eight new Google-flow tests. Actual simulator captures show the shared Plex/Marker/Ink/Stone sign-in form, retained email draft, availability failure/retry and dark appearance.
 
