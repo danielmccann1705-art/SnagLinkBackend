@@ -1,6 +1,7 @@
 import { Container } from '@cloudflare/containers';
 import { containerEnvironment } from './config.mjs';
 import { backendRequest, privateResponse } from './proxy.mjs';
+import { legacyCandidateResponse } from './candidate-compatibility.mjs';
 
 interface BackendEnv {
   BACKEND: DurableObjectNamespace<SnaglistBackend>;
@@ -24,6 +25,8 @@ export default {
         headers: { 'Cache-Control': 'no-store' }
       });
     }
+    const compatibility = legacyCandidateResponse(request, env);
+    if (compatibility) return privateResponse(compatibility);
     // One stable instance, never one instance per link or per customer.
     const backend = env.BACKEND.getByName('staging');
     return privateResponse(await backend.fetch(backendRequest(request)));

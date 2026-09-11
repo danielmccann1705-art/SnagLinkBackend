@@ -13,10 +13,22 @@ export function containerEnvironment(env) {
       !['require', 'verify-full'].includes(database.searchParams.get('sslmode'))) {
     throw new Error('An explicitly selected staging PostgreSQL host with TLS is required');
   }
-  if (env.R2_BUCKET_NAME !== 'snaglist-staging-uploads') {
+  const candidate = env.STAGING_DEPLOYMENT === 'unified-candidate';
+  if (env.STAGING_DEPLOYMENT !== undefined && !candidate) {
+    throw new Error('Unknown staging deployment');
+  }
+  if (candidate && (env.STAGING_PLATFORM_ENABLED !== 'true' ||
+      env.STAGING_DATABASE_HOST !== 'ep-solitary-union-zav239mi.c-2.eu-west-2.aws.neon.tech' ||
+      database.pathname !== '/snaglist_platform_test_0910222943_fc44')) {
+    throw new Error('The unified candidate requires its pinned synthetic database and platform configuration');
+  }
+  const uploadBucket = candidate ? 'snaglist-unified-staging-uploads' : 'snaglist-staging-uploads';
+  if (env.R2_BUCKET_NAME !== uploadBucket) {
     throw new Error('The staging upload bucket is required');
   }
-  const base = 'https://snaglist-api-staging.danielmccann1705.workers.dev';
+  const base = candidate
+    ? 'https://snaglist-api-unified-staging.danielmccann1705.workers.dev'
+    : 'https://snaglist-api-staging.danielmccann1705.workers.dev';
   if (env.BASE_URL !== base || env.MAGIC_LINK_BASE_URL !== base) {
     throw new Error('Staging links must stay on the staging origin');
   }
@@ -25,6 +37,10 @@ export function containerEnvironment(env) {
       photos.hostname === 'cdn.snaglist.dev' || photos.hostname === 'snaglist.dev' ||
       photos.pathname !== '/' || photos.search || photos.hash) {
     throw new Error('An isolated HTTPS staging photo origin is required');
+  }
+  if (candidate && (env.R2_ACCOUNT_ID !== '387d49014cd0d45f9e6434196ab513c0' ||
+      photos.origin !== 'https://pub-d7c456d4b396462fb5ee8ef008dcf93b.r2.dev')) {
+    throw new Error('The unified candidate requires its separate account-scoped upload bucket');
   }
   if (env.JWT_SECRET.length < 32) throw new Error('A separate strong staging JWT secret is required');
   if (env.REVENUECAT_SECRET_API_KEY || env.APNS_PRIVATE_KEY) {
