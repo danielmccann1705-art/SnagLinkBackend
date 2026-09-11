@@ -85,7 +85,7 @@ enum ProjectGrantService {
         let result = try await self.current(projectID: projectID, targetID: command.userId, on: db)
         try await WorkspaceAccessService.activity(workspaceID: workspaceID, actorID: actorID,
             action: command.role == nil ? "project_access_removed" : "project_access_granted", targetID: command.userId,
-            detail: projectID.uuidString + ":" + result.state + ":" + String(result.revision), on: db)
+            detail: projectID.uuidString + ":" + result.state + ":" + String(result.revision) + ":" + (result.role ?? "none"), on: db)
         return result
     }
 }
