@@ -1,0 +1,65 @@
+{
+  "observedAt": "2026-09-11T22:02:00Z",
+  "source": "Authenticated Chrome Apple account and App Store Connect UI",
+  "appID": "6758858102",
+  "bundleID": "com.snaglist.app",
+  "distributedVersion": "1.2.0",
+  "distributedBuild": "1",
+  "testflight120": {
+    "builds": [
+      "1",
+      "2"
+    ],
+    "status": "Expired"
+  },
+  "draft200": {
+    "authorised": true,
+    "created": true,
+    "status": "Prepare for Submission",
+    "releaseMode": "manual",
+    "releaseModeSaved": true,
+    "buildAttached": false,
+    "url": "https://appstoreconnect.apple.com/apps/6758858102/distribution/ios/version/inflight"
+  },
+  "paidAppsAgreement": "Active",
+  "freeAppsAgreement": "Active (New Agreement Available)",
+  "smallBusinessProgramme": {
+    "status": "unconfirmed",
+    "signedInEnrollmentPage": "application form, no approval receipt",
+    "connectedGmailSearch": "no matches; not the Apple account mailbox",
+    "applicationSubmitted": false
+  },
+  "subscriptions": [
+    {
+      "id": "com.snaglist.pro.monthly",
+      "duration": "1 month",
+      "status": "Approved",
+      "level": 1
+    },
+    {
+      "id": "com.snaglist.pro.annual",
+      "duration": "1 year",
+      "status": "Approved",
+      "level": 2
+    }
+  ],
+  "serverNotificationURLsConfigured": false,
+  "privacyNeedsReconciliation": true,
+  "newSocialMediaAnswersSelected": false,
+  "renewalDate": "2027-01-29",
+  "expiredRenewalCardNotice": true,
+  "accountPrivateDetailsExcluded": true,
+  "releaseSubmitted": false,
+  "binaryUploaded": false,
+  "agreement": {
+    "identifier": "LYL255",
+    "date": "2026-08-18",
+    "accepted": true,
+    "authorisationPending": false,
+    "acceptedDate": "2026-09-11",
+    "explicitUserApproval": true,
+    "verification": "Refreshed Apple account agreement history shows issued 18 August 2026, accepted 11 September 2026"
+  },
+  "businessAgreementCardsObservedBeforeAcceptance": true,
+  "alternativePaymentProgrammeSelected": false
+}

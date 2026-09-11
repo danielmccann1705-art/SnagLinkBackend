@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "slice": "R1a staging-only native scope runtime",
+  "status": "staging_local_runtime_implemented_tested_and_bounded_ui_verified",
+  "repository": "/Users/danielmccann/Desktop/Projects/Snaglist/SnagLink",
+  "commit": "009f0d18e77fabf27f8d0bebba00345010f7c023",
+  "commit_status": "committed_locally_not_pushed",
+  "source_evidence": {
+    "file": "work/native-scope-runtime/integrated-source-fix2.json",
+    "file_count": 242,
+    "file_sha256": "8bb1945807426ef29e639164d56aceaaeb0b5365387376cea47c34388229ecdb",
+    "original_v3_patch": "work/native-scope-runtime/runtime.patch",
+    "fix1": "work/native-scope-runtime-fix1/fix1.patch",
+    "fix2": "work/native-scope-runtime/test-actor-fix2.json",
+    "final_file": "work/native-scope-runtime/integrated-source-fix3.json",
+    "final_file_sha256": "3c324ace0d5b368f46c90bcb323d0041292890e34894b21dcd011fffc5b303e9",
+    "final_code_files": 45,
+    "test_scope": "Full 343-pass suite precedes two final UI-only files; separate actual Xcode build and ordinary UI verification covers fix3."
+  },
+  "xcode": {
+    "scheme": "Snaglist Staging",
+    "destination": "iPhone 17 Pro simulator",
+    "result": "succeeded",
+    "run_started_local": "2026-09-11T21:47:36+01:00",
+    "total": 348,
+    "passed": 343,
+    "failed": 0,
+    "skipped": 5,
+    "new_runtime_tests_passed": 12,
+    "xcresult": "work/native-scope-runtime/runtime-tests-21-47-36.xcresult",
+    "summary": "work/native-scope-runtime/runtime-tests-21-47-36.legacy.json",
+    "details": "work/native-scope-runtime/runtime-test-details-21-47-36.json",
+    "new_runtime_tests": [
+      {
+        "identifier": "NativeScopeRuntimeTests/supersededSelectionNeverUnhidesAnOldResource()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/detachedSnagCaptureUsesItsOwningContextAndBoundStorage()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/unlabelledOrSymlinkedStorageIsRejectedWithoutFollowingIt()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/guestIdentityAndFilesSurviveNewComposition()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/savedPriorStoreIsKeptWhenNextOwnershipRecordIsInvalidAndRetryWorks()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/newerAuthenticationIntentCancelsAcceptedOldSignIn()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/acceptedSignInSurvivesProviderViewTaskCancellation()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/lostEstablishedStoreAndInterruptedReservationNeverBecomeEmptySuccess()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/explicitWorkDrainsBeforeOldStoreSavesAndNextMountPublishes()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/originalLegacyBytesAreNotMountedOrClaimed()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/localDrawingPinAndCommentSurviveFreezeSaveAndReopen()",
+        "testStatus": "Success"
+      },
+      {
+        "identifier": "NativeScopeRuntimeTests/guestAndAccountsKeepDifferentStoresPhotosAndPreferences()",
+        "testStatus": "Success"
+      }
+    ],
+    "warning_summary": "Two emitted warnings for the existing test-only SendAction retroactive Equatable conformance; no compiler errors."
+  },
+  "preservation": {
+    "status": "verified_after_tests_and_final_ui",
+    "source_inventory": "work/native-scope-runtime/original-staging-preservation-before.json",
+    "comparison": "work/native-scope-runtime/original-staging-preservation-relocated.json",
+    "simulator_container_path_changed": true,
+    "metadata_lookup_found_preserved_container": true,
+    "files_checked": 3,
+    "main_store_same_bytes": true,
+    "wal_same_bytes": true,
+    "shm_same_bytes": true,
+    "original_documents_present_in_inventory": false,
+    "scope": "The original staging fixture only; not a production/customer migration proof.",
+    "final_comparison": "work/native-scope-runtime/original-staging-preservation-after-ui.json"
+  },
+  "ui_acceptance": {
+    "status": "bounded_guest_workflows_verified_remaining_matrix_open",
+    "screenshots": [
+      {
+        "name": "native-scope-header-before.jpg",
+        "id": "1aOKAM332piMiUb_AqzL67uz8q3wTSoFB",
+        "success": true,
+        "url": "https://drive.google.com/file/d/1aOKAM332piMiUb_AqzL67uz8q3wTSoFB/view?usp=drivesdk",
+        "verified": true,
+        "size": 81406
+      },
+      {
+        "name": "native-scope-projects-after.jpg",
+        "id": "1Tr9WGmRhGPIIBm6coOkeK_hokTxs1_Wd",
+        "success": true,
+        "url": "https://drive.google.com/file/d/1Tr9WGmRhGPIIBm6coOkeK_hokTxs1_Wd/view?usp=drivesdk",
+        "verified": true,
+        "size": 69603
+      },
+      {
+        "name": "native-scope-empty-register.jpg",
+        "id": "1YZiajgByfIKTh32TFBq2KL9NkaCRKhXd",
+        "success": true,
+        "url": "https://drive.google.com/file/d/1YZiajgByfIKTh32TFBq2KL9NkaCRKhXd/view?usp=drivesdk",
+        "verified": true,
+        "size": 76333
+      },
+      {
+        "name": "native-scope-populated-register.jpg",
+        "id": "1jLtpFSlu4OlR4mcp4KWbRdC-98Y_57i3",
+        "success": true,
+        "url": "https://drive.google.com/file/d/1jLtpFSlu4OlR4mcp4KWbRdC-98Y_57i3/view?usp=drivesdk",
+        "verified": true,
+        "size": 84530
+      },
+      {
+        "name": "native-scope-sharing-gate.jpg",
+        "id": "1KC69Li2GhMDX0sObK-yueahLUud7Cfb5",
+        "success": true,
+        "url": "https://drive.google.com/file/d/1KC69Li2GhMDX0sObK-yueahLUud7Cfb5/view?usp=drivesdk",
+        "verified": true,
+        "size": 63158
+      },
+      {
+        "name": "native-scope-legacy-preserved.jpg",
+        "id": "1DQpuRuNVjIAINuBW7pcaP0BrA6cEad7N",
+        "success": true,
+        "url": "https://drive.google.com/file/d/1DQpuRuNVjIAINuBW7pcaP0BrA6cEad7N/view?usp=drivesdk",
+        "verified": true,
+        "size": 111730
+      },
+      {
+        "name": "native-scope-recovery-verified.jpg",
+        "id": "1TT4tKsds15bvpcxE3CnELswRpV8MdxIs",
+        "success": true,
+        "url": "https://drive.google.com/file/d/1TT4tKsds15bvpcxE3CnELswRpV8MdxIs/view?usp=drivesdk",
+        "verified": true,
+        "size": 98932
+      }
+    ],
+    "ordinary_guest_capture": "Created Willow Court · Plot 14 / WC-014 and saved/opened WC-014-001 through normal forms. Project survived rebuild and relaunch.",
+    "navigation": "Project home/register/detail, Add snag, unavailable detail sharing, Approvals, Reports, Settings, legacy recovery and current workspace recovery observed.",
+    "review_composition": "Not rebuilt/launched separately in this slice.",
+    "account_provider_flow": "Real external-provider and physical-device transitions unverified; injected actual-runtime transitions pass.",
+    "scope_banner_layout": "Fixed; Projects/navigation controls visible after actual 22:00 UK build/run.",
+    "correction_patch": "work/native-scope-runtime-ui-fix3/ui-fix3.patch",
+    "correction_patch_sha256": "da79916a3586cdd030ebcb9e39b18d367ea81bda4f07117bc6d589e8f13372df",
+    "legacy_recovery": "Three original files copied and byte-checked; raw preservation only, no ownership claim.",
+    "workspace_recovery": "Three files checked; SwiftData records reopened successfully through ordinary UI at 22:40 UK.",
+    "photo_picker": "Opened and cancelled; no stock library item attached. New photo attachment test cases passed in runtime suite. No new camera/device-image UI acceptance.",
+    "large_text_voiceover": "Not reverified on fix3; earlier incomplete large-text acceptance remains open.",
+    "independent_fix3_review": "No blocker; both source hashes and retained scope/lease bindings checked by a separate reviewer."
+  },
+  "release": {
+    "staging_runtime_activation_accepted": false,
+    "production_activated": false,
+    "canonical_portal_sync_complete": false,
+    "release_submission": false,
+    "local_guest_runtime_verified": true
+  },
+  "notes": [
+    "343 passes apply to the exact tested fix2 manifest; final fix3 is separately built and visually verified.",
+    "Three original store/WAL/SHM hashes remain identical after final UI and recovery checks.",
+    "Recovery archives and original databases stay local; only redacted evidence and synthetic UI captures are published.",
+    "Full native–portal sync, production migration, provider acceptance and D2 remain open."
+  ],
+  "post_test_build": {
+    "className": "IDEActivityLogSection",
+    "documentTypeString": "<nil>",
+    "domainType": "Xcode.IDEActivityLogDomainType.BuildLog",
+    "fileName": "3FF880DF-FC62-45C5-85FA-6FFBB62F6844.xcactivitylog",
+    "hasPrimaryLog": true,
+    "primaryObservable": {
+      "highLevelStatus": "S",
+      "totalNumberOfAnalyzerIssues": 0,
+      "totalNumberOfErrors": 0,
+      "totalNumberOfTestFailures": 0,
+      "totalNumberOfWarnings": 0
+    },
+    "schemeIdentifier-containerName": "Snaglist project",
+    "schemeIdentifier-schemeName": "Snaglist Staging",
+    "schemeIdentifier-sharedScheme": 1,
+    "signature": "Build Snaglist Staging",
+    "timeStartedRecording": 810853250.589247,
+    "timeStoppedRecording": 810853269.377854,
+    "title": "Build Snaglist Staging",
+    "uniqueIdentifier": "3FF880DF-FC62-45C5-85FA-6FFBB62F6844",
+    "startUTC": "2026-09-11T21:00:50.589247+00:00",
+    "endUTC": "2026-09-11T21:01:09.377854+00:00",
+    "sourceManifest": "work/native-scope-runtime/integrated-source-fix3.json",
+    "sourceManifestSHA256": "3c324ace0d5b368f46c90bcb323d0041292890e34894b21dcd011fffc5b303e9",
+    "activityLogSHA256": "cf708aceb1027847443aa7ddee37f96dfbda6fcbd74dd76cb6dccb0de7587669"
+  }
+}
