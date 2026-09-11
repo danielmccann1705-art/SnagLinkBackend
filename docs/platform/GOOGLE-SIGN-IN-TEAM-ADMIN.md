@@ -1,6 +1,18 @@
 # Google sign-in and company administration — scope amendment
 
-## Current checkpoint — native Google implementation, 11 September 2026
+## Approved provider expansion — 11 September 2026
+
+Dan explicitly approved all four sign-in methods: **Google, Apple, Microsoft and email link**, for the app and manager web companion. Microsoft is now required scope rather than a later optional suggestion. Contractors retain their separate no-account Contractor link experience.
+
+Microsoft must support organisational and personal Microsoft accounts, resolve a stable verified provider identity with its issuer/tenant context, and explicitly link to an existing authenticated Snaglist account. Do not merge by email, infer company membership from an email domain, transfer a subscription, or bypass project permissions. Request authentication/profile identity only; no mailbox, calendar, contacts, Drive or Graph-content access is required. Use official provider UI/SDK guidance, environment-specific configuration and the same replay/session/CSRF/account-switch guarantees as the other methods. Customer email hosting is independent of the offered login methods.
+
+Acceptance includes first and returning sign-in on phone/web, explicit same-account linking, collisions, cancellation, expired/replayed proofs, organisation policy errors, personal-account coverage, account recovery/deletion/provider cleanup and retained workspace/purchase identity. An unfinished or unconfigured provider must not appear to work. Microsoft code/configuration and actual provider verification are **not implemented by this scope update**; Apple web configuration and native Google staging verification also remain open. Native account-scoped storage/sync is a prerequisite to public multi-account use.
+
+Dan also requested a professional domain and reasonably priced business email recommendation. Domain availability and hosting research is underway; no replacement domain, email purchase or production origin was approved or configured. Keep `snaglist.dev` and existing API/Contractor-link routing compatible. Once a new domain is selected, configure marketing, manager origin, email authentication and production provider registrations consistently; do not break already-issued links.
+
+Reference: [Microsoft supported account types](https://learn.microsoft.com/en-us/entra/identity-platform/howto-modify-supported-accounts). The following dated checkpoints remain historical evidence.
+
+## Earlier checkpoint — native Google implementation, 11 September 2026
 
 Native **f9fb682** (`feature/unified-platform`) now implements Google sign-in and explicit same-account connection with the official SDK. The final staging app builds and runs in Xcode 26.2; **148 tests pass, 10 historical network-dependent tests are skipped, zero fail**, including all eight new Google-flow tests. Actual simulator captures show the shared Plex/Marker/Ink/Stone sign-in form, retained email draft, availability failure/retry and dark appearance.
 

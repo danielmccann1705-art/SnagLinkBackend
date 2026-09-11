@@ -1,5 +1,9 @@
 # Snaglist — current checkpoint and continuation
 
+## New owner instruction — four sign-in methods
+
+On 11 September Dan approved **Google, Apple, Microsoft and email link on app and web**. Microsoft is now required, not deferred. Preserve explicit same-account linking, personal/company isolation and unchanged no-account Contractor links. Microsoft implementation/provider configuration, Apple web setup and actual native Google verification remain open. Complete them with WP-01 and the account-isolation prerequisites; extend each provider’s cancellation/replay/recovery/account-deletion acceptance. Domain and email-host research does not authorise buying a domain, activating a subscription or replacing live routes. See `GOOGLE-SIGN-IN-TEAM-ADMIN.md` for the recorded amendment.
+
 Updated 11 September 2026 after native Google implementation and manager Add snag verification. This document is for an agent with no conversation history. It is a continuation checklist, not a claim that the unified platform is finished.
 
 ## Executive status
