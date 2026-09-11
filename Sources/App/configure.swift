@@ -75,6 +75,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateGoogleIdentity())
         app.migrations.add(CreateProjectDiscoveryAndComments())
         app.migrations.add(CreateProjectMetadataParity())
+        app.migrations.add(CreateCanonicalDrawings())
 
         try await app.autoMigrate()
     } else {
