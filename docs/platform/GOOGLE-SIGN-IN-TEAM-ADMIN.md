@@ -1,6 +1,16 @@
 # Google sign-in and company administration — scope amendment
 
-## Current checkpoint — Google web sign-in, 11 September 2026
+## Current checkpoint — native Google implementation, 11 September 2026
+
+Native **f9fb682** (`feature/unified-platform`) now implements Google sign-in and explicit same-account connection with the official SDK. The final staging app builds and runs in Xcode 26.2; **148 tests pass, 10 historical network-dependent tests are skipped, zero fail**, including all eight new Google-flow tests. Actual simulator captures show the shared Plex/Marker/Ink/Stone sign-in form, retained email draft, availability failure/retry and dark appearance.
+
+**Live native Google is still unverified:** the staging app could not confirm the matching service configuration. The Vapor implementation and prior real Google web verification use an isolated local development environment. Neither is a deployed native-provider or production pass. The GUI build supersedes the earlier blanket native-build blocker; command-line sandbox limitations remain. No Xcode restart is currently needed.
+
+Read [NATIVE-GOOGLE-SIGN-IN.md](https://drive.google.com/file/d/1IJ8jV4RHapOacGS7wZp-_-f8682POEut/view) and the [native evidence bundle](https://drive.google.com/file/d/1WdWN9qTUug-hJlfoFTmfIAh8sZuegL8w/view) for exact source, files, tests, configuration and limitations. Largest-text header reflow is captured; lower-form scrolling and full VoiceOver are unverified. Native Projects/Settings still have older styling/copy and unsupported real-time collaboration claims to resolve.
+
+**Next:** manager Add/share/link workflows; account-partitioned native stores/media/queues and recoverable import/outbox/pull; matching Linux/private-R2 staging and real native Google; remaining company branding/seats/test billing/workbench; ordinary native/two-manager/contractor G1 and complete D1/D2. Full native sync, team billing and the platform are not complete. No merge, push, production cutover, live prices or App Store release occurred. Earlier entries below describe their dated source checkpoints.
+
+## Earlier checkpoint — Google web sign-in, 11 September 2026
 
 Backend **1abdb42** (`feature/unified-platform`) and portal **eafe6a0** (`feature/unified-portal`) implement Google authentication and explicit same-account linking. **Actual Google browser sign-in is verified in the isolated development environment:** linking, chooser cancellation/retry, logout and returning through Google retain the existing synthetic account and company Owner access. A read-only database check confirms one Google identity alongside the original email identity and unchanged active ownership. This is not production or native Google acceptance.
 
