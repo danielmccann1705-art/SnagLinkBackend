@@ -145,7 +145,7 @@ struct BrowserAuthController: RouteCollection {
         }
     }
 
-    private func response(for user: User, csrf: String, on db: Database) async throws -> BrowserSessionResponse {
+    func response(for user: User, csrf: String, on db: Database) async throws -> BrowserSessionResponse {
         let id = try user.requireID()
         return BrowserSessionResponse(user: AuthUserResponse(id: id, email: user.email, name: user.name, appleUserId: nil, authProvider: user.authProvider), verifiedEmails: try await VerifiedIdentityService.verifiedEmails(for: id, on: db), csrfToken: csrf)
     }

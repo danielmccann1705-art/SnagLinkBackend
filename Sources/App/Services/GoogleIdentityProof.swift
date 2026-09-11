@@ -2,12 +2,13 @@ import Vapor
 @preconcurrency import JWT
 
 /// Configuration is explicit per environment. A test client must never silently
-/// become the production audience. This foundation is not yet exposed as a route.
+/// become the production audience.
 struct GoogleIdentityConfiguration: Sendable {
     let webClientID: String
     let iosClientID: String
 
-    static func load(platform: PlatformConfiguration) throws -> Self {
+    static func load(platform: PlatformConfiguration, on app: Application) throws -> Self {
+        if app.environment == .testing, let configured = app.storage[GoogleIdentityConfigurationKey.self] { return configured }
         guard Environment.get("GOOGLE_AUTH_ENVIRONMENT") == platform.environment,
               let web = Environment.get("GOOGLE_WEB_CLIENT_ID"),
               let ios = Environment.get("GOOGLE_IOS_CLIENT_ID"),
@@ -21,6 +22,8 @@ struct GoogleIdentityConfiguration: Sendable {
         value.count <= 200 && value.range(of: #"^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$"#, options: .regularExpression) != nil
     }
 }
+
+struct GoogleIdentityConfigurationKey: StorageKey { typealias Value = GoogleIdentityConfiguration }
 
 struct GoogleIdentityProof: Sendable {
     let subject: String
@@ -61,7 +64,9 @@ struct GoogleIdentityVerifier {
                        nonceHash: String, challengeCreatedAt: Date,
                        config: GoogleIdentityConfiguration, on req: Request) async throws -> GoogleIdentityProof {
         try validateEnvelope(token)
-        let signers: JWTSigners = try await req.application.jwt.google.signers(on: req)
+        let signers: JWTSigners
+        do { signers = try await req.application.jwt.google.signers(on: req) }
+        catch { throw Abort(.serviceUnavailable, reason: "Google sign-in is temporarily unavailable. Try again shortly") }
         return try verify(token, signers: signers, surface: surface, nonceHash: nonceHash,
                           challengeCreatedAt: challengeCreatedAt, config: config)
     }

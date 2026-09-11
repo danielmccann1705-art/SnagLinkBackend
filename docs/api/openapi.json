@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Snaglist implemented platform API",
-    "version": "0.9.0-candidate",
-    "description": "Implemented platform candidate, not production readiness or a complete unified platform. Adds customer company administration read models for members, invitations, explicit project access and a filtered audit trail. Existing mutation services remain authoritative. Fixed Contractor links, PIN/private evidence and manager acceptance remain verified at their recorded revisions. Complete native sync, Google sign-in, company branding/seats/billing, durable jobs, private R2/Linux staging and full design/integration gates remain incomplete."
+    "version": "0.10.0-candidate",
+    "description": "Implemented platform candidate, not production readiness or a complete unified platform. Adds nonce-bound Google sign-in exchanges for web and iOS, secure browser sessions and explicit recent-account linking. Existing company administration, fixed Contractor links, PIN/private evidence and manager acceptance retain their recorded evidence. Full native sync, provider UI acceptance, company branding/seats/billing, durable jobs, private R2/Linux staging and full design/integration gates remain incomplete."
   },
   "servers": [
     {
@@ -10623,6 +10623,923 @@
           }
         }
       }
+    },
+    "/api/v2/auth/google/configuration": {
+      "get": {
+        "operationId": "googleConfiguration",
+        "summary": "Read available Google clients",
+        "description": "Returns enabled=false without public client IDs if provider configuration is absent. No authentication required. All success responses are no-store. No Google ID token is persisted. Configure GOOGLE_AUTH_ENVIRONMENT, GOOGLE_WEB_CLIENT_ID and GOOGLE_IOS_CLIENT_ID explicitly per environment.",
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleClientResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/auth/google/challenge": {
+      "post": {
+        "operationId": "googleWebChallenge",
+        "summary": "Start Google browser sign-in",
+        "description": "Exact Origin required. Creates a ten-minute one-use challenge and host-only Secure HttpOnly binding cookie. No body verifier is returned. Rate limited. All success responses are no-store. No Google ID token is persisted. Configure GOOGLE_AUTH_ENVIRONMENT, GOOGLE_WEB_CLIENT_ID and GOOGLE_IOS_CLIENT_ID explicitly per environment.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleChallengeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/auth/google/verify": {
+      "post": {
+        "operationId": "googleWebVerify",
+        "summary": "Exchange Google identity for browser session",
+        "description": "Requires initiating browser cookie, nonce, Google signature/issuer/web audience and fresh token. verifier must be absent. Returns session cookie and CSRF token, never a JWT. A matching existing email produces identity_proof_required instead of automatic linking. Replay or wrong context fails. All success responses are no-store. No Google ID token is persisted. Configure GOOGLE_AUTH_ENVIRONMENT, GOOGLE_WEB_CLIENT_ID and GOOGLE_IOS_CLIENT_ID explicitly per environment.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserSessionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoogleVerifyRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/auth/google/ios/challenge": {
+      "post": {
+        "operationId": "googleIOSChallenge",
+        "summary": "Start Google iOS sign-in",
+        "description": "Rejects Origin and Sec-Fetch-Site headers. Returns native client, web server-client audience, nonce and transient verifier. Rate limited. All success responses are no-store. No Google ID token is persisted. Configure GOOGLE_AUTH_ENVIRONMENT, GOOGLE_WEB_CLIENT_ID and GOOGLE_IOS_CLIENT_ID explicitly per environment.",
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleChallengeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/auth/google/ios/verify": {
+      "post": {
+        "operationId": "googleIOSVerify",
+        "summary": "Exchange Google iOS identity for native session",
+        "description": "Native-only: rejects Origin/Sec-Fetch-Site. Requires verifier, nonce, web server audience and exact iOS authorised presenter. Produces existing revocable Snaglist bearer token, no browser cookie. All success responses are no-store. No Google ID token is persisted. Configure GOOGLE_AUTH_ENVIRONMENT, GOOGLE_WEB_CLIENT_ID and GOOGLE_IOS_CLIENT_ID explicitly per environment.",
+        "security": [],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeAuthResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoogleVerifyRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/account/google": {
+      "get": {
+        "operationId": "googleConnection",
+        "summary": "Read Google connection status",
+        "description": "Returns only whether the current account has a Google identity, not its subject or mutable email hint. All success responses are no-store. No Google ID token is persisted. Configure GOOGLE_AUTH_ENVIRONMENT, GOOGLE_WEB_CLIENT_ID and GOOGLE_IOS_CLIENT_ID explicitly per environment.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleConnectionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/account/google/challenge": {
+      "post": {
+        "operationId": "googleLinkChallenge",
+        "summary": "Start explicit Google account linking",
+        "description": "Requires current account authenticated within ten minutes; otherwise reauthentication_required. Challenge is bound to this user, session/revocation version and surface. Browser requires CSRF plus exact Origin; native rejects browser headers. No verifier returned. All success responses are no-store. No Google ID token is persisted. Configure GOOGLE_AUTH_ENVIRONMENT, GOOGLE_WEB_CLIENT_ID and GOOGLE_IOS_CLIENT_ID explicitly per environment.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleChallengeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/account/google/verify": {
+      "post": {
+        "operationId": "googleLinkVerify",
+        "summary": "Connect Google to the same authenticated account",
+        "description": "Requires current recent account proof plus nonce-bound Google proof; consumes challenge with identity insertion in one transaction. Existing user ID, memberships and purchases remain unchanged. Identity cannot transfer from another user or replace a different Google identity. verifier must be absent. No email-provider identity is inferred. All success responses are no-store. No Google ID token is persisted. Configure GOOGLE_AUTH_ENVIRONMENT, GOOGLE_WEB_CLIENT_ID and GOOGLE_IOS_CLIENT_ID explicitly per environment.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoogleConnectionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoogleVerifyRequest"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -14213,6 +15130,101 @@
           "member"
         ],
         "additionalProperties": false
+      },
+      "GoogleClientResponse": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "webClientID": {
+            "type": "string"
+          },
+          "iosClientID": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "GoogleChallengeResponse": {
+        "type": "object",
+        "properties": {
+          "challengeToken": {
+            "type": "string"
+          },
+          "nonce": {
+            "type": "string"
+          },
+          "clientID": {
+            "type": "string"
+          },
+          "serverClientID": {
+            "type": "string"
+          },
+          "verifier": {
+            "type": "string"
+          },
+          "expiresIn": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "challengeToken",
+          "nonce",
+          "clientID",
+          "serverClientID",
+          "expiresIn"
+        ]
+      },
+      "GoogleVerifyRequest": {
+        "type": "object",
+        "properties": {
+          "challengeToken": {
+            "type": "string"
+          },
+          "identityToken": {
+            "type": "string"
+          },
+          "verifier": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "challengeToken",
+          "identityToken"
+        ]
+      },
+      "GoogleConnectionResponse": {
+        "type": "object",
+        "properties": {
+          "connected": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "connected"
+        ]
+      },
+      "NativeAuthResponse": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "user": {
+            "$ref": "#/components/schemas/AuthUser"
+          },
+          "isNewUser": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "token",
+          "user",
+          "isNewUser"
+        ]
       }
     }
   }

@@ -149,6 +149,7 @@ func routes(_ app: Application) throws {
     try app.register(collection: UploadController())
     try app.register(collection: AuthController())
     try app.register(collection: BrowserAuthController())
+    try app.register(collection: GoogleAuthController())
     try app.register(collection: WorkspaceController())
     try app.register(collection: CompanyAdministrationController())
     try app.register(collection: PlatformProjectController())

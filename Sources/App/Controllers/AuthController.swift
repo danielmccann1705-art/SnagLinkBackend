@@ -166,7 +166,7 @@ struct AuthController: RouteCollection {
 
     /// Builds the standard authenticated session response (30-day JWT), shared by all
     /// auth methods so they stay shape-compatible.
-    private func issueAuthResponse(for user: User, on req: Request) throws -> AuthResponse {
+    func issueAuthResponse(for user: User, on req: Request) throws -> AuthResponse {
         let jwtPayload = UserJWTPayload(
             subject: SubjectClaim(value: user.id!.uuidString),
             expiration: ExpirationClaim(value: Date().addingTimeInterval(30 * 24 * 60 * 60)), // 30 days

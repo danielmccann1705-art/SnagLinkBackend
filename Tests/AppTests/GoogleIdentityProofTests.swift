@@ -106,7 +106,7 @@ final class GoogleIdentityProofTests: XCTestCase {
     }
 
     // Generated solely for these tests; never a provider, signing or deployment key.
-    private static let syntheticPrivate = """
+    static let syntheticPrivate = """
     -----BEGIN PRIVATE KEY-----
     MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC4Zh122x+pQSyS
     cdCKC8qkquo2KgnMBE+MpZXLGoUwbFUplpPnGb707DFGkG0tCHw7Uwp0McNIIa7j
@@ -136,7 +136,7 @@ final class GoogleIdentityProofTests: XCTestCase {
     M0+dy9/AJrVthCeZzRoLLQ==
     -----END PRIVATE KEY-----
     """
-    private static let syntheticPublic = """
+    static let syntheticPublic = """
     -----BEGIN PUBLIC KEY-----
     MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuGYddtsfqUEsknHQigvK
     pKrqNioJzARPjKWVyxqFMGxVKZaT5xm+9OwxRpBtLQh8O1MKdDHDSCGu43s/eYMV
