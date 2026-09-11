@@ -1,6 +1,14 @@
 # Canonical workflow candidate — 10 September 2026
 
-**Implemented and compiled; database and browser integration unverified.** Backend `7b4c8cd` follows the locally verified private-media checkpoint `6d742bf`. Portal `f763ae2` follows private-photo checkpoint `1e8e387`. Both are local branches; nothing in this chapter establishes deployment or release.
+## Current checkpoint — 11 September 2026
+
+Backend application `7b4c8cd` now passes **226 tests, zero failures/skips**, on a fresh isolated Neon PostgreSQL 16 database; all eight workflow cases also pass independently. Portal `455c3e1` builds and passes **31 tests**. Actual browser review verified private before/after evidence, historical attempts, retained notes, accepted closure after reload and stale competing-decision rejection. A discovered no-op conflict button was replaced with a clear explanation and readable retained note. Responsive iframe widths 320/390/768/1024 showed no horizontal overflow; this is not physical-device or zoom acceptance.
+
+The new synthetic-only Neon Free test project is separate from recovered staging. A restricted, endpoint-pinned runner leaves the original local-only guards unchanged. Interactive email is intercepted locally; no external message or production deployment occurred. Native full-build, canonical Contractor links, full sync, D1 recording/native PDF, real G1/D2 and remaining work packages stay open.
+
+Dan also explicitly added Google sign-in on iOS/web and comprehensive company administration for Team plans. See [Google sign-in and team administration scope](https://drive.google.com/file/d/1uM-7BkQd8ID5btihXfoL9BAe1uE1FvUg/view) and the [connected review verification report](https://drive.google.com/file/d/127OOiTiWcKU904asY9rjpOB8-3c5Bu1O/view) for evidence, runtime boundaries and next dependencies. Earlier database-unverified statements below describe the 10 September checkpoint and are superseded by this executed verification; no whole package or release gate is complete.
+
+**Implemented and verified on an isolated PostgreSQL database and local connected browser. Not deployed or release-accepted.** Backend `7b4c8cd` follows the locally verified private-media checkpoint `6d742bf`. Portal `f763ae2` follows private-photo checkpoint `1e8e387`. Both are local branches; nothing in this chapter establishes deployment or release.
 
 ## Product behaviour implemented
 
@@ -23,7 +31,7 @@ Snag state/revisions, evidence attachment, completion attempt, reviewer decision
 
 `GET /api/v2/projects/{projectId}/snags/{snagId}/workflow` returns newest-first pages (25 attempts, 50 decisions), current pending attempt and its evidence waiver separately. `POST` actions are `start`, `submit`, `accept`, `send-back`, `reopen`, `internal-fix`. Reads require current project access; review/reopen/internal-fix require review capability. Start/submit require contribution capability. Cookie mutations require the existing Origin/CSRF checks; native Bearer remains supported.
 
-The maintained OpenAPI 3.1 contract is `0.7.0-candidate`, 42 paths, 54 operations and 60 generated schemas. It describes the implemented subset and explicitly marks database verification pending. Legacy v1 routes are outside that document.
+The maintained OpenAPI 3.1 contract is `0.7.0-candidate`, 42 paths, 54 operations and 60 generated schemas. It describes the implemented subset. Its descriptive verification note predates the fresh Neon passes recorded above. Legacy v1 routes are outside that document.
 
 ## Portal integration and design
 
@@ -35,12 +43,12 @@ Repository: `/Users/danielmccann/Documents/Codex/2026-09-06/her/SnaglistPortal`,
 
 The review workspace loads each attempt's private media by its exact asset ID. The current evidence waiver is available independently of history pagination. Managers can select earlier attempts; acceptance stays tied to the current pending submission. The UI waits for after images to load before offering acceptance, or shows the recorded waiver. Original and historical evidence remain available without generating or substituting proof.
 
-**The new connected review screen has not yet been rendered or exercised against this backend.** Its production build and controller tests pass, but visual density, responsive layouts, historical photo navigation and real decision interactions still need browser inspection. Existing D1 design samples and the earlier private-photo browser capture remain separate evidence.
+**The connected review has now been rendered and exercised against this backend.** The verification report above records actual interactions, screenshots, conflict correction and limited responsive checks. D1 recording/native comparison and real staging D2 remain open.
 
 ## Exact verification status
 
 - `platform-workflow-current-build`: application plus all tests compile/link, 8.841 seconds; **zero tests executed**. Source fingerprint is recorded in the result JSON.
-- Eight `CanonicalWorkflowTests` cover evidence requirements, duplicate/retried submissions, competing reviewers, rejection/resubmission/reopen, waivers/internal attribution, legacy/generic status bypass, transaction rollback, and immutable snapshots with a review at a delta-page boundary. **They have not passed against PostgreSQL.**
+- Eight `CanonicalWorkflowTests` cover evidence requirements, duplicate/retried submissions, competing reviewers, rejection/resubmission/reopen, waivers/internal attribution, legacy/generic status bypass, transaction rollback, and immutable snapshots with a review at a delta-page boundary. **All eight now pass against fresh Neon PostgreSQL 16.**
 - `platform-workflow-compile`: database setup timed out for seven media cases after application compilation; no media logic was verified in that run.
 - `platform-workflow-postgres16`: eight workflow cases failed during database setup (connection refused); this is not an eight-case workflow pass or eight proven product defects.
 - Portal generated-type check, TypeScript and production build pass; **31 tests pass / zero failures or skips**. Six new controller checks cover uncertainty, explicit conflict review, reasons, disposal/access removal, stale reads and history pagination. The earlier four design-model workflow tests remain simulated-design tests.
@@ -52,7 +60,7 @@ OrbStack still reports a running runtime but its Docker API and task PostgreSQL 
 
 A separate task-local PostgreSQL **16.15** was downloaded from the official PostgreSQL distribution, SHA-256 checked, compiled and installed under `work/unified-platform/postgres-local/runtime`. It could not initialise because this execution sandbox denies the required shared-memory operation (`shmget: Operation not permitted`). It is not running, created no usable database and is not a staging replacement. Source/build manifest and logs are retained in that workspace directory. [Official source installation instructions](https://www.postgresql.org/docs/16/install-make.html).
 
-Resume by restoring the existing isolated Docker database on 127.0.0.1:55439, then run the eight workflow tests, the media/mutation regression groups and the full suite. The test helper refreshes its warm source copy automatically and records a source hash. Never point it at a remote/customer database or relax its local database-name guard. A separately provisioned isolated staging test environment needs its own verified configuration and runner.
+Backend verification resumed using the separate synthetic Neon project and pinned runner; eight workflow cases and the full 226-case suite pass. Restoring the original local Docker runtime remains optional infrastructure work. The test helper refreshes its warm source copy automatically and records a source hash. Never point it at a remote/customer database or relax its local database-name guard. A separately provisioned isolated staging test environment needs its own verified configuration and runner.
 
 ## Not yet implemented or accepted
 

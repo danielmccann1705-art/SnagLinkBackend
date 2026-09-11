@@ -1,5 +1,13 @@
 # Platform baseline — 10 September 2026, source checkpoint
 
+## Current checkpoint — 11 September 2026
+
+Backend application `7b4c8cd` now passes **226 tests, zero failures/skips**, on a fresh isolated Neon PostgreSQL 16 database; all eight workflow cases also pass independently. Portal `455c3e1` builds and passes **31 tests**. Actual browser review verified private before/after evidence, historical attempts, retained notes, accepted closure after reload and stale competing-decision rejection. A discovered no-op conflict button was replaced with a clear explanation and readable retained note. Responsive iframe widths 320/390/768/1024 showed no horizontal overflow; this is not physical-device or zoom acceptance.
+
+The new synthetic-only Neon Free test project is separate from recovered staging. A restricted, endpoint-pinned runner leaves the original local-only guards unchanged. Interactive email is intercepted locally; no external message or production deployment occurred. Native full-build, canonical Contractor links, full sync, D1 recording/native PDF, real G1/D2 and remaining work packages stay open.
+
+Dan also explicitly added Google sign-in on iOS/web and comprehensive company administration for Team plans. See [Google sign-in and team administration scope](https://drive.google.com/file/d/1uM-7BkQd8ID5btihXfoL9BAe1uE1FvUg/view) and the [connected review verification report](https://drive.google.com/file/d/127OOiTiWcKU904asY9rjpOB8-3c5Bu1O/view) for evidence, runtime boundaries and next dependencies. Earlier database-unverified statements below describe the 10 September checkpoint and are superseded by this executed verification; no whole package or release gate is complete.
+
 Implementation follows the refreshed Google Drive unified-platform brief v1.1. The approved native reskin/icon, supplied Snaglistv2.zip identity, portal samples, contractor renderer and report work are preserved. This is a development candidate; no platform deployment or release occurred in this continuation.
 
 ## Reproducible source
@@ -10,7 +18,7 @@ Implementation follows the refreshed Google Drive unified-platform brief v1.1. T
 | `/Users/danielmccann/Desktop/Projects/Snaglist/SnagLink` | `feature/unified-platform` | `c4b8360ca5f0646b387c7ee0485a87dc16b6ebfc` |
 | `/Users/danielmccann/Documents/Codex/2026-09-06/her/SnaglistPortal` | `feature/unified-portal` | `f763ae2` |
 
-The latest source includes the previously verified identity/workspace/register foundation and private capture-media integration. The subsequent canonical workflow, history snapshots, transaction grouping and connected reviewer interface are implemented and compiled, with database/browser verification blocked. Private-media evidence belongs to backend `6d742bf` and portal `1e8e387`; it must not be attributed to the later workflow checkpoint. These are local commits, not pushed branches, merged changes or deployed images.
+The source includes the verified identity/workspace/register foundation, private capture media, canonical completion workflow, history snapshots and transaction grouping. The full backend suite now passes on isolated Neon; connected browser review and its conflict correction are verified. These are local commits, not pushed, merged or deployed images.
 
 Original bases were backend `022877e38bc19935e5ed8fdead7ea6215abb1916`, native `941b635ce2c1ddbc1b8ee72386d600d015c695a1`, portal `026014d2f36f49220652fbd8f993072ce0fa3a73`. Prior branches were not reset. `work/unified-platform/baseline/manifest.json` records the original status, binary diffs and source/asset archives before edits. The backend's unrelated local agent settings and duplicate staging-example file remain untracked and untouched. No credentials were committed in this milestone's scan.
 

@@ -1,5 +1,13 @@
 # Platform implementation decisions
 
+## Current checkpoint — 11 September 2026
+
+Backend application `7b4c8cd` now passes **226 tests, zero failures/skips**, on a fresh isolated Neon PostgreSQL 16 database; all eight workflow cases also pass independently. Portal `455c3e1` builds and passes **31 tests**. Actual browser review verified private before/after evidence, historical attempts, retained notes, accepted closure after reload and stale competing-decision rejection. A discovered no-op conflict button was replaced with a clear explanation and readable retained note. Responsive iframe widths 320/390/768/1024 showed no horizontal overflow; this is not physical-device or zoom acceptance.
+
+The new synthetic-only Neon Free test project is separate from recovered staging. A restricted, endpoint-pinned runner leaves the original local-only guards unchanged. Interactive email is intercepted locally; no external message or production deployment occurred. Native full-build, canonical Contractor links, full sync, D1 recording/native PDF, real G1/D2 and remaining work packages stay open.
+
+Dan also explicitly added Google sign-in on iOS/web and comprehensive company administration for Team plans. See [Google sign-in and team administration scope](https://drive.google.com/file/d/1uM-7BkQd8ID5btihXfoL9BAe1uE1FvUg/view) and the [connected review verification report](https://drive.google.com/file/d/127OOiTiWcKU904asY9rjpOB8-3c5Bu1O/view) for evidence, runtime boundaries and next dependencies. Earlier database-unverified statements below describe the 10 September checkpoint and are superseded by this executed verification; no whole package or release gate is complete.
+
 ## Defaults from v1.1
 
 Use the existing Vapor/PostgreSQL backend and React portal, approved supplied brand assets and existing design work. Extend Team as workspace; do not introduce a duplicate Company model. Preserve personal projects by default. Workspace Owner/Admin/Member and explicit project Manager/Member grants govern access. Contractors retain no-account Contractor links. Submission, awaiting review and accepted closure remain separate. Test commerce only until its activation gate passes.
@@ -85,4 +93,4 @@ See [WORKFLOW.md](https://drive.google.com/file/d/1x8NH7hxbBjoeyv65CUVfEuE-_iytK
 - Keep originals and processed renditions in a separate private bucket; no fallback to the old public upload bucket. Private access is checked again after storage fetch. Processed completion evidence is bound to an immutable intention and only becomes shared in its submission transaction.
 - A transaction group accompanies every new sync change; page boundaries do not split a completion decision from its evidence/snag updates. Complete groups are applied atomically by future native pull integration. Existing manifests preserve their original coverage; new manifests include completion/review history.
 - No optimistic closure. Uncertain review commands retain their exact UUID and payload. Conflicts require current evidence to be reviewed explicitly. Earlier attempts remain inspectable and do not become targets for the current pending decision.
-- The connected review work is an unverified candidate until its database tests and actual browser review pass. Do not broaden its patterns or declare gates complete based only on TypeScript/controller checks.
+- The connected review now has database and actual-browser evidence. Its broader native/contractor/staging journey and design gates remain incomplete; do not infer those gates from the scoped passes.
