@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Snaglist implemented platform API",
-    "version": "0.7.0-candidate",
-    "description": "Implemented v2 foundation, not the complete unified-platform API. New snag responses include canonical calendar deadlines and exact decimal costs; nested legacy timestamp/number fields are compatibility mirrors. Complete field/graph parity, contractor workflow/media grants and full drawing/annotation media, reports/jobs, company billing and account deletion remain under implementation. V1 recovery endpoints remain outside this contract. Internal-account capture uploads, private JPEG gateway and attached-media snapshot manifests are implemented; private R2 configuration and Linux image processing still require deployment verification. Internal canonical workflow, completion/review snapshot history and transaction-grouped deltas are implemented and compile; database verification is pending. This is not a production readiness claim."
+    "version": "0.8.0-candidate",
+    "description": "Implemented platform candidate, not the complete unified-platform API or a production readiness claim. Internal workflow/media passed the 7b4c8cd database checkpoint. This candidate adds fixed Contractor link prepare/activate/revoke, PIN sessions, private grant media, honest grant actor submissions and live scoped contractor rendering. Consult CONTRACTOR-GRANTS.md for exact source and verification evidence. Complete native sync/graph migration, drawings, durable notifications/orphan cleanup, Google sign-in, full company administration and billing remain incomplete. New private R2 and Linux processing still need deployed staging verification."
   },
   "servers": [
     {
@@ -6849,7 +6849,7 @@
       "post": {
         "operationId": "workflowStart",
         "summary": "Start work",
-        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. These manager routes retain internal-account permissions; contractor submissions use the separately scoped contractor routes. See the current source verification report.",
         "security": [
           {
             "browserSession": []
@@ -7034,7 +7034,7 @@
       "post": {
         "operationId": "workflowSubmit",
         "summary": "Submit completion for review",
-        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. These manager routes retain internal-account permissions; contractor submissions use the separately scoped contractor routes. See the current source verification report.",
         "security": [
           {
             "browserSession": []
@@ -7219,7 +7219,7 @@
       "post": {
         "operationId": "workflowAccept",
         "summary": "Accept the pending completion and close the snag",
-        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. These manager routes retain internal-account permissions; contractor submissions use the separately scoped contractor routes. See the current source verification report.",
         "security": [
           {
             "browserSession": []
@@ -7404,7 +7404,7 @@
       "post": {
         "operationId": "workflowSendBack",
         "summary": "Request more work and retain the submitted evidence",
-        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. These manager routes retain internal-account permissions; contractor submissions use the separately scoped contractor routes. See the current source verification report.",
         "security": [
           {
             "browserSession": []
@@ -7589,7 +7589,7 @@
       "post": {
         "operationId": "workflowReopen",
         "summary": "Reopen accepted work with a reason",
-        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. These manager routes retain internal-account permissions; contractor submissions use the separately scoped contractor routes. See the current source verification report.",
         "security": [
           {
             "browserSession": []
@@ -7774,7 +7774,7 @@
       "post": {
         "operationId": "workflowInternalFix",
         "summary": "Record a manager-completed and accepted fix",
-        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. Contractor link grants and legacy adapters are not implemented by these routes. Current candidate compiles; database integration verification is pending.",
+        "description": "Current internal-account role, snag revision and workflow revision are checked under one transaction. Reviewer role required for accept, send-back, reopen and internal-fix. Submission requires processed uploader-owned completion photos bound to this attempt UUID; an empty list requires a reviewer and nonempty evidence waiver. Review also checks the pending attempt revision. Retry the identical operation after an uncertain response. Snag, evidence attachment, attempt, decision, activity, sync changes and queued notification commit together. Queuing does not mean an email was delivered. These manager routes retain internal-account permissions; contractor submissions use the separately scoped contractor routes. See the current source verification report.",
         "security": [
           {
             "browserSession": []
@@ -8088,6 +8088,1958 @@
           },
           "503": {
             "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/links": {
+      "get": {
+        "operationId": "listContractorLinks",
+        "summary": "listContractorLinks",
+        "description": "Share permission; newest first, 25 per page. No token is included in list metadata.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkGrantPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/links/prepare": {
+      "post": {
+        "operationId": "prepareContractorLink",
+        "summary": "prepareContractorLink",
+        "description": "Share permission. Fixed explicit selection; empty stays empty. Validate project, assigned contractor, logged snag and explicit before-photo scope. PIN is bcrypt hashed; PIN-bearing retry fingerprint is keyed. Prepared records expire after 24 hours. No public capability exists until activation. Drawings are not yet supported.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkGrantResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkPrepareCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/links/{grantId}": {
+      "get": {
+        "operationId": "getContractorLink",
+        "summary": "getContractorLink",
+        "description": "Share permission; returns the active, unexpired share path. Token decrypted only here/activation, never in receipts or change feeds.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "grantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkActivationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/links/{grantId}/activate": {
+      "post": {
+        "operationId": "activateContractorLink",
+        "summary": "activateContractorLink",
+        "description": "Share permission and unchanged preparation. Requires every explicit photo ready and attached; creates one encrypted random capability and immutable issuance snapshot. Current reads project canonical data. Retried activation never creates another capability. Expired/revoked replay returns no contractorPath. Server allowance metering remains WP-10 work.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "grantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkActivationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkRevisionCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/links/{grantId}/revoke": {
+      "post": {
+        "operationId": "revokeContractorLink",
+        "summary": "revokeContractorLink",
+        "description": "Any currently authorised sharing manager may revoke; repeated revocation succeeds. Deletes PIN sessions, removes encrypted token; digest retained for an honest unavailable result. Native ID DELETE/token POST adapters also supported.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "grantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkGrantResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkRevisionCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/contractor/{token}": {
+      "get": {
+        "operationId": "readContractorLink",
+        "summary": "readContractorLink",
+        "description": "Requires an active, unexpired random bearer capability in token, current issuer share authority, selected-item assignment scope and the grant-specific Secure/HttpOnly PIN cookie when protected. No account needed. Reassignment/archive permanently removes the affected item even after restoration. Live fields only; 25 items per page. Explicit before photos and up to 5 recent submissions from this grant with their review feedback. Internal cost, owner/contact fields and other submitters\u2019 notes/evidence are excluded.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractorPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/contractor/{token}/verify-pin": {
+      "post": {
+        "operationId": "verifyContractorPIN",
+        "summary": "verifyContractorPIN",
+        "description": "Active grant and issuer authority. Five failed guesses lock the grant for 15 minutes; failure counters commit. Correct PIN sets grant-specific Secure/HttpOnly/SameSite=Lax host cookie, at most 2 hours and never beyond grant expiry. Custom header required; no cross-origin CORS permission.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Snaglist-Contractor",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "If present, must equal BASE_URL exactly. Browser cross-origin requests are denied."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractorPINResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContractorPINCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/contractor/{token}/snags/{snagId}/workflow/start": {
+      "post": {
+        "operationId": "contractorStart",
+        "summary": "contractorStart",
+        "description": "Requires an active, unexpired random bearer capability in token, current issuer share authority, selected-item assignment scope and the grant-specific Secure/HttpOnly PIN cookie when protected. No account needed. Reassignment/archive permanently removes the affected item even after restoration. Completion-mode grant only. Contractor actor is the grant UUID. Submit requires processed owned after-photo IDs for this attempt; no waivers, accept or direct close. Atomic attempt/evidence/status/activity/change/outbox and grant-scoped retry receipt. Notifications are queued, not delivered.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Snaglist-Contractor",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "If present, must equal BASE_URL exactly. Browser cross-origin requests are denied."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractorWorkflowResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowStartCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/contractor/{token}/snags/{snagId}/workflow/submit": {
+      "post": {
+        "operationId": "contractorSubmit",
+        "summary": "contractorSubmit",
+        "description": "Requires an active, unexpired random bearer capability in token, current issuer share authority, selected-item assignment scope and the grant-specific Secure/HttpOnly PIN cookie when protected. No account needed. Reassignment/archive permanently removes the affected item even after restoration. Completion-mode grant only. Contractor actor is the grant UUID. Submit requires processed owned after-photo IDs for this attempt; no waivers, accept or direct close. Atomic attempt/evidence/status/activity/change/outbox and grant-scoped retry receipt. Notifications are queued, not delivered.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Snaglist-Contractor",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "If present, must equal BASE_URL exactly. Browser cross-origin requests are denied."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractorWorkflowResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowSubmitCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/contractor/{token}/snags/{snagId}/media": {
+      "post": {
+        "operationId": "allocateContractorPhoto",
+        "summary": "allocateContractorPhoto",
+        "description": "Requires an active, unexpired random bearer capability in token, current issuer share authority, selected-item assignment scope and the grant-specific Secure/HttpOnly PIN cookie when protected. No account needed. Reassignment/archive permanently removes the affected item even after restoration. Completion-mode only; purpose must be completion with an intention UUID. Allocation ownership is the grant. Up to 200 unattached unexpired allocations. No arbitrary remote URLs.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Snaglist-Contractor",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "If present, must equal BASE_URL exactly. Browser cross-origin requests are denied."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractorPhotoResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MediaAllocateCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/contractor/{token}/snags/{snagId}/media/{assetId}/content": {
+      "put": {
+        "operationId": "uploadContractorPhoto",
+        "summary": "uploadContractorPhoto",
+        "description": "Requires an active, unexpired random bearer capability in token, current issuer share authority, selected-item assignment scope and the grant-specific Secure/HttpOnly PIN cookie when protected. No account needed. Reassignment/archive permanently removes the affected item even after restoration. Completion-mode grant and exact uploader. Immutable bytes/hash/size/MIME retry identity. Decode, limit dimensions, strip metadata into private JPEG. Recheck permission, PIN, assignment and expiry after processing/storage before committing readiness.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Snaglist-Contractor",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1"
+              ]
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "If present, must equal BASE_URL exactly. Browser cross-origin requests are denied."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised response; writes return only after commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContractorPhotoResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 10485760
+              }
+            },
+            "image/png": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "maxLength": 10485760
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "downloadContractorPhoto",
+        "summary": "downloadContractorPhoto",
+        "description": "Requires an active, unexpired random bearer capability in token, current issuer share authority, selected-item assignment scope and the grant-specific Secure/HttpOnly PIN cookie when protected. No account needed. Reassignment/archive permanently removes the affected item even after restoration. Ready authorised rendition only. Recheck scope after fetching private bytes. JPEG response, private/no-store, no public R2 URL. Historical public-bucket guarantees are unchanged.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metadata-stripped private JPEG bytes.",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Retain original request; inspect current scope/status before retrying. Contractor responses never include internal snag DTOs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Operation exceeds the bounded transaction change group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Processed after evidence is missing or belongs to another intention",
             "content": {
               "application/json": {
                 "schema": {
@@ -9402,7 +11354,7 @@
               {
                 "type": "string",
                 "pattern": "^(0|[1-9][0-9]{0,9})(\\.[0-9]{1,6})?$",
-                "description": "Exact decimal major currency units, 0–1000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
+                "description": "Exact decimal major currency units, 0\u20131000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
               },
               {
                 "type": "null"
@@ -9414,7 +11366,7 @@
               {
                 "type": "string",
                 "pattern": "^(0|[1-9][0-9]{0,9})(\\.[0-9]{1,6})?$",
-                "description": "Exact decimal major currency units, 0–1000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
+                "description": "Exact decimal major currency units, 0\u20131000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
               },
               {
                 "type": "null"
@@ -9805,7 +11757,7 @@
               {
                 "type": "string",
                 "pattern": "^(0|[1-9][0-9]{0,9})(\\.[0-9]{1,6})?$",
-                "description": "Exact decimal major currency units, 0–1000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
+                "description": "Exact decimal major currency units, 0\u20131000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
               },
               {
                 "type": "null"
@@ -9817,7 +11769,7 @@
               {
                 "type": "string",
                 "pattern": "^(0|[1-9][0-9]{0,9})(\\.[0-9]{1,6})?$",
-                "description": "Exact decimal major currency units, 0–1000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
+                "description": "Exact decimal major currency units, 0\u20131000000000, up to six decimal places. Do not parse into a JavaScript float for edits. Null means unset; \"0\" means a recorded zero."
               },
               {
                 "type": "null"
@@ -10270,13 +12222,15 @@
           },
           "actorId": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "User UUID for internal/internal_fix; grant UUID for contractor_link. A bearer recipient is not a verified person or the issuing manager."
           },
           "actorKind": {
             "type": "string",
             "enum": [
               "internal",
-              "internal_fix"
+              "internal_fix",
+              "contractor_link"
             ]
           },
           "notes": {
@@ -10782,6 +12736,614 @@
           {
             "$ref": "#/components/schemas/WorkflowInternalFixCommand"
           }
+        ]
+      },
+      "LinkPrepareCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "contractorId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "completion",
+              "read_only",
+              "preview"
+            ]
+          },
+          "snagIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "maxItems": 100,
+            "uniqueItems": true
+          },
+          "assetIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "maxItems": 500,
+            "uniqueItems": true
+          },
+          "durationDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 90,
+            "default": 30
+          },
+          "pin": {
+            "type": "string",
+            "pattern": "^[0-9]{4,8}$"
+          }
+        },
+        "required": [
+          "mutation",
+          "id",
+          "mode",
+          "snagIds",
+          "assetIds"
+        ]
+      },
+      "LinkRevisionCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "mutation",
+          "expectedRevision"
+        ]
+      },
+      "LinkGrantResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "contractorId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "completion",
+              "read_only",
+              "preview"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "prepared",
+              "active",
+              "revoked"
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "requiresPIN": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "activatedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revokedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "selectedSnagIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "activeSnagIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "requiredAssetIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "mode",
+          "state",
+          "revision",
+          "requiresPIN",
+          "createdAt",
+          "expiresAt",
+          "selectedSnagIds",
+          "activeSnagIds",
+          "requiredAssetIds"
+        ]
+      },
+      "LinkActivationResponse": {
+        "type": "object",
+        "properties": {
+          "grant": {
+            "$ref": "#/components/schemas/LinkGrantResponse"
+          },
+          "contractorPath": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "grant"
+        ]
+      },
+      "LinkGrantPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LinkGrantResponse"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "page",
+          "hasMore"
+        ]
+      },
+      "ContractorPhoto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "label"
+        ]
+      },
+      "ContractorSubmission": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "accepted",
+              "sent_back"
+            ]
+          },
+          "submittedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "evidenceIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "feedback": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "number",
+          "state",
+          "submittedAt",
+          "evidenceIds"
+        ]
+      },
+      "ContractorItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reference": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "priority": {
+            "type": "string"
+          },
+          "dueDate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "workflowRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "photos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContractorPhoto"
+            }
+          },
+          "submissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContractorSubmission"
+            },
+            "maxItems": 5
+          }
+        },
+        "required": [
+          "id",
+          "reference",
+          "title",
+          "priority",
+          "status",
+          "revision",
+          "workflowRevision",
+          "photos",
+          "submissions"
+        ]
+      },
+      "ContractorPage": {
+        "type": "object",
+        "properties": {
+          "projectName": {
+            "type": "string"
+          },
+          "projectAddress": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contractorName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mode": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "issuedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContractorItem"
+            },
+            "maxItems": 25
+          },
+          "total": {
+            "type": "integer"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "projectName",
+          "mode",
+          "expiresAt",
+          "issuedAt",
+          "items",
+          "total",
+          "page",
+          "hasMore"
+        ]
+      },
+      "ContractorWorkflowResult": {
+        "type": "object",
+        "properties": {
+          "snagId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "workflowRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "attemptId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "attemptState": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "snagId",
+          "status",
+          "revision",
+          "workflowRevision"
+        ]
+      },
+      "ContractorPhotoResult": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "intentId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "state"
+        ]
+      },
+      "ContractorPINCommand": {
+        "type": "object",
+        "properties": {
+          "pin": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 8
+          }
+        },
+        "required": [
+          "pin"
+        ]
+      },
+      "ContractorPINResult": {
+        "type": "object",
+        "properties": {
+          "verified": {
+            "type": "boolean"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "verified",
+          "expiresAt"
         ]
       }
     }

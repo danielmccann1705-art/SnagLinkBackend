@@ -71,6 +71,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(AddMediaSnapshotCoverage())
         app.migrations.add(CreateCanonicalWorkflow())
         app.migrations.add(AddChangeTransactionGroups())
+        app.migrations.add(CreateContractorGrants())
 
         try await app.autoMigrate()
     } else {

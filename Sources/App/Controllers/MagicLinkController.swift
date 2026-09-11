@@ -422,6 +422,7 @@ struct MagicLinkController: RouteCollection {
     @Sendable
     func revoke(req: Request) async throws -> HTTPStatus {
         let userId = try req.requireAuthenticatedUserId()
+        if let raw = req.parameters.get("linkId"), try await req.db.transaction({ db in try await LinkGrantController.revokeLegacy(raw, actorID: userId, on: db) }) { return .noContent }
 
         guard let idString = req.parameters.get("linkId"),
               let id = UUID(uuidString: idString) else {
@@ -462,6 +463,9 @@ struct MagicLinkController: RouteCollection {
     @Sendable
     func revokeByToken(req: Request) async throws -> ReportSyncResponse {
         let userId = try req.requireAuthenticatedUserId()
+        if let raw = req.parameters.get("linkId"), try await req.db.transaction({ db in try await LinkGrantController.revokeLegacy(raw, actorID: userId, on: db) }) {
+            return ReportSyncResponse(success: true, message: "Link revoked", syncedAt: Date())
+        }
         guard let token = req.parameters.get("linkId"),
               let link = try await MagicLink.query(on: req.db).filter(\.$token == token)
                 .filter(\.$createdById == userId).filter(LegacyProjectAccess.personalRecords(.magicLinks)).first() else {

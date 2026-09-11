@@ -42,6 +42,17 @@ struct WebReportController: RouteCollection {
             return htmlResponse(WebReportRenderer.renderError(type: .notFound))
         }
 
+        if slug.hasPrefix("c2_"), slug.count <= 100 {
+            // Preserve a historical token/slug even if it happens to use this prefix.
+            let legacy = try await MagicLink.query(on: req.db).group(.or) { $0.filter(\.$token == slug).filter(\.$slug == slug) }.first()
+            if legacy == nil {
+                let response = htmlResponse(WebReportRenderer.renderCanonicalContractor())
+                response.headers.replaceOrAdd(name: "Content-Security-Policy", value: "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'")
+                response.headers.replaceOrAdd(name: "X-Frame-Options", value: "SAMEORIGIN")
+                return response
+            }
+        }
+
         // Validate magic link
         let magicLink: MagicLink
         do {

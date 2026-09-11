@@ -9,7 +9,8 @@ enum PrivateMediaService {
         }
         return row
     }
-    static func allocate(_ command: MediaAllocateCommand, snag: Snag, project: Project, actorID: UUID, on db: Database) async throws -> MediaAssetResponse {
+    static func allocate(_ command: MediaAllocateCommand, snag: Snag, project: Project, actorID: UUID?, grantID: UUID? = nil, on db: Database) async throws -> MediaAssetResponse {
+        guard (actorID == nil) != (grantID == nil), grantID == nil || command.purpose == "completion" else { throw Abort(.forbidden) }
         try PlatformMutationService.requireManaged(project)
         try await PlatformMutationService.checkRevision(command.expectedRevision, snag: snag, workspaceID: project.workspaceId!, on: db)
         try available(snag)
@@ -25,12 +26,12 @@ enum PrivateMediaService {
         let sql = try VerifiedIdentityService.sql(db)
         guard try await sql.raw("SELECT id FROM media_assets WHERE id = \(bind: command.id)").first() == nil else { throw Abort(.conflict, reason: "This photo ID is already allocated", identifier: "entity_exists") }
         let now = Date()
-        let pending = try await sql.raw("SELECT count(*) AS n FROM media_assets WHERE creator_id = \(bind: actorID) AND attached_at IS NULL AND state != 'retired' AND expires_at > \(bind: now)").first()!.decode(column: "n", as: Int.self)
+        let pending = try await sql.raw("SELECT count(*) AS n FROM media_assets WHERE (creator_id = \(bind: actorID) OR creator_grant_id = \(bind: grantID)) AND attached_at IS NULL AND state != 'retired' AND expires_at > \(bind: now)").first()!.decode(column: "n", as: Int.self)
         guard pending < 200 else { throw Abort(.tooManyRequests, reason: "Finish or discard existing photo uploads before adding more") }
         let prefix = "platform/\(project.workspaceId!)/\(try project.requireID())/\(command.id)"
         try await sql.raw("""
-            INSERT INTO media_assets (id, workspace_id, project_id, snag_id, creator_id, purpose, intent_id, state, original_sha256, original_size, original_mime, original_key, rendition_key, base_snag_revision, created_at, expires_at)
-            VALUES (\(bind: command.id), \(bind: project.workspaceId!), \(bind: project.requireID()), \(bind: snag.requireID()), \(bind: actorID), \(bind: command.purpose), \(bind: command.intentId), 'allocated', \(bind: command.sha256), \(bind: command.byteCount), \(bind: command.mimeType), \(bind: prefix + "/original"), \(bind: prefix + "/view.jpg"), \(bind: command.expectedRevision), \(bind: now), \(bind: now.addingTimeInterval(86400)))
+            INSERT INTO media_assets (id, workspace_id, project_id, snag_id, creator_id, creator_grant_id, purpose, intent_id, state, original_sha256, original_size, original_mime, original_key, rendition_key, base_snag_revision, created_at, expires_at)
+            VALUES (\(bind: command.id), \(bind: project.workspaceId!), \(bind: project.requireID()), \(bind: snag.requireID()), \(bind: actorID), \(bind: grantID), \(bind: command.purpose), \(bind: command.intentId), 'allocated', \(bind: command.sha256), \(bind: command.byteCount), \(bind: command.mimeType), \(bind: prefix + "/original"), \(bind: prefix + "/view.jpg"), \(bind: command.expectedRevision), \(bind: now), \(bind: now.addingTimeInterval(86400)))
             """).run()
         return try await MediaAssetResponse(row(command.id, snagID: snag.requireID(), projectID: project.requireID(), on: db))
     }
@@ -40,8 +41,10 @@ enum PrivateMediaService {
     static func submittable(_ snag: Snag) throws {
         guard ["open", "in_progress", "changes_requested"].contains(snag.status) else { throw Abort(.conflict, reason: "Review the pending submission or reopen this snag before adding completion evidence") }
     }
-    static func requireUploader(_ row: SQLRow, actorID: UUID) throws {
-        guard try row.decode(column: "creator_id", as: UUID.self) == actorID else { throw Abort(.notFound, reason: "Upload unavailable") }
+    static func requireUploader(_ row: SQLRow, actorID: UUID?, grantID: UUID? = nil) throws {
+        guard (actorID == nil) != (grantID == nil),
+              try row.decode(column: "creator_id", as: UUID?.self) == actorID,
+              try row.decode(column: "creator_grant_id", as: UUID?.self) == grantID else { throw Abort(.notFound, reason: "Upload unavailable") }
         guard try row.decode(column: "state", as: String.self) != "retired" else { throw Abort(.gone, reason: "This upload was retired") }
         if try row.decode(column: "attached_at", as: Date?.self) == nil,
            try row.decode(column: "expires_at", as: Date.self) <= Date() { throw Abort(.gone, reason: "This unattached upload expired. Allocate a new photo") }

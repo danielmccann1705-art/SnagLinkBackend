@@ -14,7 +14,8 @@ COPY Tests ./Tests
 RUN swift package resolve
 
 # Pre-build dependencies in a cached layer
-RUN mkdir -p Sources/App && \
+RUN mkdir -p Sources/App/Resources/Contractor && \
+    touch Sources/App/Resources/Contractor/cache-placeholder && \
     echo 'import Vapor; print("dependency cache")' > Sources/App/main.swift && \
     swift build -c release --product App -j 1 && \
     rm -rf Sources
@@ -37,6 +38,7 @@ WORKDIR /app
 
 # Copy built executable
 COPY --from=builder /app/.build/release/App ./
+COPY --from=builder /app/.build/release/SnaglistBackend_App.resources ./SnaglistBackend_App.resources
 
 # Create Public directory for uploads and static file serving
 RUN mkdir -p Public/uploads/synced-photos Public/uploads/synced-drawings

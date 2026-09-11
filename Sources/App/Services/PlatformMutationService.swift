@@ -31,7 +31,7 @@ struct PlatformMutationService {
     /// Holds the same workspace transaction lock as membership changes. The counter
     /// update and payload commit together; rolled-back writes cannot leave a gap.
     static func change<T: Encodable>(workspaceID: UUID, projectID: UUID?, type: String, entityID: UUID,
-                                     revision: Int64, kind: String, fields: [String], payload: T, actorID: UUID, on db: Database) async throws {
+                                     revision: Int64, kind: String, fields: [String], payload: T, actorID: UUID?, grantID: UUID? = nil, on db: Database) async throws {
         try await WorkspaceAccessService.lock(workspaceID, on: db)
         let sql = try VerifiedIdentityService.sql(db)
         // PostgreSQL LOCAL settings are connection/transaction scoped, reset on
@@ -46,8 +46,8 @@ struct PlatformMutationService {
         guard let row = try await sql.raw("UPDATE teams SET change_sequence = change_sequence + 1 WHERE id = \(bind: workspaceID) RETURNING change_sequence").first() else { throw Abort(.notFound) }
         let sequence = try row.decode(column: "change_sequence", as: Int64.self)
         try await sql.raw("""
-            INSERT INTO platform_changes (workspace_id, sequence, project_id, entity_type, entity_id, revision, kind, changed_fields, payload_json, actor_id, created_at, transaction_group)
-            VALUES (\(bind: workspaceID), \(bind: sequence), \(bind: projectID), \(bind: type), \(bind: entityID), \(bind: revision), \(bind: kind), \(bind: fields.sorted()), \(bind: encode(payload)), \(bind: actorID), \(bind: Date()), \(bind: groupID))
+            INSERT INTO platform_changes (workspace_id, sequence, project_id, entity_type, entity_id, revision, kind, changed_fields, payload_json, actor_id, actor_grant_id, created_at, transaction_group)
+            VALUES (\(bind: workspaceID), \(bind: sequence), \(bind: projectID), \(bind: type), \(bind: entityID), \(bind: revision), \(bind: kind), \(bind: fields.sorted()), \(bind: encode(payload)), \(bind: actorID), \(bind: grantID), \(bind: Date()), \(bind: groupID))
             """).run()
     }
     static func checkRevision(_ expected: Int64, snag: Snag, workspaceID: UUID, on db: Database) async throws {

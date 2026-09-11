@@ -1,0 +1,6 @@
+/* Shared brand mapping: Snaglist v2, matching the native and portal token map. */
+@font-face{font-family:Plex;src:url('./IBMPlexSans-Regular.ttf') format('truetype');font-weight:400;font-display:swap}
+@font-face{font-family:Plex;src:url('./IBMPlexSans-Medium.ttf') format('truetype');font-weight:500;font-display:swap}
+@font-face{font-family:Plex;src:url('./IBMPlexSans-Bold.ttf') format('truetype');font-weight:700;font-display:swap}
+@font-face{font-family:PlexMono;src:url('./IBMPlexMono-Regular.ttf') format('truetype');font-weight:400;font-display:swap}
+:root{--marker:#d8321e;--marker-pressed:#b72a19;--ink:#1a1d23;--stone:#f7f8fa;--raised:#fff;--muted:#59616d;--rule:#d9dce1;--moss:#1f7a4d;--action-wash:#fff4f1;--radius:6px;font-family:Plex,system-ui,sans-serif;color:var(--ink);background:var(--stone);font-size:16px;font-synthesis:none;color-scheme:light}

@@ -122,6 +122,10 @@ struct PlatformSnagService {
         let reason = command.reason.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !reason.isEmpty, reason.count <= 2000 else { throw Abort(.badRequest, reason: "Give a reason, up to 2,000 characters") }
         guard restore == (snag.archivedAt != nil) else { throw Abort(.conflict, reason: restore ? "This snag is already active" : "This snag is already archived") }
+        // Archive also removes contractor access permanently; restoring requires a new share.
+        if !restore {
+            try await VerifiedIdentityService.sql(db).raw("UPDATE link_items SET revoked_at = \(bind: Date()) WHERE snag_id = \(bind: snag.requireID()) AND revoked_at IS NULL").run()
+        }
         // Keep UUID, closedAt, status, evidence and previous events. Never recycle a reference.
         snag.archivedAt = restore ? nil : Date(); snag.archiveReason = restore ? nil : reason
         snag.revision += 1; try await snag.save(on: db)
@@ -154,13 +158,17 @@ struct PlatformSnagService {
                 snag.tradeId = id
             }
         }
+        if previousContractor != snag.contractorId {
+            // A later assignment back to the same contractor never resurrects old links.
+            try await VerifiedIdentityService.sql(db).raw("UPDATE link_items SET revoked_at = \(bind: Date()) WHERE snag_id = \(bind: snag.requireID()) AND revoked_at IS NULL").run()
+        }
         snag.revision += 1; try await snag.save(on: db)
         try await VerifiedIdentityService.sql(db).raw("INSERT INTO assignment_history (id, workspace_id, project_id, snag_id, from_contractor_id, to_contractor_id, from_trade_id, to_trade_id, snag_revision, actor_id, created_at) VALUES (\(bind: UUID()), \(bind: workspaceID), \(bind: project.requireID()), \(bind: snag.requireID()), \(bind: previousContractor), \(bind: snag.contractorId), \(bind: previousTrade), \(bind: snag.tradeId), \(bind: snag.revision), \(bind: actorID), \(bind: Date()))").run()
         return try await changed(snag, project: project, actorID: actorID, kind: "assigned", fields: Array(command.fields.keys) + ["assignedAt"], on: db)
     }
-    static func changed(_ snag: Snag, project: Project, actorID: UUID, kind: String, fields: [String], on db: Database) async throws -> PlatformSnagResponse {
+    static func changed(_ snag: Snag, project: Project, actorID: UUID?, grantID: UUID? = nil, kind: String, fields: [String], on db: Database) async throws -> PlatformSnagResponse {
         let response = PlatformSnagResponse(snag)
-        try await PlatformMutationService.change(workspaceID: project.workspaceId!, projectID: project.requireID(), type: "snag", entityID: snag.requireID(), revision: snag.revision, kind: kind, fields: fields, payload: response, actorID: actorID, on: db)
+        try await PlatformMutationService.change(workspaceID: project.workspaceId!, projectID: project.requireID(), type: "snag", entityID: snag.requireID(), revision: snag.revision, kind: kind, fields: fields, payload: response, actorID: actorID, grantID: grantID, on: db)
         return response
     }
 }

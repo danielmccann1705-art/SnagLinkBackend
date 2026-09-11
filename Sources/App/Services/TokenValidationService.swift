@@ -29,6 +29,10 @@ struct TokenValidationService {
                 .first()
             : nil
         guard let magicLink = byToken ?? bySlug else {
+            if token.hasPrefix("c2_"), token.count <= 100,
+               try await VerifiedIdentityService.sql(db).raw("SELECT id FROM link_grants WHERE token_hash = \(bind: SHA256Hasher.hash(token: token))").first() != nil {
+                throw Abort(.conflict, reason: "Open this Contractor link in your browser. This app version cannot submit to the shared project", identifier: "contractor_browser_required")
+            }
             throw ValidationError.notFound
         }
 

@@ -18,7 +18,7 @@ struct CompletionAttemptResponse: Content {
     let notes: String?; let state: String; let revision: Int64; let submittedAt: Date; let evidenceIds: [UUID]
     init(_ row: SQLRow, evidence: [UUID]) throws {
         id = try row.decode(column: "id", as: UUID.self); snagId = try row.decode(column: "snag_id", as: UUID.self)
-        number = try row.decode(column: "attempt_number", as: Int64.self); actorId = try row.decode(column: "actor_id", as: UUID.self)
+        number = try row.decode(column: "attempt_number", as: Int64.self); actorId = try row.decode(column: "actor_id", as: UUID?.self) ?? row.decode(column: "actor_grant_id", as: UUID.self)
         actorKind = try row.decode(column: "actor_kind", as: String.self); notes = try row.decode(column: "notes", as: String?.self)
         state = try row.decode(column: "state", as: String.self); revision = try row.decode(column: "revision", as: Int64.self)
         submittedAt = try row.decode(column: "submitted_at", as: Date.self); evidenceIds = evidence

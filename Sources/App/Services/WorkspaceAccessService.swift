@@ -133,8 +133,8 @@ struct WorkspaceAccessService {
             """).run()
     }
 
-    static func activity(workspaceID: UUID, actorID: UUID, action: String, targetID: UUID?, detail: String? = nil, on db: Database) async throws {
-        try await VerifiedIdentityService.sql(db).raw("INSERT INTO workspace_activity (id, workspace_id, actor_user_id, action, target_id, detail, created_at) VALUES (\(bind: UUID()), \(bind: workspaceID), \(bind: actorID), \(bind: action), \(bind: targetID), \(bind: detail), \(bind: Date()))").run()
+    static func activity(workspaceID: UUID, actorID: UUID?, grantID: UUID? = nil, action: String, targetID: UUID?, detail: String? = nil, on db: Database) async throws {
+        try await VerifiedIdentityService.sql(db).raw("INSERT INTO workspace_activity (id, workspace_id, actor_user_id, actor_grant_id, action, target_id, detail, created_at) VALUES (\(bind: UUID()), \(bind: workspaceID), \(bind: actorID), \(bind: grantID), \(bind: action), \(bind: targetID), \(bind: detail), \(bind: Date()))").run()
     }
 }
 

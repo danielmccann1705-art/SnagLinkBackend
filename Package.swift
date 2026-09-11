@@ -27,7 +27,8 @@ let package = Package(
                 .product(name: "QRCodeGenerator", package: "swift-qrcode-generator"),
                 .product(name: "SotoS3", package: "soto"),
             ],
-            path: "Sources/App"
+            path: "Sources/App",
+            resources: [.copy("Resources/Contractor")]
         ),
         .testTarget(
             name: "AppTests",
