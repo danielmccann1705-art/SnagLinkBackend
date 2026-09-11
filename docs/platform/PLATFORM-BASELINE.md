@@ -1,65 +1,45 @@
-# Platform baseline — 10 September 2026, source checkpoint
+# Platform baseline — 11 September 2026
 
-## Current checkpoint — 11 September 2026
+## Current checkpoint — Contractor links, 11 September 2026
 
-Backend application `7b4c8cd` now passes **226 tests, zero failures/skips**, on a fresh isolated Neon PostgreSQL 16 database; all eight workflow cases also pass independently. Portal `455c3e1` builds and passes **31 tests**. Actual browser review verified private before/after evidence, historical attempts, retained notes, accepted closure after reload and stale competing-decision rejection. A discovered no-op conflict button was replaced with a clear explanation and readable retained note. Responsive iframe widths 320/390/768/1024 showed no horizontal overflow; this is not physical-device or zoom acceptance.
+Backend **fb42916** on `feature/unified-platform` and portal **de215b1** on `feature/unified-portal` now connect no-account Contractor link evidence submission to the manager's canonical review workspace. Actual browser use verified PIN entry, private after-photo upload, retained drafts, awaiting review, manager acceptance and accepted closure after reload. A scoped database read confirmed one accepted grant-attributed attempt, one evidence association and one real-user acceptance; notification rows remain queued, not delivered.
 
-The new synthetic-only Neon Free test project is separate from recovered staging. A restricted, endpoint-pinned runner leaves the original local-only guards unchanged. Interactive email is intercepted locally; no external message or production deployment occurred. Native full-build, canonical Contractor links, full sync, D1 recording/native PDF, real G1/D2 and remaining work packages stay open.
+The core backend regression passed **234 tests, zero failures/skips**. After the final supplied-v2 identity, attachment-control and cache refinements, **8 focused grant tests passed again** at the exact final source fingerprint. Portal contract/types/build and **31 tests pass**. Final responsive checks cover 320/390/768/1024px iframe widths without horizontal overflow; they are not physical-device or browser-zoom acceptance. The wordmark is copied unchanged from the same supplied v2 asset used by the portal, with shared Plex/Marker/Ink/Stone treatment.
 
-Dan also explicitly added Google sign-in on iOS/web and comprehensive company administration for Team plans. See [Google sign-in and team administration scope](https://drive.google.com/file/d/1uM-7BkQd8ID5btihXfoL9BAe1uE1FvUg/view) and the [connected review verification report](https://drive.google.com/file/d/127OOiTiWcKU904asY9rjpOB8-3c5Bu1O/view) for evidence, runtime boundaries and next dependencies. Earlier database-unverified statements below describe the 10 September checkpoint and are superseded by this executed verification; no whole package or release gate is complete.
+Read [CONTRACTOR-GRANTS.md](https://drive.google.com/file/d/13n1i2S_i9UtMp3QpADAowY_-0ypR6xi0/view?usp=drivesdk) for contracts, scope, PIN/media/actor security and configuration, and [CONTRACTOR-LINK-REVIEW.md](https://drive.google.com/file/d/1rzo58sVN1MfFZ72OjKPsPzV9yz5xDOGa/view?usp=drivesdk) for source-specific tests, actual captures, reproducibility and limitations. Earlier [connected manager review evidence](https://drive.google.com/file/d/127OOiTiWcKU904asY9rjpOB8-3c5Bu1O/view) remains relevant at its recorded revision.
 
-Implementation follows the refreshed Google Drive unified-platform brief v1.1. The approved native reskin/icon, supplied Snaglistv2.zip identity, portal samples, contractor renderer and report work are preserved. This is a development candidate; no platform deployment or release occurred in this continuation.
+This is local application code and an isolated synthetic Neon review environment, not the recovered Cloudflare staging deployment. No production records, external email, prices or release state changed. **Native full build/capture/sync, manager Add/share/link management, full graph/drawings, durable jobs, private R2/Linux staging, D1 recording/native-report comparison, G1 and D2 remain open.** Google login on iOS/web and comprehensive Company Owner/Admin administration are explicitly required and not yet complete; preserve [that scope amendment](https://drive.google.com/file/d/1uM-7BkQd8ID5btihXfoL9BAe1uE1FvUg/view). No whole work package or release gate is complete.
 
-## Reproducible source
+## Reproducible application source
 
-| Repository | Working branch | Source checkpoint |
+| Repository | Branch | Application commit |
 | --- | --- | --- |
-| `/Users/danielmccann/Desktop/Projects/SnagLinkBackend` | `feature/unified-platform` | `7b4c8cd` |
+| `/Users/danielmccann/Desktop/Projects/SnagLinkBackend` | `feature/unified-platform` | `fb42916` |
+| `/Users/danielmccann/Documents/Codex/2026-09-06/her/SnaglistPortal` | `feature/unified-portal` | `de215b1` |
 | `/Users/danielmccann/Desktop/Projects/Snaglist/SnagLink` | `feature/unified-platform` | `c4b8360ca5f0646b387c7ee0485a87dc16b6ebfc` |
-| `/Users/danielmccann/Documents/Codex/2026-09-06/her/SnaglistPortal` | `feature/unified-portal` | `f763ae2` |
 
-The source includes the verified identity/workspace/register foundation, private capture media, canonical completion workflow, history snapshots and transaction grouping. The full backend suite now passes on isolated Neon; connected browser review and its conflict correction are verified. These are local commits, not pushed, merged or deployed images.
+Documentation commits may follow these application checkpoints. No application commit here is a pushed/merged/deployed image. Backend contract is 0.8 candidate: 53 paths, 66 operations, 73 schemas. Portal generated transport types match. Full graph/native API parity remains incomplete.
 
 Original bases were backend `022877e38bc19935e5ed8fdead7ea6215abb1916`, native `941b635ce2c1ddbc1b8ee72386d600d015c695a1`, portal `026014d2f36f49220652fbd8f993072ce0fa3a73`. Prior branches were not reset. `work/unified-platform/baseline/manifest.json` records the original status, binary diffs and source/asset archives before edits. The backend's unrelated local agent settings and duplicate staging-example file remain untracked and untouched. No credentials were committed in this milestone's scan.
 
 The native checkpoint includes 90 changed/new files, most preserving earlier approved work. The bundled upstream font licence has one original trailing-space line; it was retained unchanged. Application-source whitespace checks pass.
 
-## Build and test evidence
+## Environment and release boundaries
 
-Backend `7b4c8cd` (workflow candidate; private-media base `6d742bf`); portal `f763ae2` (review candidate; private-photo base `1e8e387`); native `c4b8360ca5f0646b387c7ee0485a87dc16b6ebfc`. Local branches only; no deployment/release.
+The separate Neon Free PostgreSQL 16 project `dawn-queen-24474678` in London now supplies fresh restricted-role/TLS integration tests. The pinned runner creates only synthetic `snaglist_platform_test_*` databases, verifies an empty default database and refuses a ninth retained test database. Its runtime and exact-source results are documented in CONTRACTOR-LINK-REVIEW.md. The original local-only runner guards remain unchanged.
 
-**Verified locally:** private original/processed media, authenticated gateway, revisioned capture attachments, real portal photo upload/thumbnail/enlarge/reload. Backend full suite 218 pass before the last register-preview addition, then seven relevant cases pass; portal build and 31 tests now pass.
+The actual interactive host uses the same source on `127.0.0.1:55486`, Vite `127.0.0.1:5177`, synthetic Neon database `snaglist_platform_test_0910222943_fc44` and task-local private media. Only synthetic email is intercepted by its test harness; no external mail is delivered. Secrets and capabilities remain outside Git/Drive. This is not a public deployment or private-R2 verification.
 
-**Implemented but unverified in the database/browser:** canonical attempts, decisions, evidence consumption, reasoned waiver/internal fix/reopen, queued notifications, completion-history snapshots, transaction-grouped deltas and the connected review workspace. All backend application/test code compiles. The eight new workflow tests failed at database setup, so none is a workflow pass. The new review workspace still needs actual browser rendering/interaction inspection; the earlier connected-photo capture is separate evidence.
+Historical local PostgreSQL on `127.0.0.1:55439` became unusable, OrbStack requires its own terms/privacy setup, and a task-local source build hit sandbox shared-memory denial. No global reset was performed. Original `55480`/`5176` development configuration remains as documented in the earlier reports; do not point it at a remote/customer environment.
 
-**Current blocker:** OrbStack/Docker's task database stopped responding and the OrbStack app shows setup requiring Dan's acceptance of its terms/privacy. A separate official PostgreSQL 16.15 source build succeeded, but the sandbox denied shared-memory initialisation. Neither path currently supplies a working test database. Existing databases/other projects were not reset. Native build still has its separate package-sandbox/CoreSimulator block.
+Recovered Cloudflare staging Worker/Neon/R2/Resend remain at the 9 September infrastructure baseline; this continuation did not redeploy them or freshly establish their health. Production has not been cut over. Native source remains version 2.0.0/build 2; the currently released App Store version/build and installed public behaviour were not reverified here.
 
-See [WORKFLOW.md](https://drive.google.com/file/d/1x8NH7hxbBjoeyv65CUVfEuE-_iytKfZB/view) for architecture, exact file/symbol references, test labels and resumption instructions; [PRIVATE-MEDIA.md](https://drive.google.com/file/d/1h3md2ZhJ4rlrJdakMHsKEwTD0o36riEP/view) for upload/storage boundaries. D1 recording/fresh native PDF, real D2 and G1–G5 remain open. Earlier dated sections are historical checkpoints, not claims that later code passed their tests.
+Staging iOS has distinct app/Clip bundles, SwiftData location, OS preferences/media/queue sandbox and Keychain service, with production purchases/push/shared widgets disabled. Account partitioning within an installation is still WP-06 work. Full native build remains unverified after earlier package/CoreSimulator environment failures; no customer migration or ordinary native sync success is claimed.
 
-## Environment boundaries
+## Evidence and next work
 
-The now-unresponsive original test runtime is `snaglist-platform-test-postgres` (PostgreSQL 16), only `127.0.0.1:55439`, disposable databases `snaglist_app_store_platform_identity` , `snaglist_app_store_platform_clean` and `snaglist_app_store_platform_browser`. The existing browser server was launched against that original test runtime and listens only on 127.0.0.1:55480; Vite uses 127.0.0.1:5176. Its DEBUG-only mailbox requires development mode, loopback origin/listener/database, the exact disposable browser database and an @example.test recipient; it is omitted from release compilation. Temporary mail links are kept in a private development directory and must never enter the evidence pack or Drive. There are no customer/provider credentials in the runner. Never aim it at a remote database.
+Current implementation/security detail: CONTRACTOR-GRANTS.md. Source-specific tests, fixture path, screenshots, actual actor/evidence readback and limits: CONTRACTOR-LINK-REVIEW.md. Full package inventory: PLATFORM-ACCEPTANCE.md. Authorised Google/company scope: GOOGLE-SIGN-IN-TEAM-ADMIN.md.
 
-The existing recovered synthetic staging Worker, Neon database, R2 storage and Resend sender remain the infrastructure baseline from 9 September. This milestone did not redeploy them or establish their current health. Production has not been cut over. Native remains version 2.0.0/build 2 in source; no new App Store Connect or installed public-version verification is implied.
+Workspace evidence is under `/Users/danielmccann/Documents/Codex/2026-09-06/her/outputs/portal-design/` and `outputs/app-store-prep/backend-tests/`. The current review index separates connected captures from earlier simulated design samples. Preserve the supplied v2 brand guide/ZIP and existing native reskin/icon; the old assistant-created identity is superseded.
 
-Staging iOS uses distinct app/Clip bundles, SwiftData location, OS media/preferences/queue sandbox and Keychain service; production purchases/push/shared widgets are disabled. See `IOS-STAGING.md`. Account-specific partitioning within an installation remains WP-06 work.
-
-## Evidence locations
-
-Workspace root: `/Users/danielmccann/Documents/Codex/2026-09-06/her`.
-
-- `outputs/app-store-prep/backend-tests/platform-fresh-schema-full.{json,log}`
-- `outputs/app-store-prep/backend-tests/platform-exact-values.{json,log}`
-- `outputs/platform/ios-staging-build.log` and `ios-staging-isolation-check.log`
-- `outputs/platform/account-unavailable-desktop.png` (earlier connection-error state)
-- `outputs/platform/connected-register-local.png` and `connected-register-conflict-local.png` (actual browser captures, synthetic API-created records)
-- `outputs/app-store-prep/backend-tests/platform-register-full.{json,log}`, `platform-browser-mail.{json,log}`
-- `work/unified-platform/local-review/manifest.json` (fixture scope, no credentials); `run.py`, `seed.py`, `mailbox.py` (local verification harness)
-- `outputs/portal-design/index.html` and its actual capture files
-- `outputs/platform/connected-register-private-photo-local.png` (actual successful photo upload before the database failure)
-- `outputs/app-store-prep/backend-tests/platform-private-media-full-final.{json,log}`, `platform-private-media-preview.{json,log}`
-- `outputs/app-store-prep/backend-tests/platform-workflow-current-build.{json,log}` (compile only); `platform-workflow-postgres16.{json,log}` (database setup failure)
-- `docs/platform/WORKFLOW.md`, `docs/platform/PRIVATE-MEDIA.md`
-- Backend `docs/api/openapi.json` (0.7.0-candidate, 42 paths / 54 operations / 60 schemas); portal `contracts/openapi.json` and `src/generated/apiTypes.ts`
-
-D1 recording/fresh native PDF, D2 and G1–G5 remain open. A local test pass or source checkpoint is not proof of staging integration, customer migration or production readiness.
+No package or G1–G5/D1–D2 release gate is complete. Continue native graph/sync and identity lifecycle, manager publication/sharing, company administration, jobs/reports, test commerce and staging acceptance in dependency order.
