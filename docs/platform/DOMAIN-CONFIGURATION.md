@@ -1,6 +1,6 @@
 # Snaglist domain and email configuration — 11 September 2026
 
-Checkpoint: 14:46 UTC. Domain routing verified at 14:15 UTC; Google domain, Gmail and alias configuration completed in this continuation, with the verification limits below. This is an applied-configuration handover, not production platform acceptance. Owner: Daniel McCann. The registered customer domain is **usesnaglist.com**; the brand remains Snaglist. Keep the existing snaglist.dev domain and issued links.
+Checkpoint: 15:17 UTC. Domain routing verified at 14:15 UTC; Google domain, Gmail and alias configuration completed in this continuation, with the verification limits below. This is an applied-configuration handover, not production platform acceptance. Owner: Daniel McCann. The registered customer domain is **usesnaglist.com**; the brand remains Snaglist. Keep the existing snaglist.dev domain and issued links.
 
 ## Applied and verified
 
@@ -16,11 +16,11 @@ Checkpoint: 14:46 UTC. Domain routing verified at 14:15 UTC; Google domain, Gmai
 
 The new Worker Custom Domains added DNS and managed certificates. No application Worker code or Container image was deployed. The old `snaglist.dev` website and workers.dev staging health both still return 200. Production `api.snaglist.dev/health` remains **530** on the disconnected old tunnel; this domain work does not restore production.
 
-## Google mailbox — activated; final delivery/reply checks need restored sign-in
+## Google mailbox — setup and delivery checks complete
 
 Dan explicitly approved **one Business Starter user on the £7/month Flexible plan, before tax, with no annual commitment**: `dan@usesnaglist.com`, with `hello@usesnaglist.com`, `support@usesnaglist.com` and `billing@usesnaglist.com` aliases. Aliases route into Dan's mailbox and do not add paid users. Do not ask for this plan approval again; do not select a higher tier, extra users or an annual commitment.
 
-Dan completed password creation and checkout directly in Google. The preceding checkout showed **Business Starter, one user, Monthly plan, £0 due today and £7/month before tax starting 25 September 2026, cancel anytime**. The Admin console confirms one Active user, `dan@usesnaglist.com`, with one Business Starter licence. The new inbox contains Google's billing-information-received message stating that billing begins when the free trial ends. No extra users or paid aliases were created.
+Dan completed password creation and checkout directly in Google. The preceding checkout showed **Business Starter, one user, Monthly plan, £0 due today and £7/month before tax starting 25 September 2026, cancel anytime**. The Admin console confirms one Active user, `dan@usesnaglist.com`, with one Business Starter licence. The new inbox contains Google's billing-information-received message stating that billing begins when the free trial ends. No extra users or paid aliases were created. The live **Billing → Subscriptions** page was subsequently read back: **Active, Google Workspace Business Starter, 1 assigned licence, Flexible Plan, £7.00 GBP per user/month**. The next billing date is **1 October 2026**; this is distinct from the paid-service start of 25 September shown at checkout. The subscription page also says paid service starts in 13 days. No early-start, upgrade or payment-plan change was made.
 
 Google explicitly reports **usesnaglist.com verified** and **Gmail activated**. The user profile confirms these three saved alternate emails: `hello@usesnaglist.com`, `support@usesnaglist.com`, `billing@usesnaglist.com`. They route to Dan's single mailbox and are not independent logins. Google owns mailbox/alias routing; Cloudflare continues to host DNS and website redirects.
 
@@ -33,15 +33,36 @@ Applied DNS, all unproxied with automatic TTL:
 | Root SPF TXT | `v=spf1 include:_spf.google.com ~all`; public readback matches | `53e8050bc29177a06016be4f03d29955` |
 | `google._domainkey` TXT | Actual **2048-bit** Google public DKIM key; public readback matches and setup confirmation accepted | `49307d5a76d5b641518f563b35fb82b9` |
 
-No previous root MX/SPF/DKIM records were replaced. Existing Resend return-path records remain on their separate subdomain. Root DMARC stays `p=none` pending measured delivery/header checks. Only public DKIM material was read; Google retains the private key.
+No previous root MX/SPF/DKIM records were replaced. Existing Resend return-path records remain on their separate subdomain. Root DMARC stays `p=none`; Workspace headers now pass, while new-domain Resend delivery/header checks remain open. Only public DKIM material was read; Google retains the private key.
 
-**Delivery evidence:** three distinct labelled setup messages were sent from Dan's already connected personal Gmail, one each to hello/support/billing, using only synthetic setup text. The billing message visibly arrived in the **dan@usesnaglist.com** inbox at 15:40 UK time. Receipt of hello and support is **not yet established**. A targeted personal-inbox search found no bounce at 14:46 UTC, but absence of a bounce is not a delivery pass. Outgoing mail and SPF/DKIM/DMARC header results are also unverified.
+**Inbound delivery evidence:** three distinct labelled setup messages were sent from Dan's already connected personal Gmail at approximately 14:40 UTC, one each to hello/support/billing, using only synthetic setup text. After Dan restored sign-in, the active business address was verified as **dan@usesnaglist.com**. All three messages were found. Billing initially arrived in Inbox; hello and support initially arrived in Spam with Gmail's generic similarity-to-spam explanation. Both legitimate tests were reported as not spam, and the subsequent any-folder search visibly showed **all three in Inbox**. No blanket allowlist or filter was created. This confirms alias receipt, not guaranteed future inbox placement.
 
-**Actual remaining blocker:** Gmail then displayed “You have been signed out of this account” and requested a new sign-in. Refreshing returned the personal mailbox, and the account chooser no longer listed the new Workspace session. A sign-in page was opened and the account identifier `dan@usesnaglist.com` entered; Dan was asked to complete the password sign-in directly. No password was read or changed. Resume that existing handoff after his confirmation; do not ask for account creation, billing or the £7 plan again.
+**Sending configuration saved and read back:**
 
-After sign-in, verify the active address before any action, inspect all three test arrivals including Spam, and configure Gmail's three **Send mail as** addresses. Set replies to use the address that received the message and exercise a reply to Dan's personal account; inspect the received authentication headers. Read actual Billing → Subscriptions once available to confirm the continuing Flexible plan and trial-end date. Keep public support/contact replacement pending until support delivery and replies are verified. No new-domain Resend delivery or public app cutover is implied.
+| Identity | Gmail state |
+| --- | --- |
+| Daniel McCann `<dan@usesnaglist.com>` | Default sender, preserved |
+| Snaglist `<hello@usesnaglist.com>` | Saved Send mail as identity |
+| Snaglist Support `<support@usesnaglist.com>` | Saved Send mail as identity |
+| Snaglist Billing `<billing@usesnaglist.com>` | Saved Send mail as identity |
 
-Local public DNS evidence: `outputs/domain-setup/GOOGLE-MAIL-DNS-CHECKS.json`, captured **14:46:24 UTC**. DNS and provider configuration are complete; full mailbox acceptance remains open for the limited checks above.
+All three use **Treat as an alias**. The selected reply option is **Reply from the same address to which the message was sent**. After re-authentication, real replies to the three existing synthetic tests each automatically selected their corresponding alias. The expanded From and recipient controls were inspected before sending.
+
+**Outgoing acceptance — all three passed:**
+
+| Reply identity | Received in Dan's personal Gmail | SPF | DKIM | DMARC |
+| --- | --- | --- | --- | --- |
+| `hello@usesnaglist.com` | Inbox, 16:12 UK time | PASS | PASS, `usesnaglist.com`, selector `google` | PASS |
+| `support@usesnaglist.com` | Inbox, 16:13 UK time | PASS | PASS, `usesnaglist.com`, selector `google` | PASS |
+| `billing@usesnaglist.com` | Inbox, 16:14 UK time | PASS | PASS, `usesnaglist.com`, selector `google` | PASS |
+
+The receiving account's actual message metadata was read with the Gmail connector; From/To and `Authentication-Results` were checked. The SPF envelope sender is `dan@usesnaglist.com`, while the visible From is the chosen alias. Both share the same aligned domain. DMARC remains **p=none**, so passing authentication does not imply an enforcing anti-spoofing policy. These tests use only Dan's own accounts, with synthetic setup text. Inbox arrival here is not a guarantee for all providers or future messages. A separate new-message test from the primary `dan@` identity was not necessary for the alias reply acceptance and was not performed.
+
+**Resolved session interruption:** the business session worked for alias setup, then disappeared around 15:07 UTC. Fresh Gmail navigation returned the personal account even while the older Admin page still displayed the business identity. A new sign-in explicitly requested the business password. Dan restored the session and the outgoing checks above then completed. Cause unknown; no password was read, reset or changed. This is historical context, **not an outstanding user action**. Do not repeat account creation, checkout or alias setup.
+
+**Remaining platform work:** the staff mailbox is ready for correspondence and the support address has passed a real reply test. Public website/contact-copy replacement can now proceed with its normal review. Resend new-domain sender configuration, customer sign-in, invitations, Contractor links and production API/portal cutover remain separate, unverified work as described below. No such cutover was made by this mailbox task.
+
+Local evidence: `outputs/domain-setup/GOOGLE-MAIL-DNS-CHECKS.json` is the historical public-DNS checkpoint at **14:46:24 UTC**. [GOOGLE-MAIL-VERIFICATION.json](https://drive.google.com/file/d/1_YSpnU0Dn7TxxYZdWpnGBoQ7Q_ynxYla/view) (local `outputs/domain-setup/GOOGLE-MAIL-VERIFICATION.json`) records the completed inbound, sender/reply and outgoing authentication checks plus the confirmed subscription. DNSSEC was rechecked at **15:09 UTC** and remains **pending**.
 
 Sources: [Google Flexible versus annual plans](https://knowledge.workspace.google.com/admin/billing/compare-flexible-and-annual-fixed-term-payment-plans), [Google aliases](https://support.google.com/a/answer/33327), [Cloudflare DNSSEC](https://developers.cloudflare.com/registrar/get-started/enable-dnssec/).
 
@@ -59,7 +80,7 @@ Configuration references: backend `Infrastructure/cloudflare/wrangler.jsonc`, it
 
 ## Website follow-up
 
-The currently served website is the existing 6 March Worker version. It still has waitlist/launching-soon copy, old “Magic Links” wording, legacy typography, placeholder help and contact `Snaglistapp@gmail.com`. Its source is `/Users/danielmccann/Desktop/Projects/snaglist_website`; `constants.ts` still contains the old `https://snaglist.app` URL. This turn changed routing only. Review the actual approved brand/product state before publishing a website update, and verify the new mailbox before replacing its contact link. Do not describe this legacy site as the completed brand/portal implementation.
+The currently served website is the existing 6 March Worker version. It still has waitlist/launching-soon copy, old “Magic Links” wording, legacy typography, placeholder help and contact `Snaglistapp@gmail.com`. Its source is `/Users/danielmccann/Desktop/Projects/snaglist_website`; `constants.ts` still contains the old `https://snaglist.app` URL. This turn changed routing only. Review the actual approved brand/product state before publishing a website update; the new support mailbox has now passed receipt and reply checks. Do not describe this legacy site as the completed brand/portal implementation.
 
 ## Reproducibility, evidence and rollback
 
