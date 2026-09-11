@@ -1,6 +1,6 @@
 # Snaglist domain and email configuration — 11 September 2026
 
-Checkpoint: 14:22 UTC; domain routing verified at 14:15 UTC, Google checkout/SPF updated at this checkpoint. This is an applied-configuration handover, not production platform acceptance. Owner: Daniel McCann. The registered customer domain is **usesnaglist.com**; the brand remains Snaglist. Keep the existing snaglist.dev domain and issued links.
+Checkpoint: 14:46 UTC. Domain routing verified at 14:15 UTC; Google domain, Gmail and alias configuration completed in this continuation, with the verification limits below. This is an applied-configuration handover, not production platform acceptance. Owner: Daniel McCann. The registered customer domain is **usesnaglist.com**; the brand remains Snaglist. Keep the existing snaglist.dev domain and issued links.
 
 ## Applied and verified
 
@@ -16,17 +16,32 @@ Checkpoint: 14:22 UTC; domain routing verified at 14:15 UTC, Google checkout/SPF
 
 The new Worker Custom Domains added DNS and managed certificates. No application Worker code or Container image was deployed. The old `snaglist.dev` website and workers.dev staging health both still return 200. Production `api.snaglist.dev/health` remains **530** on the disconnected old tunnel; this domain work does not restore production.
 
-## Approved Google mailbox — password complete, checkout pending
+## Google mailbox — activated; final delivery/reply checks need restored sign-in
 
 Dan explicitly approved **one Business Starter user on the £7/month Flexible plan, before tax, with no annual commitment**: `dan@usesnaglist.com`, with `hello@usesnaglist.com`, `support@usesnaglist.com` and `billing@usesnaglist.com` aliases. Aliases route into Dan's mailbox and do not add paid users. Do not ask for this plan approval again; do not select a higher tier, extra users or an annual commitment.
 
-Dan completed the password step and explicitly confirmed that the requested “redirects” mean the Google email aliases. Google checkout now shows **Business Starter, one user, Monthly plan, £0 due today and £7/month before tax starting 25 September 2026, cancel anytime**. The selected option offers a 14-day trial, but checkout has not completed and trial/subscription activation is not confirmed. Google's new account needs billing contact details and any requested payment details; Dan was asked to enter these directly in the open Google checkout and click **Checkout**. Do not ask for the already approved £7 plan again. Do not read or record passwords or payment details.
+Dan completed password creation and checkout directly in Google. The preceding checkout showed **Business Starter, one user, Monthly plan, £0 due today and £7/month before tax starting 25 September 2026, cancel anytime**. The Admin console confirms one Active user, `dan@usesnaglist.com`, with one Business Starter licence. The new inbox contains Google's billing-information-received message stating that billing begins when the free trial ends. No extra users or paid aliases were created.
 
-At 14:20 UTC, published root TXT **`v=spf1 include:_spf.google.com ~all`**, Cloudflare DNS record ID **`53e8050bc29177a06016be4f03d29955`**, automatic TTL, unproxied. A public DNS lookup confirms the exact record. There was no previous root TXT/SPF record. Resend's SPF remains on its separate return-path subdomain; there are no duplicate root SPF records.
+Google explicitly reports **usesnaglist.com verified** and **Gmail activated**. The user profile confirms these three saved alternate emails: `hello@usesnaglist.com`, `support@usesnaglist.com`, `billing@usesnaglist.com`. They route to Dan's single mailbox and are not independent logins. Google owns mailbox/alias routing; Cloudflare continues to host DNS and website redirects.
 
-After checkout: complete Google's actual domain verification challenge, configure the exact MX records shown for this account, enable Google DKIM and add `hello`, `support` and `billing` as alternate emails on Dan's user. Configure Gmail's corresponding From addresses so replies can use the recipient alias; these aliases are not independent accounts or paid seats. Verify Gmail send/receive and alias delivery using Dan's already authorised personal test recipient. No Google MX, DKIM or domain-verification TXT has been published, and no Google mailbox/alias delivery is yet verified. Public support/contact addresses should change only after receiving mail is verified.
+Applied DNS, all unproxied with automatic TTL:
 
-The general Admin console initially defaulted to Dan's personal Gmail and requested verification. No personal-account administration was performed; that tab was navigated to Google's alias help. Continue from the new Workspace account's completed checkout/admin link to ensure the correct account is selected.
+| Record | Value / status | Cloudflare record ID |
+| --- | --- | --- |
+| Root ownership TXT | Actual Google verification challenge copied from setup; Google ownership verified | `e122272043b805f54593e73111030a4a` |
+| Root MX | `smtp.google.com`, priority **1**; Google Gmail activation passed | `ce9882bee0c19288e7a1b183bc3cddbc` |
+| Root SPF TXT | `v=spf1 include:_spf.google.com ~all`; public readback matches | `53e8050bc29177a06016be4f03d29955` |
+| `google._domainkey` TXT | Actual **2048-bit** Google public DKIM key; public readback matches and setup confirmation accepted | `49307d5a76d5b641518f563b35fb82b9` |
+
+No previous root MX/SPF/DKIM records were replaced. Existing Resend return-path records remain on their separate subdomain. Root DMARC stays `p=none` pending measured delivery/header checks. Only public DKIM material was read; Google retains the private key.
+
+**Delivery evidence:** three distinct labelled setup messages were sent from Dan's already connected personal Gmail, one each to hello/support/billing, using only synthetic setup text. The billing message visibly arrived in the **dan@usesnaglist.com** inbox at 15:40 UK time. Receipt of hello and support is **not yet established**. A targeted personal-inbox search found no bounce at 14:46 UTC, but absence of a bounce is not a delivery pass. Outgoing mail and SPF/DKIM/DMARC header results are also unverified.
+
+**Actual remaining blocker:** Gmail then displayed “You have been signed out of this account” and requested a new sign-in. Refreshing returned the personal mailbox, and the account chooser no longer listed the new Workspace session. A sign-in page was opened and the account identifier `dan@usesnaglist.com` entered; Dan was asked to complete the password sign-in directly. No password was read or changed. Resume that existing handoff after his confirmation; do not ask for account creation, billing or the £7 plan again.
+
+After sign-in, verify the active address before any action, inspect all three test arrivals including Spam, and configure Gmail's three **Send mail as** addresses. Set replies to use the address that received the message and exercise a reply to Dan's personal account; inspect the received authentication headers. Read actual Billing → Subscriptions once available to confirm the continuing Flexible plan and trial-end date. Keep public support/contact replacement pending until support delivery and replies are verified. No new-domain Resend delivery or public app cutover is implied.
+
+Local public DNS evidence: `outputs/domain-setup/GOOGLE-MAIL-DNS-CHECKS.json`, captured **14:46:24 UTC**. DNS and provider configuration are complete; full mailbox acceptance remains open for the limited checks above.
 
 Sources: [Google Flexible versus annual plans](https://knowledge.workspace.google.com/admin/billing/compare-flexible-and-annual-fixed-term-payment-plans), [Google aliases](https://support.google.com/a/answer/33327), [Cloudflare DNSSEC](https://developers.cloudflare.com/registrar/get-started/enable-dnssec/).
 
