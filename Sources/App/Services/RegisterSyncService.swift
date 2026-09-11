@@ -23,8 +23,9 @@ struct ProjectChangePage: Content {
 }
 
 /// Stable register download, with its workspace directory. It is not the complete
-/// native graph bootstrap: drawing/annotation graphs and comments still follow.
+/// native graph bootstrap: drawing/annotation and project organisation graphs follow.
 struct RegisterSyncService {
+    static let coverage = ["project", "snags", "contractors", "trades", "attachedMedia", "completionAttempts", "reviewDecisions", "comments"]
     static func fingerprint(_ project: Project, actorID: UUID, on db: Database) async throws -> String {
         let row = try await VerifiedIdentityService.sql(db).raw("""
             SELECT t.owner_user_id, t.kind, COALESCE(m.revision, 0) AS membership_revision,
@@ -49,7 +50,8 @@ struct RegisterSyncService {
         let mediaCount = try await sql.raw("SELECT count(*) AS n FROM media_assets WHERE project_id = \(bind: projectID) AND attached_at IS NOT NULL AND state = 'ready'").first()!.decode(column: "n", as: Int.self)
         let attemptCount = try await sql.raw("SELECT count(*) AS n FROM completion_attempts WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
         let decisionCount = try await sql.raw("SELECT count(*) AS n FROM review_decisions WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
-        let total = count + contractorCount + tradeCount + mediaCount + attemptCount + decisionCount + 1
+        let commentCount = try await sql.raw("SELECT count(*) AS n FROM project_comments WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
+        let total = count + contractorCount + tradeCount + mediaCount + attemptCount + decisionCount + commentCount + 1
         guard total <= 10000 else { throw Abort(.payloadTooLarge, reason: "This project needs a background snapshot. No partial download was created", identifier: "snapshot_job_required") }
         // Expired private snapshots can be removed without deleting customer work.
         try await sql.raw("DELETE FROM register_snapshots WHERE actor_id = \(bind: actorID) AND expires_at < \(bind: now)").run()
@@ -59,7 +61,7 @@ struct RegisterSyncService {
         let access = try await fingerprint(project, actorID: actorID, on: db)
         let sequence = try await sql.raw("SELECT change_sequence FROM teams WHERE id = \(bind: workspaceID)").first()!.decode(column: "change_sequence", as: Int64.self)
         try await sql.raw("INSERT INTO register_snapshots (id, token_hash, actor_id, workspace_id, project_id, access_fingerprint, high_watermark, item_count, created_at, expires_at) VALUES (\(bind: id), \(bind: SHA256Hasher.hash(token: token)), \(bind: actorID), \(bind: workspaceID), \(bind: projectID), \(bind: access), \(bind: sequence), \(bind: total), \(bind: now), \(bind: expiry))").run()
-        try await sql.raw("UPDATE register_snapshots SET coverage = ARRAY['project', 'snags', 'contractors', 'trades', 'attachedMedia', 'completionAttempts', 'reviewDecisions']::TEXT[] WHERE id = \(bind: id)").run()
+        try await sql.raw("UPDATE register_snapshots SET coverage = \(bind: coverage) WHERE id = \(bind: id)").run()
         try await item(snapshotID: id, position: 0, type: "project", id: projectID, value: PlatformProjectResponse(project, actions: actions), on: db)
         // Workspace writes are blocked only for this bounded transaction. HTTP page
         // requests read immutable rows, without holding a transaction open between requests.
@@ -95,6 +97,12 @@ struct RegisterSyncService {
             try await item(snapshotID: id, position: position, type: "reviewDecision", id: decision.id, value: decision, on: db)
             position += 1
         }
+        let comments = try await sql.raw("SELECT * FROM project_comments WHERE project_id = \(bind: projectID) ORDER BY created_at, id").all()
+        for row in comments {
+            let comment = try ProjectCommentResponse(row)
+            try await item(snapshotID: id, position: position, type: "comment", id: comment.id, value: comment, on: db)
+            position += 1
+        }
         return try await page(token: token, offset: 0, projectID: projectID, actorID: actorID, on: db)
     }
     private static func item<T: Encodable>(snapshotID: UUID, position: Int, type: String, id: UUID, value: T, on db: Database) async throws {
@@ -109,6 +117,7 @@ struct RegisterSyncService {
         guard expiry > Date() else { throw Abort(.gone, reason: "This download expired. Start a new download and keep any unsent edits", identifier: "rebootstrap_required") }
         let access = try await fingerprint(project, actorID: actorID, on: db)
         guard project.workspaceId == workspaceID, access == (try snapshot.decode(column: "access_fingerprint", as: String.self)) else { throw Abort(.conflict, reason: "Your project access changed. Refresh the project; keep unsent edits", identifier: "rebootstrap_required") }
+        try await ProjectCommentService.requireCurrentContent(projectID: projectID, since: snapshot.decode(column: "high_watermark", as: Int64.self), on: db)
         let total = try snapshot.decode(column: "item_count", as: Int.self)
         guard offset < total else { throw Abort(.badRequest, reason: "Invalid snapshot page") }
         let id = try snapshot.decode(column: "id", as: UUID.self)
@@ -129,6 +138,7 @@ struct RegisterSyncService {
         let workspaceID = try saved.decode(column: "workspace_id", as: UUID.self), access = try await fingerprint(project, actorID: actorID, on: db)
         guard project.workspaceId == workspaceID, access == (try saved.decode(column: "access_fingerprint", as: String.self)) else { throw Abort(.conflict, reason: "Your project access changed. Download the project again", identifier: "rebootstrap_required") }
         let sequence = try saved.decode(column: "sequence", as: Int64.self)
+        try await ProjectCommentService.requireCurrentContent(projectID: projectID, since: sequence, on: db)
         let rows = try await sql.raw("SELECT * FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade'))) AND sequence > \(bind: sequence) ORDER BY sequence LIMIT 101").all()
         // A page targets 100 rows, then includes the remainder of its final
         // transaction. A client applies each complete group in one local commit.

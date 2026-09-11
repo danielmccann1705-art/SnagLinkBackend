@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Snaglist implemented platform API",
-    "version": "0.10.0-candidate",
-    "description": "Implemented platform candidate, not production readiness or a complete unified platform. Adds nonce-bound Google sign-in exchanges for web and iOS, secure browser sessions and explicit recent-account linking. Existing company administration, fixed Contractor links, PIN/private evidence and manager acceptance retain their recorded evidence. Full native sync, provider UI acceptance, company branding/seats/billing, durable jobs, private R2/Linux staging and full design/integration gates remain incomplete."
+    "version": "0.11.0-candidate",
+    "description": "Implemented platform candidate, not production readiness or a complete unified platform. Adds nonce-bound Google sign-in exchanges for web and iOS, secure browser sessions and explicit recent-account linking. Existing company administration, fixed Contractor links, PIN/private evidence and manager acceptance retain their recorded evidence. Full native sync, provider UI acceptance, company branding/seats/billing, durable jobs, private R2/Linux staging and full design/integration gates remain incomplete. Adds actor-bound immutable project discovery and normalised internal comments in register snapshots/deltas; full native graph remains incomplete."
   },
   "servers": [
     {
@@ -4311,7 +4311,7 @@
       "post": {
         "operationId": "createRegisterSnapshot",
         "summary": "Materialise a consistent bounded register snapshot",
-        "description": "Read permission. Current coverage: project, snags, workspace contractors and trades; NOT full native graph bootstrap. Up to 10,000 total records, five active snapshots per actor/project; expires in 30 minutes. No HTTP-spanning DB transaction.",
+        "description": "Read permission. Coverage: project, snags, workspace contractors/trades, attached ready media, completion attempts, review decisions and internal comments. NOT a complete native graph bootstrap. At most 10,000 total records, five active snapshots per actor/project; 30-minute expiry. No HTTP-spanning database transaction.",
         "security": [
           {
             "browserSession": []
@@ -4455,7 +4455,7 @@
       "get": {
         "operationId": "readRegisterSnapshot",
         "summary": "Read immutable snapshot pages",
-        "description": "Actor-bound token plus current project access; 100 items/page. Final page returns change cursor. Expiry or changed grants require rebootstrap; keep unsent edits.",
+        "description": "Actor-bound token plus current project access; 100 items/page. Final page returns change cursor. Expiry or changed grants require rebootstrap; keep unsent edits. Subsequent comment redaction invalidates older snapshots with rebootstrap_required; previously removed text is never returned again from a stored page.",
         "security": [
           {
             "browserSession": []
@@ -4600,7 +4600,7 @@
       "get": {
         "operationId": "projectChanges",
         "summary": "Read commit-ordered register/directory deltas",
-        "description": "Actor/project-bound seven-day cursor; current permissions rechecked. 100 changes/page. Workspace lock/counter guarantees commit-safe ordering. Includes archive events. Removed access returns no project content.",
+        "description": "Actor/project-bound seven-day cursor; current permissions rechecked. 100 changes/page. Workspace lock/counter guarantees commit-safe ordering. Includes archive events. Removed access returns no project content. Internal comment creation appears as type comment; a redaction after this cursor requires rebootstrap before any old payload is returned. Unsent work must be preserved.",
         "security": [
           {
             "browserSession": []
@@ -11540,6 +11540,762 @@
           }
         }
       }
+    },
+    "/api/v2/project-discovery-snapshots": {
+      "post": {
+        "operationId": "createProjectDiscoverySnapshot",
+        "summary": "Capture the authorised project inventory",
+        "description": "Actor-scoped consistent inventory for native account discovery. Current permissions are checked centrally under ordered workspace locks. Returns discovery_job_required with no partial data above limits; discovery_limit after five active snapshots. This does not import or claim old projects. Creating a replacement removes only this actor\u2019s expired/access-invalid inventory caches; valid snapshots remain reusable. Any known actor-owned legacy project without a workspace returns 409 project_ownership_reconciliation_required and no inventory. Discovery does not assign ownership or silently omit those records.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectDiscoveryPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The bounded snapshot limit requires the not-yet-implemented background snapshot job. No incomplete graph is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "readProjectDiscoverySnapshot",
+        "summary": "Read an immutable project inventory page",
+        "description": "Actor-bound token; every page rechecks membership revisions, role/grant revisions, workspace lifecycle/owner, project access set and import/archive state. A new grant, removal, rejoin, project creation or changed access returns 409 discovery_restart_required with no project content; expiry returns 410 with the same identifier. Keep unsent operations private and restart. No inventory delta cursor is issued: revalidate the retained snapshot on foreground, workspace changes and periodic reconciliation, creating a replacement only when changed or expired. Any known actor-owned legacy project without a workspace returns 409 project_ownership_reconciliation_required and no inventory. Discovery does not assign ownership or silently omit those records.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "snapshot",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 100
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "multipleOf": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectDiscoveryPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The bounded snapshot limit requires the not-yet-implemented background snapshot job. No incomplete graph is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/comments": {
+      "get": {
+        "operationId": "listProjectComments",
+        "summary": "Read internal snag discussion",
+        "description": "Current project read permission; keyset ordered by immutable (createdAt,id), 100/page. after is a same-snag comment ID including a redacted tombstone. This UI list is not a complete bootstrap; use register-snapshots/changes for graph consistency.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectCommentPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds the HTTP body-size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createProjectComment",
+        "summary": "Add an internal comment or reply",
+        "description": "Current project edit permission and active snag. Stable client UUID, actor-scoped idempotent operation receipt. Author fields cannot be chosen by the client. Parent must be an unredacted top-level comment on the same snag. Receipt replay rechecks access and suppresses later-redacted text. Does not change approval history or snag state.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectCommentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds the HTTP body-size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCommentCreateCommand"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/comments/{commentId}/redact": {
+      "post": {
+        "operationId": "redactProjectComment",
+        "summary": "Remove comment text with an audit reason",
+        "description": "Current project edit permission plus author identity or manager/archive capability. Positive matching comment revision required; conflict leaves the record intact. Keeps attribution/thread and private audit body. Invalidates older register snapshots/change cursors with rebootstrap_required so removed text is not replayed through immutable payloads. A fresh bootstrap includes the comment tombstone; preserve unsent edits while rebuilding.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "commentId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectCommentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request exceeds the HTTP body-size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCommentRedactCommand"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -13168,7 +13924,7 @@
           "total",
           "expiresAt"
         ],
-        "description": "New manifests explicitly cover project, snags, contractors, trades, attachedMedia, completionAttempts and reviewDecisions. Existing immutable manifests retain their original coverage. Not yet the complete native graph: drawings, annotations, comments and remaining native field parity follow."
+        "description": "New manifests explicitly cover project, snags, contractors, trades, attachedMedia, completionAttempts, reviewDecisions and comments. Existing immutable manifests retain original coverage. A comment item contains ProjectCommentResponse. Not yet complete native graph: drawings, annotations, organisation and remaining field parity follow."
       },
       "ProjectChangePage": {
         "type": "object",
@@ -15224,6 +15980,240 @@
           "token",
           "user",
           "isNewUser"
+        ]
+      },
+      "ProjectDiscoveryItem": {
+        "type": "object",
+        "properties": {
+          "project": {
+            "$ref": "#/components/schemas/PlatformProjectResponse"
+          },
+          "bootstrapState": {
+            "type": "string",
+            "enum": [
+              "register_available",
+              "import_required",
+              "archived"
+            ]
+          },
+          "coverage": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "project",
+          "bootstrapState",
+          "coverage"
+        ]
+      },
+      "ProjectDiscoveryPage": {
+        "type": "object",
+        "properties": {
+          "snapshotToken": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectDiscoveryItem"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "nextOffset": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "capturedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "snapshotToken",
+          "items",
+          "total",
+          "complete",
+          "capturedAt",
+          "expiresAt"
+        ],
+        "description": "Complete refers only to the immutable authorised-project inventory, not complete native reconstruction. Apply inventory reconciliation only after all pages succeed. Newly granted projects require their own bootstrap regardless of record age. Missing from a page or failed/restarted inventory is never a deletion. At most 100 workspaces/2,000 projects, 50 items/page, five active snapshots/account, 30-minute expiry. Projects without canonical import return import_required and empty coverage. Drawings, annotations and organisation graphs remain absent."
+      },
+      "ProjectCommentCreateCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 10000
+          },
+          "parentCommentId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "mutation",
+          "id",
+          "body"
+        ]
+      },
+      "ProjectCommentRedactCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "mutation",
+          "expectedRevision",
+          "reason"
+        ]
+      },
+      "ProjectCommentResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snagId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "parentCommentId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "authorUserId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "authorName": {
+            "type": "string"
+          },
+          "visibility": {
+            "const": "internal"
+          },
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "redactedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "snagId",
+          "authorUserId",
+          "authorName",
+          "visibility",
+          "revision",
+          "createdAt"
+        ],
+        "description": "Normalised internal discussion. Author identity/name/time come from the authenticated server session. One root/reply level, same snag only; no attachments, mentions, imported historical authors, or Contractor-link visibility. Redaction preserves stable ID, attribution, thread and private audit body but returns no text. It does not change snag/workflow revisions or accepted evidence."
+      },
+      "ProjectCommentPage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectCommentResponse"
+            }
+          },
+          "nextAfter": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "items"
         ]
       }
     }

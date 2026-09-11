@@ -199,7 +199,7 @@ final class CanonicalMutationTests: XCTestCase {
         XCTAssertEqual(start.status, .ok, start.body.string)
         let first = try start.content.decode(RegisterSnapshotPage.self)
         XCTAssertEqual(first.total, 102); XCTAssertEqual(first.items.count, 100); XCTAssertNil(first.changesCursor)
-        XCTAssertEqual(first.coverage, ["project", "snags", "contractors", "trades", "attachedMedia", "completionAttempts", "reviewDecisions"])
+        XCTAssertEqual(first.coverage, ["project", "snags", "contractors", "trades", "attachedMedia", "completionAttempts", "reviewDecisions", "comments"])
         let last = records.last!
         let update = try await request(.PATCH, path + "/snags/\(last.snag.id)", user: owner, body: ["mutation": metadata(), "expectedRevision": 1, "fields": ["title": "Changed while download was open"]])
         XCTAssertEqual(update.status, .ok)

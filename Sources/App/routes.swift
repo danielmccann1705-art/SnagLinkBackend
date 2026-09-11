@@ -159,6 +159,8 @@ func routes(_ app: Application) throws {
     try app.register(collection: LinkGrantController())
     try app.register(collection: ContractorGrantController())
     try app.register(collection: RegisterSyncController())
+    try app.register(collection: ProjectDiscoveryController())
+    try app.register(collection: ProjectCommentController())
     try app.register(collection: WorkspaceDirectoryController())
     try app.register(collection: DeviceController())
     try app.register(collection: ProjectController())
