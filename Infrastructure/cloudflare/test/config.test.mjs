@@ -64,3 +64,78 @@ test('staging email can only reach the approved test mailbox', () => {
     assert.throws(()=>containerEnvironment({...sample(),...email,...override}));
   }
 });
+
+// All values below are synthetic, not deployment secrets/provider registrations.
+const platform = () => ({STAGING_PLATFORM_ENABLED:'true', PLATFORM_ENVIRONMENT:'staging',
+  PORTAL_ORIGIN:'https://staging-app.usesnaglist.com', R2_PRIVATE_BUCKET_NAME:'snaglist-staging-private',
+  LINK_GRANT_TOKEN_KEY: btoa('s'.repeat(32))});
+const google = () => ({GOOGLE_AUTH_ENVIRONMENT:'staging',
+  GOOGLE_WEB_CLIENT_ID:'1234-webtest.apps.googleusercontent.com',
+  GOOGLE_IOS_CLIENT_ID:'1234-iostest.apps.googleusercontent.com'});
+
+test('explicit unified staging forwards the required private media, browser and link settings', () => {
+  const env=containerEnvironment({...sample(),...platform(),...google(),UNRELATED_SECRET:'never-forward'});
+  for (const [key,value] of Object.entries({...platform(),...google()})) {
+    if (key !== 'STAGING_PLATFORM_ENABLED') assert.equal(env[key],value);
+  }
+  assert.equal(env.UNRELATED_SECRET,undefined);
+  assert.equal(env.STAGING_PLATFORM_ENABLED,undefined);
+  assert.equal(env.BASE_URL,sample().BASE_URL,'Recovery link origins do not silently move');
+});
+
+test('partial or disabled platform configuration fails closed', () => {
+  for (const key of ['PLATFORM_ENVIRONMENT','PORTAL_ORIGIN','R2_PRIVATE_BUCKET_NAME','LINK_GRANT_TOKEN_KEY']) {
+    const env={...sample(),...platform()}; delete env[key];
+    assert.throws(() => containerEnvironment(env));
+  }
+  for (const flag of [undefined,'false','1']) {
+    assert.throws(() => containerEnvironment({...sample(),...platform(),STAGING_PLATFORM_ENABLED:flag}));
+  }
+  assert.throws(() => containerEnvironment({...sample(),...google()}));
+  const recovery=containerEnvironment(sample());
+  assert.equal(recovery.PORTAL_ORIGIN,undefined);
+  assert.equal(recovery.LINK_GRANT_TOKEN_KEY,undefined);
+});
+
+test('staging platform rejects production, local and misleading origins/storage', () => {
+  for (const origin of ['https://app.usesnaglist.com','http://staging-app.usesnaglist.com',
+    'https://staging-app.usesnaglist.com/','https://staging-app.usesnaglist.com.evil.test',
+    'https://staging-app.usesnaglist.com?x=1','https://user@staging-app.usesnaglist.com']) {
+    assert.throws(() => containerEnvironment({...sample(),...platform(),PORTAL_ORIGIN:origin}));
+  }
+  for (const override of [{PLATFORM_ENVIRONMENT:'production'}, {PLATFORM_ENVIRONMENT:'local'},
+    {R2_PRIVATE_BUCKET_NAME:'snaglist-staging-uploads'}, {R2_PRIVATE_BUCKET_NAME:'snaglist-private'}]) {
+    assert.throws(() => containerEnvironment({...sample(),...platform(),...override}));
+  }
+});
+
+test('capability keys are validated without echoing their contents and rotation is explicit', () => {
+  for (const bad of [undefined,'','invalid-secret-do-not-echo',btoa('short'),btoa('x'.repeat(33)),
+    platform().LINK_GRANT_TOKEN_KEY.replace(/=$/, 'A')]) {
+    assert.throws(() => containerEnvironment({...sample(),...platform(),LINK_GRANT_TOKEN_KEY:bad}),
+      error => !error.message.includes('invalid-secret-do-not-echo'));
+  }
+  assert.throws(() => containerEnvironment({...sample(),...platform(),JWT_SECRET:platform().LINK_GRANT_TOKEN_KEY}));
+  for (const bad of ['', 'invalid', platform().LINK_GRANT_TOKEN_KEY]) {
+    assert.throws(() => containerEnvironment({...sample(),...platform(),LINK_GRANT_TOKEN_PREVIOUS_KEY:bad}));
+  }
+  // Fixed-length synthetic bytes represent the separately retained rotation key.
+  const previous=btoa('p'.repeat(32));
+  assert.equal(containerEnvironment({...sample(),...platform(),LINK_GRANT_TOKEN_PREVIOUS_KEY:previous})
+    .LINK_GRANT_TOKEN_PREVIOUS_KEY,previous);
+});
+
+test('Google stays unavailable unless both distinct staging client IDs are provided', () => {
+  const core=containerEnvironment({...sample(),...platform()});
+  assert.equal(core.GOOGLE_WEB_CLIENT_ID,undefined);
+  for (const key of Object.keys(google())) {
+    const env={...sample(),...platform(),...google()}; delete env[key];
+    assert.throws(() => containerEnvironment(env));
+  }
+  for (const override of [{GOOGLE_AUTH_ENVIRONMENT:'production'},
+    {GOOGLE_IOS_CLIENT_ID:google().GOOGLE_WEB_CLIENT_ID},
+    {GOOGLE_WEB_CLIENT_ID:'https://accounts.google.com'},
+    {GOOGLE_WEB_CLIENT_ID:'1234-synthetic.apps.googleusercontent.com.evil.test'}]) {
+    assert.throws(() => containerEnvironment({...sample(),...platform(),...google(),...override}));
+  }
+});

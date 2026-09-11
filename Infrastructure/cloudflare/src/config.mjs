@@ -53,6 +53,67 @@ export function containerEnvironment(env) {
     R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID,
     R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
     PORT: '8080',
-    ...email
+    ...email,
+    ...platformEnvironment(env)
   };
+}
+
+// Keep the recovery image's configuration valid until the unified candidate is
+// deliberately enabled. Never silently drop a partially supplied platform config.
+function platformEnvironment(env) {
+  const keys = ['PLATFORM_ENVIRONMENT', 'PORTAL_ORIGIN', 'R2_PRIVATE_BUCKET_NAME',
+    'LINK_GRANT_TOKEN_KEY', 'LINK_GRANT_TOKEN_PREVIOUS_KEY', 'GOOGLE_AUTH_ENVIRONMENT',
+    'GOOGLE_WEB_CLIENT_ID', 'GOOGLE_IOS_CLIENT_ID'];
+  if (env.STAGING_PLATFORM_ENABLED !== 'true') {
+    if (keys.some(key => env[key] !== undefined && env[key] !== '')) {
+      throw new Error('Platform configuration requires explicit staging enablement');
+    }
+    return {};
+  }
+  if (env.PLATFORM_ENVIRONMENT !== 'staging' ||
+      env.PORTAL_ORIGIN !== 'https://staging-app.usesnaglist.com') {
+    throw new Error('The isolated staging manager origin and environment are required');
+  }
+  if (env.R2_PRIVATE_BUCKET_NAME !== 'snaglist-staging-private' ||
+      env.R2_PRIVATE_BUCKET_NAME === env.R2_BUCKET_NAME) {
+    throw new Error('The separate private staging media bucket is required');
+  }
+  if (!validCapabilityKey(env.LINK_GRANT_TOKEN_KEY) ||
+      env.LINK_GRANT_TOKEN_KEY === env.JWT_SECRET) {
+    throw new Error('A separate 32-byte staging Contractor link key is required');
+  }
+  const platform = {
+    PLATFORM_ENVIRONMENT: 'staging',
+    PORTAL_ORIGIN: env.PORTAL_ORIGIN,
+    R2_PRIVATE_BUCKET_NAME: env.R2_PRIVATE_BUCKET_NAME,
+    LINK_GRANT_TOKEN_KEY: env.LINK_GRANT_TOKEN_KEY
+  };
+  if (env.LINK_GRANT_TOKEN_PREVIOUS_KEY !== undefined) {
+    if (!validCapabilityKey(env.LINK_GRANT_TOKEN_PREVIOUS_KEY) ||
+        env.LINK_GRANT_TOKEN_PREVIOUS_KEY === env.LINK_GRANT_TOKEN_KEY ||
+        env.LINK_GRANT_TOKEN_PREVIOUS_KEY === env.JWT_SECRET) {
+      throw new Error('The previous staging Contractor link key must be valid and distinct');
+    }
+    platform.LINK_GRANT_TOKEN_PREVIOUS_KEY = env.LINK_GRANT_TOKEN_PREVIOUS_KEY;
+  }
+  const googleKeys = ['GOOGLE_AUTH_ENVIRONMENT', 'GOOGLE_WEB_CLIENT_ID', 'GOOGLE_IOS_CLIENT_ID'];
+  if (googleKeys.some(key => env[key] !== undefined)) {
+    const validID = value => typeof value === 'string' && value.length <= 200 &&
+      /^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(value);
+    if (env.GOOGLE_AUTH_ENVIRONMENT !== 'staging' ||
+        !validID(env.GOOGLE_WEB_CLIENT_ID) || !validID(env.GOOGLE_IOS_CLIENT_ID) ||
+        env.GOOGLE_WEB_CLIENT_ID === env.GOOGLE_IOS_CLIENT_ID) {
+      throw new Error('Google requires separate web/iOS clients in the staging environment');
+    }
+    for (const key of googleKeys) platform[key] = env[key];
+  }
+  return platform;
+}
+
+function validCapabilityKey(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9+/]{43}=$/.test(value)) return false;
+  try {
+    const decoded = atob(value);
+    return decoded.length === 32 && btoa(decoded) === value;
+  } catch { return false; }
 }

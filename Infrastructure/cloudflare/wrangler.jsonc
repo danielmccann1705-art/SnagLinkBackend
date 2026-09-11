@@ -16,6 +16,7 @@
       "routes": [{ "pattern": "staging-api.usesnaglist.com", "custom_domain": true }],
       "vars": {
         "STAGING_ENABLED": "false",
+        "STAGING_PLATFORM_ENABLED": "false",
         "STAGING_DATABASE_HOST": "ep-bitter-wave-zacpbrh7.c-2.eu-west-2.aws.neon.tech",
         "STAGING_EMAIL_ENABLED": "false",
         "EMAIL_ALLOWED_RECIPIENTS": "danielmccann1705@gmail.com",
