@@ -88,17 +88,20 @@ struct CompanyAdministrationController: RouteCollection {
         return try await req.db.transaction { db in
             let workspace = try await context(req, on: db)
             let rows = try await VerifiedIdentityService.sql(db).raw("""
-                SELECT m.user_id, u.name, m.role, m.state, m.revision
+                SELECT m.user_id, u.name, m.role, m.state, m.revision,
+                    (SELECT min(subject) FROM user_identities WHERE user_id = m.user_id AND provider = 'email') AS verified_email
                 FROM workspace_memberships m JOIN users u ON u.id = m.user_id
                 WHERE m.workspace_id = \(bind: workspace.id)
                     AND (\(bind: query.state) = 'all' OR m.state = \(bind: query.state))
-                    AND position(lower(\(bind: query.search)) in lower(coalesce(u.name, 'Unnamed member'))) > 0
+                    AND (position(lower(\(bind: query.search)) in lower(coalesce(u.name, 'Unnamed member'))) > 0
+                         OR EXISTS (SELECT 1 FROM user_identities WHERE user_id = m.user_id AND provider = 'email'
+                             AND position(lower(\(bind: query.search)) in lower(subject)) > 0))
                 ORDER BY CASE WHEN m.state = 'active' THEN 0 ELSE 1 END,
                     CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, lower(coalesce(u.name, '')), m.user_id
                 LIMIT 51 OFFSET \(bind: (query.page - 1) * 50)
                 """).all()
             let items = try rows.prefix(50).map { row in
-                try WorkspaceMemberResponse(userId: row.decode(column: "user_id", as: UUID.self), name: row.decode(column: "name", as: String?.self), role: row.decode(column: "role", as: String.self), state: row.decode(column: "state", as: String.self), revision: row.decode(column: "revision", as: Int64.self))
+                try WorkspaceMemberResponse(userId: row.decode(column: "user_id", as: UUID.self), name: row.decode(column: "name", as: String?.self), role: row.decode(column: "role", as: String.self), state: row.decode(column: "state", as: String.self), revision: row.decode(column: "revision", as: Int64.self), verifiedEmail: row.decode(column: "verified_email", as: String?.self))
             }
             return .init(workspace: workspace, items: items, page: query.page, hasMore: rows.count > 50)
         }

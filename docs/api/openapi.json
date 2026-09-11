@@ -10241,7 +10241,7 @@
               "type": "string",
               "maxLength": 120
             },
-            "description": "Literal case-insensitive substring: member display name, or invitation recipient email."
+            "description": "Literal case-insensitive substring of display name or a verified email identity."
           },
           {
             "name": "state",
@@ -10874,6 +10874,11 @@
           "revision": {
             "type": "integer",
             "minimum": 1
+          },
+          "verifiedEmail": {
+            "type": "string",
+            "format": "email",
+            "description": "Verified email identity, admin directory only. Never the mutable profile email; omitted when unavailable."
           }
         },
         "required": [

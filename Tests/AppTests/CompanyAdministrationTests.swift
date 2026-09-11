@@ -71,6 +71,13 @@ final class CompanyAdministrationTests: XCTestCase {
         XCTAssertEqual(removed.items.map(\.userId), [target.userId]); XCTAssertEqual(removed.items[0].revision, 2)
         let search = try await request(base + "?q=Owner", user: owner).content.decode(CompanyAdministrationController.MemberPage.self)
         XCTAssertEqual(search.items.map(\.userId), [try owner.requireID()])
+        XCTAssertEqual(search.items[0].verifiedEmail, owner.email)
+        let originalEmail = owner.email!
+        owner.email = "mutable-not-verified@example.test"; try await owner.save(on: app.db)
+        let verifiedSearch = try await request(base + "?q=" + originalEmail, user: owner).content.decode(CompanyAdministrationController.MemberPage.self)
+        XCTAssertEqual(verifiedSearch.items.map(\.userId), [try owner.requireID()])
+        let unverifiedSearch = try await request(base + "?q=mutable-not-verified", user: owner).content.decode(CompanyAdministrationController.MemberPage.self)
+        XCTAssertTrue(unverifiedSearch.items.isEmpty)
         let literal = try await request(base + "?q=%25", user: owner).content.decode(CompanyAdministrationController.MemberPage.self)
         XCTAssertTrue(literal.items.isEmpty)
         for query in ["?page=0", "?page=no", "?page=10001", "?state=owner", "?q=" + String(repeating: "x", count: 121)] {

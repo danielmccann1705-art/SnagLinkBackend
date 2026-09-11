@@ -16,6 +16,8 @@ struct WorkspaceMemberResponse: Content {
     let role: String
     let state: String
     let revision: Int64
+    // Admin directory only; never fill from mutable users.email.
+    var verifiedEmail: String? = nil
 }
 
 struct WorkspaceAccessService {
