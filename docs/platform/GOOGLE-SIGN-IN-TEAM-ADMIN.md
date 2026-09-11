@@ -1,5 +1,11 @@
 # Google sign-in and company administration — scope amendment
 
+## Domain wiring and approved monthly mailbox — 11 September 2026
+
+The existing website is now live at **https://usesnaglist.com**, with HTTPS and a tested www → apex redirect. **https://staging-api.usesnaglist.com/health** returns 200 as an additive alias to the existing 9 September staging deployment. Resend **mail.usesnaglist.com** is Verified; the deployed sender is still on the old domain and new-domain message delivery has not been tested. DNSSEC activation is pending. Existing .dev routes are preserved; production API health remains 530 and the manager portal is not deployed.
+
+Dan approved **one Google Workspace Business Starter user, £7/month Flexible before tax, no annual commitment**, `dan@usesnaglist.com` with `hello@`, `support@` and `billing@` aliases. Signup is prepared in Chrome and awaits Dan entering a password directly in Google's form. No Workspace account, paid plan, mailbox, aliases or Google email DNS is confirmed active. This plan is already authorised: continue it after the password handoff without asking for the same approval again. Never inspect or record the password. See [DOMAIN-CONFIGURATION.md](https://drive.google.com/file/d/15Itk0Yvjib5FagJ22Gx4oRQiOIVwqq_y/view) for applied resources, tests, remaining origin/sender work and scoped rollback. Website routing is complete; this does not establish platform production readiness.
+
 ## Approved provider expansion — 11 September 2026
 
 Dan explicitly approved all four sign-in methods: **Google, Apple, Microsoft and email link**, for the app and manager web companion. Microsoft is now required scope rather than a later optional suggestion. Contractors retain their separate no-account Contractor link experience.
@@ -8,7 +14,7 @@ Microsoft must support organisational and personal Microsoft accounts, resolve a
 
 Acceptance includes first and returning sign-in on phone/web, explicit same-account linking, collisions, cancellation, expired/replayed proofs, organisation policy errors, personal-account coverage, account recovery/deletion/provider cleanup and retained workspace/purchase identity. An unfinished or unconfigured provider must not appear to work. Microsoft code/configuration and actual provider verification are **not implemented by this scope update**; Apple web configuration and native Google staging verification also remain open. Native account-scoped storage/sync is a prerequisite to public multi-account use.
 
-**usesnaglist.com is registered and Active in Cloudflare as of 11 September.** Dan chose personal ownership; the registrant is Daniel McCann with no organisation. Purchase completed at US$10.46 for one year; expiry is 11 September 2027, with automatic renewal enabled at the current US$10.46/year and scheduled for 12 August 2027. Google Workspace Business Starter remains the email recommendation, with no paid subscription activated. Keep `snaglist.dev` and existing API/Contractor-link routing compatible. Configure marketing, manager origin, email authentication and production provider registrations consistently in the next domain-configuration work; do not break already-issued links. No live origin or email-routing change occurred during registration. See `DOMAIN-AND-EMAIL-RECOMMENDATION.md` for verification and remaining setup.
+**usesnaglist.com is registered and Active in Cloudflare.** The latest domain and mailbox checkpoint above supersedes the registration-only status. Preserve old .dev API and Contractor-link compatibility; production authentication origins and sender delivery still need verification.
 
 Reference: [Microsoft supported account types](https://learn.microsoft.com/en-us/entra/identity-platform/howto-modify-supported-accounts). The following dated checkpoints remain historical evidence.
 

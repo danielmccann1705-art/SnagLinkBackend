@@ -1,14 +1,20 @@
 # Snaglist — domain and business email recommendation
 
-Research checked 11 September 2026, approximately 13:20 UTC. Registration completed and verified approximately 13:52 UTC. Domain purchase is complete; website/API migration and email setup are not performed.
+## Domain wiring and approved monthly mailbox — 11 September 2026
+
+The existing website is now live at **https://usesnaglist.com**, with HTTPS and a tested www → apex redirect. **https://staging-api.usesnaglist.com/health** returns 200 as an additive alias to the existing 9 September staging deployment. Resend **mail.usesnaglist.com** is Verified; the deployed sender is still on the old domain and new-domain message delivery has not been tested. DNSSEC activation is pending. Existing .dev routes are preserved; production API health remains 530 and the manager portal is not deployed.
+
+Dan approved **one Google Workspace Business Starter user, £7/month Flexible before tax, no annual commitment**, `dan@usesnaglist.com` with `hello@`, `support@` and `billing@` aliases. Signup is prepared in Chrome and awaits Dan entering a password directly in Google's form. No Workspace account, paid plan, mailbox, aliases or Google email DNS is confirmed active. This plan is already authorised: continue it after the password handoff without asking for the same approval again. Never inspect or record the password. See [DOMAIN-CONFIGURATION.md](https://drive.google.com/file/d/15Itk0Yvjib5FagJ22Gx4oRQiOIVwqq_y/view) for applied resources, tests, remaining origin/sender work and scoped rollback. Website routing is complete; this does not establish platform production readiness.
+
+Research checked 11 September 2026 at approximately 13:20 UTC; registration verified at 13:52 UTC. Domain wiring checkpoint: approximately 14:15 UTC. The latest applied status below supersedes the historical registration-only checkpoint.
 
 ## Recommendation
 
-Dan selected **usesnaglist.com** as the customer-facing domain. The Snaglist brand stays unchanged. **Google Workspace Business Starter** for one staff mailbox remains the recommended email host; no subscription has been activated. Domain registration is complete, as detailed below; production routing changes remain separate work.
+Dan selected **usesnaglist.com** as the customer-facing domain. The Snaglist brand stays unchanged. **Google Workspace Business Starter Flexible** for one staff mailbox is now approved at £7/month before tax; activation awaits the password handoff. Website and staging domain wiring are applied, as detailed above; production API/portal cutover remains separate work.
 
 `snaglist.dev` is a legitimate software domain. A familiar .com is my preference for the site's UK construction audience and verbal/email use. That is a design/marketing judgement, not measured customer research. Keep the owned .dev domain and preserve existing API/Contractor-link compatibility during any migration; replacing production origins is separate work.
 
-## Registered domain — 11 September 2026
+## Historical registration checkpoint — 11 September 2026, 13:52 UTC
 
 **usesnaglist.com is registered and Active in the existing Cloudflare account.** Dan confirmed personal ownership, supplied the required phone number, and the registrant organisation field was removed. The saved contact table confirms **Daniel McCann** as registrant, administrator, technical and billing contact. Contact/address/payment details are retained in Cloudflare, not this knowledge bank or source control.
 
@@ -43,7 +49,7 @@ Registry sources: [Verisign .com](https://rdap.verisign.com/com/v1/domain/snagli
 
 Business Starter's official GBP standard rate is **£5.90 per user/month with a one-year commitment** or **£7 per user/month on Flexible**, before applicable tax. One annual seat is £70.80/year before tax. The plan includes business Gmail and 30 GB pooled storage per user. Existing personal use of Google Drive does not itself prove an existing Workspace subscription. If Dan already pays for an eligible Workspace account, check whether the chosen domain can be added there before buying another subscription.
 
-Start with one actual mailbox, proposed `dan@usesnaglist.com`, and `hello@`, `support@` and `billing@` aliases routed to that mailbox. Google supports up to 30 aliases per user without another licence; aliases are not independent logins/mailboxes or a substitute for additional staff accounts. The domain is registered; these addresses remain proposed until the mailbox and aliases are configured.
+Dan approved one actual mailbox, `dan@usesnaglist.com`, and `hello@`, `support@` and `billing@` aliases routed to that mailbox. Google supports up to 30 aliases per user without another licence; aliases are not independent logins/mailboxes or a substitute for additional staff accounts. The domain is registered; these addresses are approved but not active until the mailbox and aliases are configured.
 
 Sources: [Google GBP annual/flexible rates](https://knowledge.workspace.google.com/admin/billing/compare-flexible-and-annual-fixed-term-payment-plans), [UK Starter features](https://workspace.google.com/intl/en-GB_uk/index.html?hl=en-GB_uk), [alias rules](https://support.google.com/a/answer/33327), [adding a domain to an existing account](https://support.google.com/a/answer/7502379).
 

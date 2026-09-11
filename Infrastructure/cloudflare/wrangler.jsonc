@@ -11,6 +11,9 @@
     "staging": {
       "name": "snaglist-api-staging",
       "workers_dev": true,
+      // Additive hostname; existing emitted links retain workers.dev until the
+      // staging origin configuration and native association checks are complete.
+      "routes": [{ "pattern": "staging-api.usesnaglist.com", "custom_domain": true }],
       "vars": {
         "STAGING_ENABLED": "false",
         "STAGING_DATABASE_HOST": "ep-bitter-wave-zacpbrh7.c-2.eu-west-2.aws.neon.tech",
