@@ -1,0 +1,153 @@
+{
+  "date": "2026-09-11",
+  "status": "implemented, reviewed and tested; committed locally; not deployed",
+  "baseCommit": "2c4fe4cec8ae1e584a6753956748b69586a0ac80",
+  "committedSource": "9e5d13e433778e8adf1b0767d5d1e6b9fac529ff",
+  "finalSourceSHA256": "21df7f694557349e2685800345f58a7e030ed39b862120b0c86e497b007e1079",
+  "patchSHA256": "2db43373f856b34314de19243def8761a3451e71aeafe6f5e12acb7982f3941e",
+  "files": [
+    {
+      "path": "Sources/App/DTOs/CanonicalDrawingDTO.swift",
+      "baseSHA256": null,
+      "newSHA256": "ec45c28a1fda298f0de70e3bd40f2a0c910d9e8f27f07aa34305a013c90e150d"
+    },
+    {
+      "path": "Sources/App/Migrations/CreateCanonicalDrawings.swift",
+      "baseSHA256": null,
+      "newSHA256": "e60656547df0788fe5d13787e4263b43bb12f9d94eb0cadde824de58c1d98249"
+    },
+    {
+      "path": "Sources/App/Services/CanonicalDrawingService.swift",
+      "baseSHA256": null,
+      "newSHA256": "e46f41fcd5e74c5010530373c4d2edf6f74a5fe9080a23afcc46387061477aa0"
+    },
+    {
+      "path": "Sources/App/Services/DrawingGeometryValidation.swift",
+      "baseSHA256": null,
+      "newSHA256": "99ba4832b57f7f5f945fa34900a1380b0d4ed37195b94a19b1f209c74d9d54be"
+    },
+    {
+      "path": "Sources/App/configure.swift",
+      "baseSHA256": "96358b5c3396debbbf445dbdb852086fbecfcdc6bdfe101965a1153fa799366c",
+      "newSHA256": "9766c5455cffbf0f449cba04b5ec92aa2a0a132e56a0b9512ef859456bcc1ce1"
+    },
+    {
+      "path": "Tests/AppTests/CanonicalDrawingTests.swift",
+      "baseSHA256": null,
+      "newSHA256": "bc6b155c4047b1a77df94455324e978214c9e594ffc1f6fcf8545cc8a7bb5f61"
+    },
+    {
+      "path": "Tests/AppTests/DrawingGeometryTests.swift",
+      "baseSHA256": null,
+      "newSHA256": "ea2780ea8f00bfb9e6e878ea3cf5347e1a9c67f1d5c642bd132ea1f4ae659fd7"
+    }
+  ],
+  "review": "Independent final review accepts receipt ordering, Int32 bounds and normalized geometry tolerance fixes; final targeted tests passed.",
+  "tests": [
+    {
+      "label": "dra-01-initial",
+      "exitCode": 0,
+      "durationSeconds": 70.971,
+      "counts": {
+        "passed": 12,
+        "failed": 0,
+        "skipped": 0
+      },
+      "sourceSHA256": "989e7323e08df3c516bc140f73a9351ac7ef988ab2c2136089be1c8cd0271f51",
+      "evidence": "outputs/app-store-prep/backend-tests/dra-01-initial.json"
+    },
+    {
+      "label": "dra-01-final",
+      "exitCode": 0,
+      "durationSeconds": 256.041,
+      "counts": {
+        "passed": 57,
+        "failed": 0,
+        "skipped": 0
+      },
+      "sourceSHA256": "cc29d73d5768fdea2b3991283177b5b79e7fa22a6025ae8ce75f975a0635fe33",
+      "evidence": "outputs/app-store-prep/backend-tests/dra-01-final.json"
+    },
+    {
+      "label": "dra-01-reviewed",
+      "exitCode": 0,
+      "durationSeconds": 438.269,
+      "counts": {
+        "passed": 102,
+        "failed": 0,
+        "skipped": 0
+      },
+      "sourceSHA256": "c66ea466f5705814d83a778b85feba641bcb73d9f6f192e0e47a4fce5872ada2",
+      "evidence": "outputs/app-store-prep/backend-tests/dra-01-reviewed.json"
+    },
+    {
+      "label": "dra-01-geometry-final",
+      "exitCode": 1,
+      "durationSeconds": 10.293,
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0
+      },
+      "sourceSHA256": "4715583ae954e7b6c1542565de32d16c932d908c0ba6ed24299cf74f8e03df77",
+      "evidence": "outputs/app-store-prep/backend-tests/dra-01-geometry-final.json"
+    },
+    {
+      "label": "dra-01-geometry-verified",
+      "exitCode": 0,
+      "durationSeconds": 64.0,
+      "counts": {
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0
+      },
+      "sourceSHA256": "21df7f694557349e2685800345f58a7e030ed39b862120b0c86e497b007e1079",
+      "evidence": "outputs/app-store-prep/backend-tests/dra-01-geometry-verified.json"
+    }
+  ],
+  "database": "Existing isolated synthetic fa3f test DB only; no new/drop/reset database",
+  "sandboxDisabled": false,
+  "publicRoutesAdded": false,
+  "registerCoverageAdded": false,
+  "deployed": false,
+  "capabilitiesStillMissing": [
+    "verified byte upload/storage and PDF processor",
+    "durable failure/backoff/cleanup worker",
+    "private asset gateways",
+    "complete graph journalling/bootstrap/delta",
+    "Contractor page grants/revocation",
+    "metadata archive/restore and original provenance import",
+    "native adoption and complete account scope",
+    "annotation graph and fresh-device/D2 acceptance"
+  ],
+  "migrationImplications": {
+    "registeredInStartupAutoMigrate": true,
+    "newTables": 8,
+    "prepareTransactional": true,
+    "destructiveRevertRefused": true,
+    "appliedTo": "isolated synthetic test DB only",
+    "realCandidateStartupVerified": false,
+    "concurrentContainerMigrationVerified": false
+  },
+  "finalSuiteCounts": {
+    "CanonicalDrawingTests": 17,
+    "DrawingGeometryTests": 8
+  },
+  "broadSuiteCounts": {
+    "CanonicalDrawingTests": 17,
+    "CanonicalMutationTests": 37,
+    "CanonicalWorkflowTests": 8,
+    "DrawingGeometryTests": 6,
+    "PrivateMediaTests": 7,
+    "ProjectGraphTests": 16,
+    "ProjectMetadataGraphTests": 11
+  },
+  "verificationBoundary": "102 broad checks passed on c66ea466; only geometry helper/tests changed afterwards. Final 25 targeted checks passed on 21df7f69. No full final-source rerun or sum of overlapping cases claimed.",
+  "repositoryReadback": {
+    "allSevenFileHashesMatch": true,
+    "sourcesTestsPackageSHA256": "21df7f694557349e2685800345f58a7e030ed39b862120b0c86e497b007e1079",
+    "gitDiffCheck": "passed by root before commit",
+    "push": false,
+    "merge": false
+  }
+}

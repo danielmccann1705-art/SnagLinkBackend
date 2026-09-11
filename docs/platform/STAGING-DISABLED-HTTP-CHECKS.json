@@ -1,0 +1,29 @@
+[
+  {
+    "name": "candidate-disabled-health",
+    "url": "https://snaglist-api-unified-staging.danielmccann1705.workers.dev/health",
+    "observedAt": "2026-09-11T19:24:29Z",
+    "status": 403,
+    "body": "error code: 1010\n",
+    "source": "Python urllib; Cloudflare edge block",
+    "applicationResponseVerified": false
+  },
+  {
+    "name": "portal-disabled-home",
+    "url": "https://staging-app.usesnaglist.com/",
+    "observedAt": "2026-09-11T19:24:29Z",
+    "status": 403,
+    "body": "error code: 1010\n",
+    "source": "Python urllib; Cloudflare edge block",
+    "applicationResponseVerified": false
+  },
+  {
+    "name": "portal-disabled-api",
+    "url": "https://staging-app.usesnaglist.com/api/v2/projects",
+    "observedAt": "2026-09-11T19:24:29Z",
+    "status": 403,
+    "body": "error code: 1010\n",
+    "source": "Python urllib; Cloudflare edge block",
+    "applicationResponseVerified": false
+  }
+]

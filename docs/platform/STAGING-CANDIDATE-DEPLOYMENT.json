@@ -1,0 +1,63 @@
+{
+  "checkedAt": "2026-09-11T19:28:25.724Z",
+  "status": "deployed_disabled; application activation not verified",
+  "backendSource": "91a53d97e47346bfe4c96da2378e0aac12927046",
+  "portalSource": "e2507654300592329f018031dd3f66c0feec2aa6",
+  "adapterSource": "ffc5f90",
+  "backendWorker": {
+    "name": "snaglist-api-unified-staging",
+    "deploymentId": "5644941b138746b08560d3acfdac2b14",
+    "enabled": false,
+    "secretBindings": []
+  },
+  "container": {
+    "id": "a0305da9-549f-46e7-b8e5-450411bacf92",
+    "image": "registry.cloudflare.com/387d49014cd0d45f9e6434196ab513c0/snaglist-unified-staging@sha256:11b2587710a73da3c7dc3dff0e6e29b4b4a62d2ef698c6eaf7c850b5017128dc",
+    "instances": 1,
+    "maxInstances": 1,
+    "health": {
+      "errors": [],
+      "instances": {
+        "active": 0,
+        "assigned": 0,
+        "healthy": 1,
+        "stopped": 0,
+        "failed": 0,
+        "scheduling": 0,
+        "starting": 0
+      }
+    },
+    "applicationStartupVerified": false
+  },
+  "portalWorker": {
+    "name": "snaglist-portal-unified-staging",
+    "deploymentId": "829eaba6b2c74fcc9bbba7556f632a13",
+    "enabled": false,
+    "workersDev": false,
+    "previews": false,
+    "assets": 14,
+    "domain": "staging-app.usesnaglist.com",
+    "domainId": "9e2c0348a53fa18bdaf98597dc693fffca9de0ac",
+    "backendBinding": "snaglist-api-unified-staging"
+  },
+  "publicChecks": {
+    "earlierBackend": "19:13 UTC curl observed the intended disabled 503 response before this checkpoint",
+    "currentAutomatedProbe": "19:24 UTC Python urllib returned HTTP403/error1010 for backend health, portal home and portal API; not an application response",
+    "browser": "Browser navigation to staging portal reported ERR_BLOCKED_BY_CLIENT; page acceptance not established",
+    "readOnlyZoneSetting": "browser_check=on; no security setting changed"
+  },
+  "notPerformed": [
+    "R2 persistent credential creation",
+    "Worker secret installation",
+    "application startup/migrations",
+    "candidate activation",
+    "real provider/media workflow",
+    "production/recovery cutover"
+  ],
+  "evidence": [
+    "STAGING-REGISTRY-PUSH.json",
+    "STAGING-PORTAL-ASSET-UPLOAD.json",
+    "STAGING-DISABLED-REMOTE-READBACK.json"
+  ],
+  "scopeNote": "Cloudflare returns environment=production for the default namespace of these explicitly staging-named Workers; no app production route was changed."
+}

@@ -1,0 +1,84 @@
+{
+  "sourceCommit": "339203a2b2a8069918496205f6cef745cc719397",
+  "branch": "feature/unified-platform",
+  "scheme": "Snaglist Staging",
+  "destination": "iPhone 17 Pro / iOS 26.2 Simulator",
+  "startedAt": "2026-09-11T20:19:35.221+01:00",
+  "endedAt": "2026-09-11T20:20:40.563+01:00",
+  "build": "succeeded",
+  "tests": {
+    "total": 336,
+    "passed": 331,
+    "failed": 0,
+    "skipped": 5
+  },
+  "newDrawingResolverCases": 35,
+  "newScopeCoordinatorCases": 21,
+  "warning": "Existing MagicLinkSendManagerTests SendAction retroactive Equatable conformance",
+  "resultBundle": "work/native-recovery/native-drawing-scope-tests-2019.xcresult",
+  "resultJSON": "work/native-recovery/native-drawing-scope-tests-2019.json",
+  "earlierIntegrationFailures": [
+    {
+      "time": "20:10 UK",
+      "result": "build failed; no tests",
+      "cause": "SLDrawing getters called the MainActor storage service without explicit isolation",
+      "fix": "explicit MainActor on computed getters"
+    },
+    {
+      "time": "20:13 UK",
+      "result": "build failed; no tests",
+      "cause": "PDF report fallback accessed the now-isolated getter outside its actor",
+      "fix": "await the same storage service full-resolution read"
+    }
+  ],
+  "nativeUI": "Reopened the staging bundle and existing synthetic Willow Court project after tests; saved native-project-339203a.jpg",
+  "notEstablished": [
+    "actual image/PDF import through ordinary UI after the fix",
+    "authenticated drawing upload",
+    "live account store switching",
+    "physical-device behaviour",
+    "complete D2"
+  ],
+  "files": [
+    {
+      "path": "Snaglist/Models/SLDrawing.swift",
+      "sha256": "5c39860ee0da8f14894e39808930ed03076f0aec20640faa0741813b09c99bc3",
+      "bytes": 1548
+    },
+    {
+      "path": "Snaglist/Services/FloorPlanStorageService.swift",
+      "sha256": "e57663a6ac968cf6d87b8c0f68a60252f88ad2504b5b461c3305ead470ad4143",
+      "bytes": 11633
+    },
+    {
+      "path": "Snaglist/Services/DrawingFileResolver.swift",
+      "sha256": "1d8f7d6d032e5fe08f4505ff2d22a59592b0575de45e717e627247eb2a3e5f34",
+      "bytes": 4671
+    },
+    {
+      "path": "Snaglist/Services/DeviceScopeCoordinator.swift",
+      "sha256": "8b9c76d6773481a01ef85c24937ff945955496a3523e6914a4bee5ef700918c3",
+      "bytes": 12600
+    },
+    {
+      "path": "SnaglistTests/DrawingFileResolverTests.swift",
+      "sha256": "6990e7d00b8fe00f184a941cc854fd9ffb7030fa45707fdf19e4de85eb498ef3",
+      "bytes": 11303
+    },
+    {
+      "path": "SnaglistTests/DeviceScopeCoordinatorTests.swift",
+      "sha256": "13d7fe4a38f9331cb2e0c538279c6bca7697f9825da648e4066d0e92a681634b",
+      "bytes": 17263
+    },
+    {
+      "path": "Snaglist/Views/Reports/ReportsView.swift",
+      "sha256": "de2248f10c386d75d432333a834637889b13590b1029dcd14c7e62fb3f06e3c5",
+      "bytes": 110304
+    },
+    {
+      "path": "Snaglist.xcodeproj/project.pbxproj",
+      "sha256": "b9fee04cc59eb22b6d178d9eb5e5b6ee5c6d1b1c99dd9044c067f211a7d3dfda",
+      "bytes": 134702
+    }
+  ]
+}

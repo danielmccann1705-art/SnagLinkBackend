@@ -1,0 +1,86 @@
+{
+  "sourceCommit": "e2507654300592329f018031dd3f66c0feec2aa6",
+  "backendSource": "91a53d97e47346bfe4c96da2378e0aac12927046",
+  "contractorOrigin": "https://snaglist-api-unified-staging.danielmccann1705.workers.dev",
+  "tests": {
+    "passed": 74,
+    "failed": 0,
+    "skipped": 0
+  },
+  "build": "passed",
+  "files": [
+    {
+      "path": "dist/assets/index-DnDqZSDj.js",
+      "bytes": 367784,
+      "sha256": "3d735b6ca996a2ec417ed8a02bb9f4f8ced141b9ffbee7218107129b1e1cb6d6"
+    },
+    {
+      "path": "dist/assets/index-DnDqZSDj.js.map",
+      "bytes": 1439885,
+      "sha256": "cd99f19d46e4f28cc6a3095dce8d6bcc2f34ea568606f163eb845abe9db8ad0b"
+    },
+    {
+      "path": "dist/assets/index-oOkkwfpR.css",
+      "bytes": 55024,
+      "sha256": "f7a91382fc9771e52db66badd27751eb8a205e429a79d4f2943a7554531a4624"
+    },
+    {
+      "path": "dist/brand/pin-complete.svg",
+      "bytes": 318,
+      "sha256": "d32624d9a38d781ef93b9391480b6d1a1796041e45993f012c796272a3b956fa"
+    },
+    {
+      "path": "dist/brand/pin-in-progress.svg",
+      "bytes": 327,
+      "sha256": "1527b2358118f47e5dffbd41da727a70b0edfc5cb8e4756125b276c230dfe302"
+    },
+    {
+      "path": "dist/brand/pin-open.svg",
+      "bytes": 240,
+      "sha256": "833e93be904aabedea55e34f4cca3f85ca0f2c89b0c32574c7a393449e9b48bf"
+    },
+    {
+      "path": "dist/brand/pin-rejected.svg",
+      "bytes": 307,
+      "sha256": "26572a047334ac5c95242892e0ea0507ee99ab55431d5c2126017532f33dcbb8"
+    },
+    {
+      "path": "dist/brand/wordmark-light.svg",
+      "bytes": 6895,
+      "sha256": "376b4837490c7a40831a1b812af5eea65bf94a8f0aa9baec1ee3485ca9b5f7fa"
+    },
+    {
+      "path": "dist/fonts/IBMPlexMono-Regular.ttf",
+      "bytes": 173052,
+      "sha256": "7c6fbddca4b700be918f5f6183d9bd4464fa427fe435f0b480d77fe2bb8c5a43"
+    },
+    {
+      "path": "dist/fonts/IBMPlexSans-Bold.ttf",
+      "bytes": 200872,
+      "sha256": "9e6c74a889a700d707613d24548fe4ffa6bc59559a0689d2cf9e133bdcdafb2f"
+    },
+    {
+      "path": "dist/fonts/IBMPlexSans-Medium.ttf",
+      "bytes": 202460,
+      "sha256": "331c8639d7598b2cde62a911a71db195e30cb655cd6bdf2e324a7e984955f907"
+    },
+    {
+      "path": "dist/fonts/IBMPlexSans-Regular.ttf",
+      "bytes": 200500,
+      "sha256": "975dcda37d80f038dcd143c22e33ca2d97a0cc5a929aace1c749153b0fe1afa5"
+    },
+    {
+      "path": "dist/fonts/OFL.txt",
+      "bytes": 4363,
+      "sha256": "37784b44044a4ffd9256702b7c0982c37e5c8887ba90c6dca0479aea93dc898d"
+    },
+    {
+      "path": "dist/index.html",
+      "bytes": 446,
+      "sha256": "b8965a8e7e5c7a66f366aa83bbda3a32022a81684c018ff18c685b65b37f9272"
+    }
+  ],
+  "manifestSHA256": "9588d6726e5994d101b7c85c95ec8d46f8486badaa0529b41beef1649ab1bcea",
+  "deployed": true,
+  "deploymentState": "disabled; see STAGING-CANDIDATE-DEPLOYMENT.json"
+}

@@ -1,0 +1,15 @@
+{
+  "checkedAt": "2026-09-11T19:05:34.738330+00:00",
+  "source": "91a53d97e47346bfe4c96da2378e0aac12927046",
+  "localIndexDigest": "sha256:11b2587710a73da3c7dc3dff0e6e29b4b4a62d2ef698c6eaf7c850b5017128dc",
+  "registryReference": "registry.cloudflare.com/387d49014cd0d45f9e6434196ab513c0/snaglist-unified-staging:91a53d9",
+  "registryCredentialMinutes": 15,
+  "credentialPermissions": [
+    "push",
+    "pull"
+  ],
+  "workerDeployment": false,
+  "result": "pushed",
+  "pushExitCode": 0,
+  "log": "outputs/readiness/staging-evidence/91a53d9-registry-push.log"
+}

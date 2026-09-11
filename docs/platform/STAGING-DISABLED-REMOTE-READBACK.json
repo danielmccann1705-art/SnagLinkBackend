@@ -1,0 +1,191 @@
+{
+  "checkedAt": "2026-09-11T19:28:25.724Z",
+  "backend": {
+    "compatibility_date": "2026-09-09",
+    "logpush": false,
+    "bindings": [
+      {
+        "class_name": "SnaglistBackend",
+        "name": "BACKEND",
+        "namespace_id": "2a52ad7b59d442a48e20cf1123255d67",
+        "type": "durable_object_namespace"
+      },
+      {
+        "name": "BASE_URL",
+        "text": "https://snaglist-api-unified-staging.danielmccann1705.workers.dev",
+        "type": "plain_text"
+      },
+      {
+        "name": "GOOGLE_AUTH_ENVIRONMENT",
+        "text": "staging",
+        "type": "plain_text"
+      },
+      {
+        "name": "GOOGLE_IOS_CLIENT_ID",
+        "text": "853801285577-umo2ith1f73rvn8g7802hj9a1sjevmd0.apps.googleusercontent.com",
+        "type": "plain_text"
+      },
+      {
+        "name": "GOOGLE_WEB_CLIENT_ID",
+        "text": "853801285577-3dmk0mtkjf9gcummuq374urgim0ohgp9.apps.googleusercontent.com",
+        "type": "plain_text"
+      },
+      {
+        "name": "MAGIC_LINK_BASE_URL",
+        "text": "https://snaglist-api-unified-staging.danielmccann1705.workers.dev",
+        "type": "plain_text"
+      },
+      {
+        "name": "PLATFORM_ENVIRONMENT",
+        "text": "staging",
+        "type": "plain_text"
+      },
+      {
+        "name": "PORTAL_ORIGIN",
+        "text": "https://staging-app.usesnaglist.com",
+        "type": "plain_text"
+      },
+      {
+        "name": "R2_ACCOUNT_ID",
+        "text": "387d49014cd0d45f9e6434196ab513c0",
+        "type": "plain_text"
+      },
+      {
+        "name": "R2_BUCKET_NAME",
+        "text": "snaglist-unified-staging-uploads",
+        "type": "plain_text"
+      },
+      {
+        "name": "R2_PRIVATE_BUCKET_NAME",
+        "text": "snaglist-staging-private",
+        "type": "plain_text"
+      },
+      {
+        "name": "R2_PUBLIC_URL",
+        "text": "https://pub-d7c456d4b396462fb5ee8ef008dcf93b.r2.dev",
+        "type": "plain_text"
+      },
+      {
+        "name": "STAGING_DATABASE_HOST",
+        "text": "ep-solitary-union-zav239mi.c-2.eu-west-2.aws.neon.tech",
+        "type": "plain_text"
+      },
+      {
+        "name": "STAGING_DEPLOYMENT",
+        "text": "unified-candidate",
+        "type": "plain_text"
+      },
+      {
+        "name": "STAGING_EMAIL_ENABLED",
+        "text": "false",
+        "type": "plain_text"
+      },
+      {
+        "name": "STAGING_ENABLED",
+        "text": "false",
+        "type": "plain_text"
+      },
+      {
+        "name": "STAGING_PLATFORM_ENABLED",
+        "text": "true",
+        "type": "plain_text"
+      }
+    ]
+  },
+  "portal": {
+    "compatibility_date": "2026-09-09",
+    "logpush": false,
+    "bindings": [
+      {
+        "name": "ASSETS",
+        "type": "assets"
+      },
+      {
+        "environment": "production",
+        "name": "BACKEND",
+        "service": "snaglist-api-unified-staging",
+        "type": "service"
+      },
+      {
+        "name": "PORTAL_ORIGIN",
+        "text": "https://staging-app.usesnaglist.com",
+        "type": "plain_text"
+      },
+      {
+        "name": "STAGING_PORTAL_ENABLED",
+        "text": "false",
+        "type": "plain_text"
+      }
+    ]
+  },
+  "application": {
+    "id": "a0305da9-549f-46e7-b8e5-450411bacf92",
+    "created_at": "2026-09-11T19:12:48.636999936Z",
+    "updated_at": "2026-09-11T19:12:49.199000064Z",
+    "account_id": "387d49014cd0d45f9e6434196ab513c0",
+    "name": "snaglist-api-unified-staging-snaglistbackend",
+    "version": 1,
+    "scheduling_policy": "default",
+    "instances": 1,
+    "max_instances": 1,
+    "configuration": {
+      "image": "registry.cloudflare.com/387d49014cd0d45f9e6434196ab513c0/snaglist-unified-staging@sha256:11b2587710a73da3c7dc3dff0e6e29b4b4a62d2ef698c6eaf7c850b5017128dc",
+      "vcpu": 0.25,
+      "memory": "1GiB",
+      "memory_mib": 1024,
+      "disk": {
+        "size_mb": 4000,
+        "size": "4GB"
+      },
+      "network": {
+        "assign_ipv6": "none",
+        "assign_ipv4": "none",
+        "mode": "private"
+      },
+      "command": [],
+      "entrypoint": [],
+      "runtime": "firecracker",
+      "observability": {
+        "logs": {
+          "enabled": false
+        }
+      }
+    },
+    "constraints": {
+      "regions": [
+        "WEUR"
+      ]
+    },
+    "durable_objects": {
+      "namespace_id": "2a52ad7b59d442a48e20cf1123255d67"
+    },
+    "health": {
+      "errors": [],
+      "instances": {
+        "active": 0,
+        "assigned": 0,
+        "healthy": 1,
+        "stopped": 0,
+        "failed": 0,
+        "scheduling": 0,
+        "starting": 0
+      }
+    },
+    "network": {
+      "bandwidth_limit_mbps": 250
+    }
+  },
+  "domains": [
+    {
+      "id": "9e2c0348a53fa18bdaf98597dc693fffca9de0ac",
+      "zone_id": "524101d7172595a591bfcdec0c407c27",
+      "zone_name": "usesnaglist.com",
+      "hostname": "staging-app.usesnaglist.com",
+      "service": "snaglist-portal-unified-staging",
+      "environment": "production",
+      "cert_id": "aa912cbd-c566-48d7-abc9-bd2a7f8994ef",
+      "previews_enabled": false,
+      "enabled": true
+    }
+  ]
+}

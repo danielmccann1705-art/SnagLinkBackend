@@ -1,0 +1,24 @@
+{
+  "checkedAt": "2026-09-11T19:21:53.955844+00:00",
+  "sourceCommit": "e2507654300592329f018031dd3f66c0feec2aa6",
+  "verifiedFiles": 14,
+  "uploadedFiles": 14,
+  "bucketResults": [
+    {
+      "status": 202,
+      "files": 5
+    },
+    {
+      "status": 202,
+      "files": 5
+    },
+    {
+      "status": 201,
+      "files": 4
+    }
+  ],
+  "assetUpload": "completed",
+  "workerDeployed": false,
+  "hashAlgorithm": "SHA-256(base64(bytes)+extension), first 32 hexadecimal characters",
+  "completionReceipt": "stored privately; expires after one hour"
+}

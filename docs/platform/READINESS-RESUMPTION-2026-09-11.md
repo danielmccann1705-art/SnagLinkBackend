@@ -1,0 +1,81 @@
+# Snaglist readiness — resumed build checkpoint
+
+Updated 11 September 2026, following the 21:03 UK drawing foundation commit, 20:19 UK native test run and 19:28 UTC provider readback. This records implemented work and its limits. The unified app and portal are **not ready for production release**.
+
+## Verified working checkpoints
+
+| Area | Exact source | Evidence | Remaining boundary |
+| --- | --- | --- | --- |
+| Native recovery | iOS `c070d28`, recorded in `f89bdfa` | Verified SQLite/WAL and media copy, checksum manifest, fresh-directory restore and SwiftData reopen; earlier 176 passes / 5 skips | Not an account partition, import or complete sync implementation |
+| Native subscription identity | iOS `ac56cce` | Generation-bound SDK identity, serialized transactions and owner-specific cached entitlement; included in subsequent app tests | No real StoreKit/RevenueCat receipt, backend entitlement or Team checkout pass |
+| Native Projects home | iOS `a684663` | Actual project navigation, creation gate and Contractor links destination; real synthetic project/snags entered through normal forms | Other older native surfaces and complete D2 remain |
+| Native revocation and Links | iOS `6e751fa`, retained in `339203a` | Latest staging build succeeded; **331 passed, 0 failed, 5 existing skips** (336 total), including 40 revocation, 49 scope/path, 35 drawing resolver and 21 coordinator cases | Actual authenticated deployed revocation and account-isolated stores remain unverified |
+| Native storage-scope foundation | iOS `ba10346` | 49 strict standalone cases and real Xcode integration passed | Immutable path plan only; live store switching, media partition and legacy import are absent |
+| Native drawing reads / scope lifecycle | iOS `339203a` | Actual target build and all 331 tests passed; shared validated drawing lookup and injected freeze/drain/save/prepare lifecycle | Drawing import/upload UI and live scope adoption remain unverified |
+| Discovery and internal comments | Backend `91a53d9` | 31 focused graph/workflow/private-media tests passed; 37 canonical-mutation tests passed in the earlier run on unchanged product source | Full graph, import and native adoption remain incomplete |
+| Canonical drawing transaction foundation | Backend `9e5d13e433778e8adf1b0767d5d1e6b9fac529ff` | 25 final drawing/geometry checks passed, 0 failed/skipped; broader 102-check run passed before the last two geometry-file corrections. Exact hashes and review findings: [DRA-01 report](https://drive.google.com/file/d/1Yv4l2SEqf467d8BHQ3DPpOW28ItzmGSS/view) | Internal schema/services only; real bytes/processor, gateways, graph coverage and native adoption remain absent; not deployed |
+| Manager delegation and internal discussion | Portal delegation `84a5223`, comments `64894d7`, contract v0.12 `a4bd706` | Latest build and **94 tests pass, 0 failed/skipped**; original frozen `e250765` remains 74 tests | Actual new comment rendering, real staging D2 and native→second-manager journey remain open |
+| Staging adapter | Backend Infrastructure `cd0ec67`, dependency correction `ffc5f90` | **29 tests passed**, TypeScript passed; patched Wrangler dependency audit reports zero npm advisories | Matching frozen backend/portal are deployed disabled; secret installation, actual startup, storage and provider acceptance remain open |
+
+All repositories retain their existing feature branches. No merge, Git push, production/recovery routing change, App Store submission or live Team billing occurred at this checkpoint. Backend unrelated untracked agent folders and `.env (1).staging.example` are preserved.
+
+## Confirmed revocation defect and correction
+
+Three native UI paths previously called a model helper that only set `revokedAt` locally. The user could see “revoked” without any server request. All three paths, plus the main Links destination, now use the existing authenticated server revoke endpoint. The obsolete local-only helper has been removed.
+
+Each intent is saved privately before transmission with its original backend account UUID, environment, API origin, link ID/token and operation ID. Failed or uncertain requests remain pending. Late responses from an earlier account generation cannot update the next account, including A→B→A. An acknowledged request remains a durable receipt until the matching local record saves successfully. Reconnect, sign-in restoration and normal foreground return retry eligible work.
+
+The old ownerless UserDefaults queue is preserved and quarantined rather than assigned to the next login. Existing historical `revokedAt` values still lack server provenance; UI labels them as recorded on this device. Pending requests explicitly say that access may continue. The send manager blocks re-sharing and reminders while a current-scope revocation is pending.
+
+These safeguards do not partition all existing local projects, photos, reports, widgets or queues. Full account-scoped data storage remains an independent release blocker.
+
+## Actual native screen checks
+
+On iPhone 17 Pro / iOS 26.2, using the staging bundle and local synthetic data:
+
+- Projects opens Willow Court · Plot 12, reference WI-041, containing WI-041-001, “Front door latch catches on the strike plate”. This was captured through ordinary native forms, not seeded into production.
+- Contractor links opens the corrected empty state. “Choose a project” returns to Projects. No funnel totals are inferred from unrelated project states.
+- Share with contractor opens the proper sign-in gate for a guest. This is permission-gate evidence, not authenticated sharing acceptance.
+- Add snag opens the existing capture form with title validation and photo controls. No extra record was saved during this navigation check.
+- Increasing simulator Dynamic Type five steps changed tabs to a menu and stacked the two project actions. Full scroll reachability could not be established through the available simulator gesture controls; **large-text acceptance is not complete**. The prior text size was restored.
+
+Captures in `outputs/readiness/`: `native-home-6e751fa.png`, `native-links-empty-6e751fa.png`, `native-share-signin-6e751fa.png`, and `native-project-large-text-top-6e751fa.png`. Earlier populated/empty project captures remain dated evidence. No new authenticated populated Links capture or complete VoiceOver pass is claimed.
+
+Latest native result: `work/native-recovery/native-drawing-scope-tests-2019.xcresult`, extracted `native-drawing-scope-tests-2019.json`, source `339203a`. See `NATIVE-DRAWING-SCOPE-TESTS.json` for the two corrected intermediate build failures and exact source hashes. The existing project was reopened and captured in `native-project-339203a.jpg`. The earlier 19:51 scope-path run remains historical evidence. The earlier revocation-only result remains `native-revocation-tests-1925.xcresult`. The sole warning is the existing test extension adding Equatable to SendAction. Five pre-existing skipped auth tests do not verify external providers.
+
+## Isolated staging and dependencies
+
+The frozen Linux build is exported from backend `91a53d97e47346bfe4c96da2378e0aac12927046`: 224 files, context SHA-256 `d9e8b897e3d225ba2791d9b5e86a3c05f376649cd8598948ba010d54da29380c`. It built successfully and passed the bounded non-root/resources/ImageMagick runtime smoke; `STAGING-IMAGE-91a53d9.json` records index digest `sha256:11b2587710a73da3c7dc3dff0e6e29b4b4a62d2ef698c6eaf7c850b5017128dc`. The same digest is now pushed and selected by the disabled remote container application. App startup/private media remain unverified; see `STAGING-CANDIDATE-DEPLOYMENT.md`. The earlier `a23fe3e` image and runtime smoke remain a baseline, not the newer candidate.
+
+The frozen portal source is `e2507654300592329f018031dd3f66c0feec2aa6`; the built files and hashes are recorded in `STAGING-PORTAL-MANIFEST.json`. The Contractor origin points only to the new isolated candidate. The portal Worker/assets and staging-app.usesnaglist.com binding are now created with enablement false. New working-tree comment UI is deliberately outside that frozen build. Current Python HTTP checks meet Cloudflare1010 and browser navigation is blocked by the client, so real browser acceptance is not claimed.
+
+Both new R2 buckets are private. The candidate explicitly rejects legacy public-URL photo/drawing/report uploads before writes; returning a successful but unreadable URL would be misleading. Canonical native media integration or an authorised compatibility gateway is required before older app compatibility can pass.
+
+A backup/restore rehearsal of the retained synthetic review database matched all **53 table counts and row fingerprints**. The private dump and recovery archives stay local and must not be uploaded to Drive. See `STAGING-BACKUP-RESTORE.json` for the redacted evidence.
+
+The initial adapter npm audit reported one affected sharp→Miniflare→Wrangler dependency chain as three high-severity entries. Wrangler was updated from 4.130.0 to 4.131.1 with a reviewed lockfile; 29 adapter tests and TypeScript still pass, and npm reports zero advisories. This is a tool-dependency audit, not a claim that the Linux image or all release dependencies are vulnerability-free. Sources: [sharp maintainer advisory](https://github.com/lovell/sharp/security/advisories/GHSA-rgj7-g3m4-5g8c), [Cloudflare release](https://github.com/cloudflare/workers-sdk/releases/tag/wrangler@4.131.1).
+
+## Current implementation and work underway
+
+1. **Backend reconstruction:** additive project metadata/date representation and typed immutable assignment history, with permission-checked replay and coverage-aware snapshots/deltas. Committed at `2c4fe4c`; all **64 focused backend tests passed**, zero failures/skips. Not in the frozen `91a53d9` image.
+2. **Portal internal discussion:** snag-level comments, one-level replies, reasoned redaction and retained drafts. Root reviewed and committed at `64894d7`; all 94 portal tests and build passed, also after the v0.12 transport refresh `a4bd706`. Actual rendered evidence remains pending: the browser URL policy rejected the isolated local component preview, so no workaround or D2 pass is claimed.
+3. **Native account separation:** immutable scope/path resolver foundation committed at `ba10346` and verified in Xcode. The coordinator is now included in the native target at `339203a` with 21 passing cases and a detailed live-consumer adoption plan. It does not switch/import any real store or establish complete account isolation.
+4. **R0 activation:** the immutable image is pushed and both Workers are deployed disabled. Complete private storage credentials/secrets, actual migration/readiness, legitimate browser access and real private-media/provider checks. New scoped credential creation is awaiting the requested action-time browser confirmation.
+
+## Newly confirmed drawing integration gaps
+
+Code inspection confirms that native floor-plan imports save under `Documents/FloorPlans`, while `SLDrawing.fileURL`/`thumbnailURL` select `PhotoStorageService` under `Documents/Photos`. The viewer has a separate FloorPlans-first fallback, but sync can skip the imported file. The shared validated read-only resolver is integrated at `339203a`; files/IDs are preserved and 35 fixture cases plus the full app build pass. Actual import/upload/report UI acceptance remains open. This is a confirmed code-path mismatch, not a new production/runtime observation.
+
+At the inspected `2c4fe4c` baseline the backend had no canonical drawing/version/page/annotation graph. **DRA-01 now adds eight drawing source/page/version/pin tables and tested internal transaction services at `9e5d13e433778e8adf1b0767d5d1e6b9fac529ff`.** See [DRA-01-IMPLEMENTATION.md](https://drive.google.com/file/d/1Yv4l2SEqf467d8BHQ3DPpOW28ItzmGSS/view) for the final 25 passing checks and the earlier broader 102-check run, exact hashes and the startup-migration boundary. Real source bytes, PDF processing, private gateways, change-journal/bootstrap projection, Contractor page grants, annotations and native adoption are not implemented by this package. Legacy token-scoped `synced_drawings` remain publication records; native sheet UUIDs and missing original-PDF provenance must be preserved. The current canonical graph still must not advertise drawing coverage. The full remaining contract is `CANONICAL-DRAWING-IMPLEMENTATION-SPEC.md`. No public drawing route or deployed image changed.
+
+Older report JSON also uses different pin field names: native emits `drawingId`/`drawingPinX`/`drawingPinY`, while the backend legacy report struct reads `floorPlanId`/`pinX`/`pinY`. Drawing metadata is not decoded there. Preserve old records and verify explicit aliases as compatibility work; do not claim complete report parity from local floor-plan rendering.
+
+## Required order from here
+
+Finish and verify the isolated candidate; implement safe account-scoped native stores/media and explicit legacy claim/import; complete graph and immutable capture outbox/pull/conflicts; then prove the ordinary native → second manager → scoped PIN Contractor link → evidence → accepted closure → native/fresh-device/report journey. Finish remaining providers, company administration/test billing, durable reports/notifications and D2 in parallel where independent. Only then assemble exact signed iOS/portal release evidence and present the production disposition.
+
+The approved Google Drive brief v1.1 and supplied brand remain controlling. Use `GO-LIVE-PLAN.md` and `INTEGRATION-ACCEPTANCE.md` for the full gate matrix. No whole work package becomes complete merely because one slice or test suite passes.
+
+## Next implementation ownership
+
+The native agent is preparing the concrete staging-only account/store/media runtime adoption, independently reviewed for retained tasks and cross-account reads. This is in progress, not integrated or tested yet. The backend agent is investigating the bounded real-byte drawing pipeline before editing DRA-02. Root owns integration, test harnesses, deployment state and maintained Drive evidence. The already-pending scoped R2 credential confirmation still blocks secret installation/activation; it does not block these local packages.

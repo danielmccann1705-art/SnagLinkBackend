@@ -1,0 +1,27 @@
+{
+  "checkedAt": "2026-09-11T19:01:05.666281+00:00",
+  "sourceCommit": "91a53d97e47346bfe4c96da2378e0aac12927046",
+  "contextSHA256": "d9e8b897e3d225ba2791d9b5e86a3c05f376649cd8598948ba010d54da29380c",
+  "tag": "snaglist-unified-staging:91a53d9",
+  "imageIndexDigest": "sha256:11b2587710a73da3c7dc3dff0e6e29b4b4a62d2ef698c6eaf7c850b5017128dc",
+  "platformDigest": "sha256:2e063826547ce9281b7ece69d36dae3268d988519530faf7314cf1ef884a7053",
+  "configDigest": "sha256:73c5a8aad2b81d7b722412f8b6bebf4e522057a6240946f685ce12993f7aea53",
+  "platform": "linux/amd64",
+  "user": "vapor",
+  "runtimeSmoke": {
+    "result": "passed",
+    "network": "none",
+    "readOnlyRoot": true,
+    "tmpfsLimitMiB": 96,
+    "uid": 1000,
+    "contractorResources": 9,
+    "syntheticConversion": "640x480 single-frame PNG to JPEG; comment stripped"
+  },
+  "imageLog": "staging-evidence/91a53d9-image-build.log",
+  "runtimeLog": "staging-evidence/91a53d9-runtime-smoke.log",
+  "remoteRegistryPushed": true,
+  "serviceDeployed": true,
+  "appDatabaseAndR2Verified": false,
+  "excludesLaterBackendCommit": "2c4fe4c",
+  "deploymentState": "disabled; see STAGING-CANDIDATE-DEPLOYMENT.json"
+}
