@@ -1,0 +1,30 @@
+{
+  "checked_at_utc": "2026-09-11T15:26:52.338368+00:00",
+  "checks": [
+    {
+      "url": "https://usesnaglist.com",
+      "status": "200",
+      "exit_code": 0,
+      "error": ""
+    },
+    {
+      "url": "https://staging-api.usesnaglist.com/health",
+      "status": "200",
+      "exit_code": 0,
+      "error": ""
+    },
+    {
+      "url": "https://api.snaglist.dev/health",
+      "status": "530",
+      "exit_code": 0,
+      "error": ""
+    },
+    {
+      "url": "https://app.usesnaglist.com",
+      "status": "000",
+      "exit_code": 6,
+      "error": "curl: (6) Could not resolve host: app.usesnaglist.com"
+    }
+  ],
+  "scope": "Read-only public endpoints; no tokens or customer records."
+}

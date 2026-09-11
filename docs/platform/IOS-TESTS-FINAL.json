@@ -1,0 +1,33 @@
+{
+  "metrics": {
+    "testsCount": "172",
+    "testsSkippedCount": "5",
+    "totalCoveragePercentage": "0.061409299971391475",
+    "warningCount": "1"
+  },
+  "issues": {
+    "warningSummaries": [
+      {
+        "documentLocationInCreatingWorkspace": {
+          "concreteTypeName": "DVTTextDocumentLocation",
+          "url": "file:///Users/danielmccann/Desktop/Projects/Snaglist/SnagLink/SnaglistTests/MagicLinkSendManagerTests.swift#EndingColumnNumber=0&EndingLineNumber=139&StartingColumnNumber=0&StartingLineNumber=139&Timestamp=810834566.553224"
+        },
+        "issueType": "Swift Compiler Warning",
+        "message": "Extension declares a conformance of imported type 'SendAction' to imported protocol 'Equatable'; this will not behave correctly if the owners of 'Snaglist' introduce this conformance in the future",
+        "producingTarget": "SnaglistTests"
+      }
+    ]
+  },
+  "actions": [
+    {
+      "issues": {},
+      "status": "succeeded",
+      "testsRef": {
+        "id": "0~4WuAMZpVVh-eaGjNGCZF3q9fbv3dpab6D1cGr-CuB-YRG1LE8AG5tag57B5JC6KDgYiK4MTnS9Zae1th-XlQaA==",
+        "targetType": {
+          "name": "ActionTestPlanRunSummaries"
+        }
+      }
+    }
+  ]
+}

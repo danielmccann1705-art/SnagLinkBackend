@@ -1,0 +1,63 @@
+{
+  "recorded_at": "2026-09-11T15:54:39.222008+00:00",
+  "repositories": {
+    "ios": {
+      "path": "/Users/danielmccann/Desktop/Projects/Snaglist/SnagLink",
+      "branch": "feature/unified-platform",
+      "commit": "861b2f0e204996fe9e4c6e8e3ec255c7e581fed6"
+    },
+    "backend": {
+      "path": "/Users/danielmccann/Desktop/Projects/SnagLinkBackend",
+      "branch": "feature/unified-platform",
+      "commit": "1585af134ce5cacc83f3a897e7baee0a88159bd5"
+    },
+    "portal": {
+      "path": "/Users/danielmccann/Documents/Codex/2026-09-06/her/SnaglistPortal",
+      "branch": "feature/unified-portal",
+      "commit": "9c95ff716c61cd15b5b42c5e9d9192a3de952877"
+    }
+  },
+  "ios": {
+    "result": "succeeded",
+    "passed": 167,
+    "failed": 0,
+    "skipped": 5,
+    "total": 172,
+    "scheme": "Snaglist Staging",
+    "device": "iPhone 17 Pro, iOS 26.2",
+    "result_bundle": "/Users/danielmccann/Documents/Codex/2026-09-06/her/work/unified-platform/native-readiness-final.xcresult",
+    "summary": "IOS-TESTS-FINAL.json",
+    "limitations": [
+      "Five historical interactive AuthManager tests remain skipped",
+      "One pre-existing test-only retroactive Equatable conformance warning",
+      "Not a signed device or Release archive; full canonical sync and provider acceptance remain open"
+    ]
+  },
+  "portal": {
+    "result": "succeeded",
+    "passed": 59,
+    "failed": 0,
+    "skipped": 0,
+    "commands": [
+      "npm run build",
+      "npm test"
+    ],
+    "evidence": "Successful fresh baseline tool results in this continuation; portal source unchanged"
+  },
+  "staging_adapter": {
+    "result": "succeeded",
+    "passed": 15,
+    "failed": 0,
+    "skipped": 0,
+    "typescript_check": "passed",
+    "raw_output": "STAGING-ADAPTER-TESTS.txt"
+  },
+  "deployed": false,
+  "pushed_or_merged": false,
+  "evidence_sha256": {
+    "IOS-TESTS-FINAL.json": "86fa80b3bcc36881282798cfa7f3d23f3e4dee861262829e7acf3c6d138f940b",
+    "IOS-RESULT-FINAL-OBJECT.json": "81f9cd765b9a28aa1179b865bf139bd0e3080a6383e056506549f37b3441cee5",
+    "STAGING-ADAPTER-TESTS.txt": "05a2b0ae0a0ab5461ba56df2f079d17d313677c1d94431bae5ffe2692c259a2d",
+    "PUBLIC-SERVICE-CHECKS.json": "02878bebf89bdb35117a32a5b2c4e7950b584d0c8db489cdd20244f6627811ee"
+  }
+}

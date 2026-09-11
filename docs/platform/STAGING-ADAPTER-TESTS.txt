@@ -1,0 +1,27 @@
+
+> test
+> node --test test/*.test.mjs
+
+✔ stage is closed by default (0.538ms)
+✔ missing secrets cannot fall back to ephemeral photo storage (0.563083ms)
+✔ production photo storage and production links are rejected (0.200084ms)
+✔ database must match the selected staging host and require TLS (0.153167ms)
+✔ a trailing media-origin slash cannot create broken double-slash photo URLs (0.160875ms)
+✔ staging refuses unapproved provider credentials and passes only declared settings (0.161667ms)
+✔ staging email can only reach the approved test mailbox (0.130208ms)
+✔ explicit unified staging forwards the required private media, browser and link settings (0.4685ms)
+✔ partial or disabled platform configuration fails closed (0.251917ms)
+✔ staging platform rejects production, local and misleading origins/storage (0.211208ms)
+✔ capability keys are validated without echoing their contents and rotation is explicit (0.362292ms)
+✔ Google stays unavailable unless both distinct staging client IDs are provided (0.192584ms)
+✔ proxy preserves link paths, auth, session cookies and upload bytes (15.122ms)
+✔ missing edge address cannot leave spoofed proxy headers (0.197375ms)
+✔ redirects and secure session cookies survive without caching private links (0.368709ms)
+ℹ tests 15
+ℹ suites 0
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 55.694584

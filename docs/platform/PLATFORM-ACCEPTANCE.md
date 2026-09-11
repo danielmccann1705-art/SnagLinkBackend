@@ -1,5 +1,15 @@
 # Platform acceptance — current candidate, not complete
 
+## Active iOS/portal readiness plan — 11 September 2026
+
+**Seamless app/portal integration is a go-live requirement. The platform is not ready to release.** Dan asked this session to proceed with both surfaces and explicitly confirmed the integration requirement. Follow the [go-live plan](https://drive.google.com/file/d/1S4xOGouhq3bZ4Gd39efn_4Qj8V77EXFe/view) and [integration acceptance contract](https://drive.google.com/file/d/13JPjNdqEZbzaGmbN9j9Rj933FeozSy_n/view). They make the outstanding packages, dependencies and required evidence explicit.
+
+The new [readiness checkpoint](https://drive.google.com/file/d/11K9YfeBLzgbWJgrwYY6rDY0KEingoLE7/view) records native `861b2f0` (server-confirmed personal review, stale-session/unsafe-write retry guards, complete local session restoration, truthful local sync status) and backend adapter `1585af1` (explicit staging portal/Google/private-media/link-key configuration). **iOS: 167 passed, 0 failed, 5 existing skips. Adapter: 15 passed. Portal: fresh build and 59 tests passed, source unchanged.** See the [exact manifest](https://drive.google.com/file/d/1lHgDsehVdeaESeux6aZQyoyJHTOGd7OP/view). No push, merge, deployment or store submission occurred.
+
+**Next:** recoverable legacy device backup and account-partitioned stores/media; full canonical graph/import/outbox/pull with conflict repair; matching Linux/private-R2 staging and manager delegation; then the real two-manager iOS → portal → Contractor link → review → native/fresh-device → report journey. Complete the remaining company admin/workbench, D2, provider/account lifecycle, reports/jobs, test billing and operational/store gates in dependency order. Passing local tests does not close these gaps. The [security/privacy audit](https://drive.google.com/file/d/1NLU-LIjhb0fk7BrjDGWJfivhya7SZVFd/view) remains the dated baseline; its adapter omission is now corrected locally, with real staging still open.
+
+Previous dated checkpoints below remain historical evidence. The domain/mailbox work remains complete as previously recorded; no repeat approval is needed.
+
 ## Current checkpoint — manager Add snag, 11 September 2026
 
 Portal **ae5c7f2** (`feature/unified-portal`) now logs canonical snags from populated and empty projects, preserves drafts across ordinary project navigation and retains register filters. Create and publication are separate confirmed writes with immutable retry IDs and explicit conflict recovery. The exact source passes the production build, contract/type checks and **59 portal tests, zero failures/skips**. Actual browser use and read-only database checks verify two distinct synthetic Open records, the saved deadline and reload. The 320/390px form fits without horizontal overflow; captures use measured dimensions.
