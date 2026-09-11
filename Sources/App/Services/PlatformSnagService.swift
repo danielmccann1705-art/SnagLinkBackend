@@ -163,7 +163,9 @@ struct PlatformSnagService {
             try await VerifiedIdentityService.sql(db).raw("UPDATE link_items SET revoked_at = \(bind: Date()) WHERE snag_id = \(bind: snag.requireID()) AND revoked_at IS NULL").run()
         }
         snag.revision += 1; try await snag.save(on: db)
-        try await VerifiedIdentityService.sql(db).raw("INSERT INTO assignment_history (id, workspace_id, project_id, snag_id, from_contractor_id, to_contractor_id, from_trade_id, to_trade_id, snag_revision, actor_id, created_at) VALUES (\(bind: UUID()), \(bind: workspaceID), \(bind: project.requireID()), \(bind: snag.requireID()), \(bind: previousContractor), \(bind: snag.contractorId), \(bind: previousTrade), \(bind: snag.tradeId), \(bind: snag.revision), \(bind: actorID), \(bind: Date()))").run()
+        let historyRow = try await VerifiedIdentityService.sql(db).raw("INSERT INTO assignment_history (id, workspace_id, project_id, snag_id, from_contractor_id, to_contractor_id, from_trade_id, to_trade_id, snag_revision, actor_id, created_at) VALUES (\(bind: UUID()), \(bind: workspaceID), \(bind: project.requireID()), \(bind: snag.requireID()), \(bind: previousContractor), \(bind: snag.contractorId), \(bind: previousTrade), \(bind: snag.tradeId), \(bind: snag.revision), \(bind: actorID), \(bind: Date())) RETURNING *").first()!
+        let history = try AssignmentHistoryResponse(historyRow)
+        try await PlatformMutationService.change(workspaceID: workspaceID, projectID: project.requireID(), type: "assignmentHistory", entityID: history.id, revision: 1, kind: "created", fields: ["assignment"], payload: history, actorID: actorID, on: db)
         return try await changed(snag, project: project, actorID: actorID, kind: "assigned", fields: Array(command.fields.keys) + ["assignedAt"], on: db)
     }
     static func changed(_ snag: Snag, project: Project, actorID: UUID?, grantID: UUID? = nil, kind: String, fields: [String], on db: Database) async throws -> PlatformSnagResponse {

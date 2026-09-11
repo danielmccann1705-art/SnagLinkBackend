@@ -20,12 +20,15 @@ struct ProjectChangePage: Content {
     let changes: [Change]
     let cursor: String
     let hasMore: Bool
+    /// Bootstrap coverage carried by this cursor, not the current server's wider
+    /// capability. Empty means an older cursor with unknown coverage.
+    var coverage: [String]? = nil
 }
 
 /// Stable register download, with its workspace directory. It is not the complete
 /// native graph bootstrap: drawing/annotation and project organisation graphs follow.
 struct RegisterSyncService {
-    static let coverage = ["project", "snags", "contractors", "trades", "attachedMedia", "completionAttempts", "reviewDecisions", "comments"]
+    static let coverage = ["project", "snags", "contractors", "trades", "attachedMedia", "completionAttempts", "reviewDecisions", "comments", "assignmentHistory", "projectMetadataV2"]
     static func fingerprint(_ project: Project, actorID: UUID, on db: Database) async throws -> String {
         let row = try await VerifiedIdentityService.sql(db).raw("""
             SELECT t.owner_user_id, t.kind, COALESCE(m.revision, 0) AS membership_revision,
@@ -51,7 +54,8 @@ struct RegisterSyncService {
         let attemptCount = try await sql.raw("SELECT count(*) AS n FROM completion_attempts WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
         let decisionCount = try await sql.raw("SELECT count(*) AS n FROM review_decisions WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
         let commentCount = try await sql.raw("SELECT count(*) AS n FROM project_comments WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
-        let total = count + contractorCount + tradeCount + mediaCount + attemptCount + decisionCount + commentCount + 1
+        let assignmentCount = try await sql.raw("SELECT count(*) AS n FROM assignment_history WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
+        let total = count + contractorCount + tradeCount + mediaCount + attemptCount + decisionCount + commentCount + assignmentCount + 1
         guard total <= 10000 else { throw Abort(.payloadTooLarge, reason: "This project needs a background snapshot. No partial download was created", identifier: "snapshot_job_required") }
         // Expired private snapshots can be removed without deleting customer work.
         try await sql.raw("DELETE FROM register_snapshots WHERE actor_id = \(bind: actorID) AND expires_at < \(bind: now)").run()
@@ -103,6 +107,12 @@ struct RegisterSyncService {
             try await item(snapshotID: id, position: position, type: "comment", id: comment.id, value: comment, on: db)
             position += 1
         }
+        let assignments = try await sql.raw("SELECT * FROM assignment_history WHERE project_id = \(bind: projectID) ORDER BY snag_id, snag_revision, id").all()
+        for row in assignments {
+            let assignment = try AssignmentHistoryResponse(row)
+            try await item(snapshotID: id, position: position, type: "assignmentHistory", id: assignment.id, value: assignment, on: db)
+            position += 1
+        }
         return try await page(token: token, offset: 0, projectID: projectID, actorID: actorID, on: db)
     }
     private static func item<T: Encodable>(snapshotID: UUID, position: Int, type: String, id: UUID, value: T, on db: Database) async throws {
@@ -126,18 +136,19 @@ struct RegisterSyncService {
             try RegisterSnapshotPage.Item(type: row.decode(column: "entity_type", as: String.self), id: row.decode(column: "entity_id", as: UUID.self), data: PlatformMutationService.decode(PlatformJSON.self, row.decode(column: "payload_json", as: String.self)))
         }
         let next = offset + items.count < total ? offset + items.count : nil
-        let cursor = next == nil ? try await issueCursor(project: project, actorID: actorID, sequence: snapshot.decode(column: "high_watermark", as: Int64.self), fingerprint: access, on: db) : nil
+        let cursor = next == nil ? try await issueCursor(project: project, actorID: actorID, sequence: snapshot.decode(column: "high_watermark", as: Int64.self), fingerprint: access, coverage: snapshot.decode(column: "coverage", as: [String].self), on: db) : nil
         return try .init(snapshotToken: token, coverage: snapshot.decode(column: "coverage", as: [String].self), items: items, total: total, nextOffset: next, changesCursor: cursor, expiresAt: expiry)
     }
     static func changes(cursor: String, projectID: UUID, actorID: UUID, on db: Database) async throws -> ProjectChangePage {
         guard cursor.count <= 100 else { throw Abort(.badRequest) }
         let sql = try VerifiedIdentityService.sql(db)
         guard let saved = try await sql.raw("SELECT * FROM project_change_cursors WHERE token_hash = \(bind: SHA256Hasher.hash(token: cursor)) AND actor_id = \(bind: actorID) AND project_id = \(bind: projectID)").first() else { throw Abort(.gone, reason: "Start a new project download and retain any unsent edits", identifier: "rebootstrap_required") }
-        let (project, _) = try await authorised(projectID: projectID, actorID: actorID, on: db)
+        let (project, actions) = try await authorised(projectID: projectID, actorID: actorID, on: db)
         guard try saved.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "The sync cursor expired. Download the project again and keep unsent edits", identifier: "rebootstrap_required") }
         let workspaceID = try saved.decode(column: "workspace_id", as: UUID.self), access = try await fingerprint(project, actorID: actorID, on: db)
         guard project.workspaceId == workspaceID, access == (try saved.decode(column: "access_fingerprint", as: String.self)) else { throw Abort(.conflict, reason: "Your project access changed. Download the project again", identifier: "rebootstrap_required") }
         let sequence = try saved.decode(column: "sequence", as: Int64.self)
+        let cursorCoverage = try saved.decode(column: "coverage", as: [String].self)
         try await ProjectCommentService.requireCurrentContent(projectID: projectID, since: sequence, on: db)
         let rows = try await sql.raw("SELECT * FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade'))) AND sequence > \(bind: sequence) ORDER BY sequence LIMIT 101").all()
         // A page targets 100 rows, then includes the remainder of its final
@@ -152,15 +163,23 @@ struct RegisterSyncService {
             selected.append(contentsOf: tail)
         }
         let changes = try selected.map { row in
-            try ProjectChangePage.Change(type: row.decode(column: "entity_type", as: String.self), id: row.decode(column: "entity_id", as: UUID.self), revision: row.decode(column: "revision", as: Int64.self), kind: row.decode(column: "kind", as: String.self), changedFields: row.decode(column: "changed_fields", as: [String].self), data: PlatformMutationService.decode(PlatformJSON.self, row.decode(column: "payload_json", as: String.self)), transactionGroup: row.decode(column: "transaction_group", as: UUID.self))
+            let type = try row.decode(column: "entity_type", as: String.self)
+            var payload = try PlatformMutationService.decode(PlatformJSON.self, row.decode(column: "payload_json", as: String.self))
+            // Shared project events were written by a different actor. Never
+            // project their permissions into this reader's response.
+            if type == "project", case .object(var object) = payload {
+                object["capabilities"] = .array(actions.map(\.rawValue).sorted().map(PlatformJSON.string))
+                payload = .object(object)
+            }
+            return try ProjectChangePage.Change(type: type, id: row.decode(column: "entity_id", as: UUID.self), revision: row.decode(column: "revision", as: Int64.self), kind: row.decode(column: "kind", as: String.self), changedFields: row.decode(column: "changed_fields", as: [String].self), data: payload, transactionGroup: row.decode(column: "transaction_group", as: UUID.self))
         }
         let last = try selected.last.map { try $0.decode(column: "sequence", as: Int64.self) }
         let next: String, hasMore: Bool
         if let last {
-            next = try await issueCursor(project: project, actorID: actorID, sequence: last, fingerprint: access, on: db)
+            next = try await issueCursor(project: project, actorID: actorID, sequence: last, fingerprint: access, coverage: cursorCoverage, on: db)
             hasMore = try await sql.raw("SELECT sequence FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade'))) AND sequence > \(bind: last) LIMIT 1").first() != nil
         } else { next = cursor; hasMore = false }
-        return .init(changes: changes, cursor: next, hasMore: hasMore)
+        return .init(changes: changes, cursor: next, hasMore: hasMore, coverage: cursorCoverage)
     }
 
     private static func authorised(projectID: UUID, actorID: UUID, on db: Database) async throws -> (Project, Set<ProjectAccessPolicy.Action>) {
@@ -174,9 +193,9 @@ struct RegisterSyncService {
             throw Abort(.forbidden, reason: "You no longer have access to this project. Keep unsent work private for recovery", identifier: "project_access_revoked")
         }
     }
-    private static func issueCursor(project: Project, actorID: UUID, sequence: Int64, fingerprint: String, on db: Database) async throws -> String {
+    private static func issueCursor(project: Project, actorID: UUID, sequence: Int64, fingerprint: String, coverage: [String], on db: Database) async throws -> String {
         let token = try SecureTokenGenerator.generate(byteCount: 32)
-        try await VerifiedIdentityService.sql(db).raw("INSERT INTO project_change_cursors (token_hash, actor_id, workspace_id, project_id, sequence, expires_at, access_fingerprint) VALUES (\(bind: SHA256Hasher.hash(token: token)), \(bind: actorID), \(bind: project.workspaceId!), \(bind: project.requireID()), \(bind: sequence), \(bind: Date().addingTimeInterval(7 * 86400)), \(bind: fingerprint))").run()
+        try await VerifiedIdentityService.sql(db).raw("INSERT INTO project_change_cursors (token_hash, actor_id, workspace_id, project_id, sequence, expires_at, access_fingerprint, coverage) VALUES (\(bind: SHA256Hasher.hash(token: token)), \(bind: actorID), \(bind: project.workspaceId!), \(bind: project.requireID()), \(bind: sequence), \(bind: Date().addingTimeInterval(7 * 86400)), \(bind: fingerprint), \(bind: coverage))").run()
         return token
     }
 }

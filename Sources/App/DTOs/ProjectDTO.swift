@@ -18,6 +18,13 @@ struct CreateProjectRequest: Content {
     let longitude: Double?
     let teamId: UUID?
 
+    // Additive v2 parity inputs. Older v1 routes retain their original contract.
+    var customProjectType: String? = nil
+    var startDate: Date? = nil
+    var expectedEndDate: Date? = nil
+    var startOn: String? = nil
+    var expectedEndOn: String? = nil
+
     func validate() throws {
         guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
             throw Abort(.badRequest, reason: "Project name is required")
@@ -66,6 +73,9 @@ struct ProjectResponse: Content {
     let teamId: UUID?
     let createdAt: Date?
     let updatedAt: Date?
+    let customProjectType: String?
+    let startDate: Date?
+    let expectedEndDate: Date?
 
     init(from project: Project) {
         self.id = project.id!
@@ -86,5 +96,8 @@ struct ProjectResponse: Content {
         self.teamId = project.teamId
         self.createdAt = project.createdAt
         self.updatedAt = project.updatedAt
+        self.customProjectType = project.customProjectType
+        self.startDate = project.startDate
+        self.expectedEndDate = project.expectedEndDate
     }
 }

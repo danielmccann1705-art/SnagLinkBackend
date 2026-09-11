@@ -17,6 +17,9 @@ struct PrivateRequestLoggingMiddleware: AsyncMiddleware {
         } catch let conflict as DirectoryConflict {
             response = Response(status: .conflict)
             try response.content.encode(conflict.body)
+        } catch let conflict as ProjectRevisionConflict {
+            response = Response(status: .conflict)
+            try response.content.encode(conflict.body)
         } catch let conflict as RevisionConflict {
             response = Response(status: .conflict)
             try response.content.encode(conflict.body)

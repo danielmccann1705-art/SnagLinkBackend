@@ -74,6 +74,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateContractorGrants())
         app.migrations.add(CreateGoogleIdentity())
         app.migrations.add(CreateProjectDiscoveryAndComments())
+        app.migrations.add(CreateProjectMetadataParity())
 
         try await app.autoMigrate()
     } else {

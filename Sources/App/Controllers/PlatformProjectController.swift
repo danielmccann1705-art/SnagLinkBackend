@@ -6,9 +6,12 @@ struct PlatformProjectResponse: Content {
     let project: ProjectResponse
     let workspaceId: UUID
     let revision: Int64
-    let capabilities: [String]
+    var capabilities: [String]
     let archivedAt: Date?
     let platformManaged: Bool
+    // Optional only for decoding old immutable manifests and receipts. A fresh
+    // projectMetadataV2 snapshot always includes this object, even with nil dates.
+    let canonical: CanonicalProjectValues?
     init(_ project: Project, actions: Set<ProjectAccessPolicy.Action>) throws {
         self.project = ProjectResponse(from: project)
         guard let workspaceID = project.workspaceId else { throw Abort(.conflict, reason: "Project ownership needs reconciliation") }
@@ -17,6 +20,12 @@ struct PlatformProjectResponse: Content {
         self.capabilities = actions.map(\.rawValue).sorted()
         self.archivedAt = project.archivedAt
         self.platformManaged = project.platformManaged
+        self.canonical = CanonicalProjectValues(project)
+    }
+    func withCapabilities(_ actions: Set<ProjectAccessPolicy.Action>) -> Self {
+        var copy = self
+        copy.capabilities = actions.map(\.rawValue).sorted()
+        return copy
     }
 }
 
@@ -28,6 +37,7 @@ struct PlatformProjectController: RouteCollection {
         projects.get(use: list)
         projects.post(use: create)
         projects.get(":projectId", use: get)
+        projects.patch(":projectId", use: edit)
     }
     @Sendable func get(req: Request) async throws -> PlatformProjectResponse {
         guard let raw = req.parameters.get("projectId"), let id = UUID(uuidString: raw) else { throw Abort(.badRequest) }
@@ -35,6 +45,20 @@ struct PlatformProjectController: RouteCollection {
         return try await req.db.transaction { db in
             let (project, actions) = try await ProjectAccessService.require(.read, projectID: id, actorID: actor, on: db)
             return try PlatformProjectResponse(project, actions: actions)
+        }
+    }
+    @Sendable func edit(req: Request) async throws -> PlatformProjectResponse {
+        guard let raw = req.parameters.get("projectId"), let id = UUID(uuidString: raw) else { throw Abort(.badRequest) }
+        let actor = try req.requireAuthenticatedUserId(), body = try req.content.decode(ProjectEditCommand.self)
+        let hash = try PlatformMutationService.requestHash(body, route: "PATCH:/api/v2/projects/\(id)")
+        return try await req.db.transaction { db in
+            try await PlatformMutationService.lock(actorID: actor, mutation: body.mutation, on: db)
+            let (project, actions) = try await ProjectAccessService.require(.assign, projectID: id, actorID: actor, on: db)
+            try PlatformMutationService.requireManaged(project)
+            if let old = try await PlatformMutationService.replay(PlatformProjectResponse.self, actorID: actor, mutation: body.mutation, hash: hash, on: db) { return old.withCapabilities(actions) }
+            let response = try await PlatformProjectMetadataService.edit(body, project: project, actions: actions, actorID: actor, on: db)
+            try await PlatformMutationService.record(response, actorID: actor, workspaceID: project.workspaceId!, mutation: body.mutation, hash: hash, on: db)
+            return response
         }
     }
     @Sendable func list(req: Request) async throws -> Page {
@@ -72,7 +96,12 @@ struct PlatformProjectController: RouteCollection {
             guard let workspace = try await Team.find(body.workspaceId, on: db) else { throw Abort(.notFound) }
             let role = try await WorkspaceAccessService.role(actorID: actor, workspace: workspace, on: db)
             guard ["owner", "admin"].contains(role) else { throw Abort(.forbidden, reason: "Ask a company owner or admin to create this project") }
-            if let replay = try await PlatformMutationService.replay(PlatformProjectResponse.self, actorID: actor, mutation: body.mutation, hash: hash, on: db) { return replay }
+            if let replay = try await PlatformMutationService.replay(PlatformProjectResponse.self, actorID: actor, mutation: body.mutation, hash: hash, on: db) {
+                let (current, actions) = try await ProjectAccessService.require(.read, projectID: id, actorID: actor, on: db)
+                try PlatformMutationService.requireManaged(current)
+                guard current.workspaceId == body.workspaceId else { throw Abort(.conflict, reason: "This project moved. Refresh its current workspace", identifier: "project_scope_changed") }
+                return replay.withCapabilities(actions)
+            }
             try await VerifiedIdentityService.lock("entity:project:" + id.uuidString, on: db)
             if let existing = try await Project.find(id, on: db) {
                 guard existing.workspaceId == body.workspaceId else { throw Abort(.conflict, reason: "The project ID already exists") }
@@ -85,6 +114,7 @@ struct PlatformProjectController: RouteCollection {
                                   isFavorite: input.isFavorite ?? false, latitude: input.latitude, longitude: input.longitude, ownerId: actor)
             project.workspaceId = body.workspaceId
             project.platformManaged = true
+            try await PlatformProjectMetadataService.applyCreate(input, to: project, on: db)
             try await project.save(on: db)
             try await WorkspaceAccessService.activity(workspaceID: body.workspaceId, actorID: actor, action: "project_created", targetID: id, on: db)
             let (created, actions) = try await ProjectAccessService.require(.read, projectID: id, actorID: actor, on: db)

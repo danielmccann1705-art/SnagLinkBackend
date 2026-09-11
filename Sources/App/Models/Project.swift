@@ -31,6 +31,14 @@ final class Project: Model, Content, @unchecked Sendable {
     @OptionalField(key: "project_type")
     var projectType: String?
 
+    @OptionalField(key: "custom_project_type") var customProjectType: String?
+    // Preserve native instants. Calendar intent is explicit, never inferred from
+    // a legacy device's unknown timezone.
+    @OptionalField(key: "start_date") var startDate: Date?
+    @OptionalField(key: "expected_end_date") var expectedEndDate: Date?
+    @OptionalField(key: "start_on") var startOn: String?
+    @OptionalField(key: "expected_end_on") var expectedEndOn: String?
+
     @Field(key: "status")
     var status: String
 
