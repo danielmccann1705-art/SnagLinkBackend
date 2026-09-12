@@ -36,7 +36,9 @@ let package = Package(
                 .target(name: "App"),
                 .product(name: "XCTVapor", package: "vapor"),
             ],
-            path: "Tests/AppTests"
+            path: "Tests/AppTests",
+            // Pure contract tests read these exact bytes from their checkout.
+            exclude: ["Fixtures"]
         ),
     ]
 )
