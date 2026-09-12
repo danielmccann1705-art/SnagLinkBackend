@@ -12627,6 +12627,373 @@
           }
         }
       }
+    },
+    "/api/v2/workspaces/{workspaceId}/import-previews": {
+      "post": {
+        "operationId": "previewLegacyProjectImport",
+        "summary": "Check one selected legacy project without importing it",
+        "description": "Authenticated personal owner or active company owner/admin only; project-only manager access is insufficient. The current account, workspace lifecycle/owner/role/membership revision and explicit API origin are rechecked under transaction locks before any receipt replay. Bounded identity/collision/capability diagnostics only: retains an actor-bound mutation receipt but writes no ownership, project/snag/media/drawing/member records, change sequence or reservation. A successful preview cannot execute import, claim source ownership, acknowledge source media or activate a native queue. Fixed Contractor links and PIN authority are not accepted. No exposed environment is implied: requires explicit IMPORT_PREVIEW_API_ORIGIN matching PLATFORM_ENVIRONMENT (local maps to development), separate from PORTAL_ORIGIN. Native plan generation is currently staging-only. Exact retry requires the same operation/device/body/route workspace; changed or expired facts require a new operation while preserving the old receipt.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Actual explicitly selected workspace/Team UUID, distinct from account UUID even for a personal workspace."
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN required for browser-cookie authentication. The API-origin binding in the body is separate."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "application/json, up to 2 MiB. A strict projection of a newly verified native export/plan, not either full private document.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LegacyImportPreviewCommand"
+              },
+              "example": {
+                "formatVersion": 1,
+                "mutation": {
+                  "operationId": "00000000-0000-4000-8000-000000000001",
+                  "deviceId": "00000000-0000-4000-8000-000000000002"
+                },
+                "expectedActorId": "00000000-0000-4000-8000-000000000003",
+                "expectedWorkspaceKind": "company",
+                "source": {
+                  "archiveId": "00000000-0000-4000-8000-000000000004",
+                  "sourceFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "databaseSHA256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                  "inventorySHA256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                  "selectedProjectId": "00000000-0000-4000-8000-00000000000a",
+                  "exportSHA256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                  "exportByteCount": 4096,
+                  "exportFormatVersion": 1
+                },
+                "destination": {
+                  "environment": "staging",
+                  "apiOrigin": "https://api-staging.example.test"
+                },
+                "recordIds": {
+                  "projects": [
+                    "00000000-0000-4000-8000-00000000000a"
+                  ],
+                  "snags": [
+                    "00000000-0000-4000-8000-00000000000b"
+                  ],
+                  "photos": [
+                    "00000000-0000-4000-8000-00000000000c"
+                  ],
+                  "drawings": [
+                    "00000000-0000-4000-8000-00000000000d"
+                  ],
+                  "contractors": [],
+                  "trades": [],
+                  "folders": [],
+                  "tags": [],
+                  "comments": [],
+                  "statusHistory": [],
+                  "deletionReceipts": []
+                },
+                "requirements": {
+                  "originalPhotoCount": 1,
+                  "thumbnailCount": 1,
+                  "annotationCount": 0,
+                  "coverCount": 0,
+                  "drawingFileCount": 1,
+                  "drawingThumbnailCount": 0,
+                  "attachmentCount": 0,
+                  "deletionMediaCount": 0,
+                  "pinCount": 1,
+                  "localClosureCount": 0,
+                  "legacyReferenceCount": 2,
+                  "sourceFindingCount": 1,
+                  "relationshipFindingCount": 0,
+                  "missingMediaReferenceCount": 1,
+                  "unsafeMediaReferenceCount": 0,
+                  "unresolvedDrawingAssociationCount": 1
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Completed diagnostic after the receipt transaction commits, or unchanged immutable receipt replay. Always preview_only and importExecutable=false; no imported project, reservation, media, consent, membership or sync change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LegacyImportPreviewResponse"
+                },
+                "example": {
+                  "formatVersion": 1,
+                  "state": "preview_only",
+                  "importExecutable": false,
+                  "sourceBytesVerified": false,
+                  "graphContentValidation": "not_performed",
+                  "ownershipConsent": "not_recorded",
+                  "operationId": "00000000-0000-4000-8000-000000000001",
+                  "deviceId": "00000000-0000-4000-8000-000000000002",
+                  "actorId": "00000000-0000-4000-8000-000000000003",
+                  "workspaceId": "00000000-0000-4000-8000-000000000005",
+                  "workspaceKind": "company",
+                  "workspaceRevision": 1,
+                  "actorRole": "owner",
+                  "destination": {
+                    "environment": "staging",
+                    "apiOrigin": "https://api-staging.example.test"
+                  },
+                  "source": {
+                    "archiveId": "00000000-0000-4000-8000-000000000004",
+                    "sourceFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "databaseSHA256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "inventorySHA256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "selectedProjectId": "00000000-0000-4000-8000-00000000000a",
+                    "exportSHA256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "exportByteCount": 4096,
+                    "exportFormatVersion": 1
+                  },
+                  "requestHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                  "previewFingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                  "checks": [
+                    "bounded_identity_manifest",
+                    "current_actor_and_workspace_authority",
+                    "configured_api_binding",
+                    "declared_id_collisions",
+                    "known_import_capability_gaps"
+                  ],
+                  "identities": [
+                    {
+                      "kind": "comments",
+                      "sourceIds": [],
+                      "count": 0,
+                      "namespacesChecked": [
+                        "project_comments"
+                      ],
+                      "scope": "declared_ids_only_not_graph_validation"
+                    },
+                    {
+                      "kind": "contractors",
+                      "sourceIds": [],
+                      "count": 0,
+                      "namespacesChecked": [
+                        "contractors"
+                      ],
+                      "scope": "declared_ids_only_not_graph_validation"
+                    },
+                    {
+                      "kind": "deletionReceipts",
+                      "sourceIds": [],
+                      "count": 0,
+                      "namespacesChecked": [
+                        "snags",
+                        "snag_deletions"
+                      ],
+                      "scope": "declared_ids_only_not_graph_validation"
+                    },
+                    {
+                      "kind": "drawings",
+                      "sourceIds": [
+                        "00000000-0000-4000-8000-00000000000d"
+                      ],
+                      "count": 1,
+                      "namespacesChecked": [
+                        "drawings",
+                        "synced_drawings"
+                      ],
+                      "scope": "declared_ids_only_not_graph_validation"
+                    },
+                    {
+                      "kind": "folders",
+                      "sourceIds": [],
+                      "count": 0,
+                      "namespacesChecked": [],
+                      "scope": "no_canonical_identity_namespace_checked"
+                    },
+                    {
+                      "kind": "photos",
+                      "sourceIds": [
+                        "00000000-0000-4000-8000-00000000000c"
+                      ],
+                      "count": 1,
+                      "namespacesChecked": [
+                        "media_assets",
+                        "synced_photos"
+                      ],
+                      "scope": "declared_ids_only_not_graph_validation"
+                    },
+                    {
+                      "kind": "projects",
+                      "sourceIds": [
+                        "00000000-0000-4000-8000-00000000000a"
+                      ],
+                      "count": 1,
+                      "namespacesChecked": [
+                        "projects"
+                      ],
+                      "scope": "declared_ids_only_not_graph_validation"
+                    },
+                    {
+                      "kind": "snags",
+                      "sourceIds": [
+                        "00000000-0000-4000-8000-00000000000b"
+                      ],
+                      "count": 1,
+                      "namespacesChecked": [
+                        "snags",
+                        "snag_deletions"
+                      ],
+                      "scope": "declared_ids_only_not_graph_validation"
+                    },
+                    {
+                      "kind": "statusHistory",
+                      "sourceIds": [],
+                      "count": 0,
+                      "namespacesChecked": [],
+                      "scope": "no_canonical_identity_namespace_checked"
+                    },
+                    {
+                      "kind": "tags",
+                      "sourceIds": [],
+                      "count": 0,
+                      "namespacesChecked": [],
+                      "scope": "no_canonical_identity_namespace_checked"
+                    },
+                    {
+                      "kind": "trades",
+                      "sourceIds": [],
+                      "count": 0,
+                      "namespacesChecked": [
+                        "trades"
+                      ],
+                      "scope": "declared_ids_only_not_graph_validation"
+                    }
+                  ],
+                  "collisions": [],
+                  "blockers": [
+                    "drawing_source_graph_import_not_implemented",
+                    "graph_content_not_validated",
+                    "historical_reference_mapping_not_implemented",
+                    "import_commit_not_implemented",
+                    "media_source_graph_import_not_implemented",
+                    "ownership_consent_not_recorded",
+                    "source_bytes_not_verified",
+                    "source_findings_require_review"
+                  ],
+                  "createdAt": "2026-09-12T18:30:00Z",
+                  "expiresAt": "2026-09-12T19:00:00Z"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "description": "All successful bearer and browser preview responses use no-store.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed/unsupported JSON manifest, invalid UUID/digest/version/kind/ordering/duplicate IDs, unknown field, contradictory requirement count or noncanonical destination. invalid_import_preview_manifest. Nothing imported.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, invalid, expired or revoked native bearer/browser session, inactive account, or session_required. Contractor grants/PINs do not authenticate this endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Current workspace role is not owner/admin, invalid owner membership, or browser origin_required/csrf_required. No old receipt is returned without current authority.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Selected workspace is missing, inactive or unavailable to the current actor. Does not reveal another workspace or create a personal workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "import_preview_binding_changed: expected actor, environment/API origin or workspace kind mismatch. operation_reused: same actor/operation ID with changed body/device/route workspace. import_preview_stale: same request but expired preview or changed authority/membership/collision/capability facts. Keep the old immutable receipt; use a new operation ID for a fresh preview. No remapping or consent inferred.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "import_preview_too_large (or transport body-limit rejection): JSON exceeds 2 MiB, total declared IDs exceed 10,000, exportByteCount is outside 1...8 MiB, media-role references exceed 50,000, or collision scan exceeds 20,000 matching rows. No truncated successful result/receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "import_preview_unconfigured: missing/invalid IMPORT_PREVIEW_API_ORIGIN or mismatched server identity. Platform authentication/configuration or database unavailable may also fail closed. No Host/BASE_URL/PORTAL_ORIGIN API fallback.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -17021,6 +17388,624 @@
           "mimeType",
           "contentPath"
         ]
+      },
+      "LegacyImportPreviewSHA256": {
+        "type": "string",
+        "minLength": 64,
+        "maxLength": 64,
+        "pattern": "^[a-f0-9]{64}$",
+        "description": "Lowercase SHA-256. Source/export values are opaque client declarations, not proof that the server verified bytes."
+      },
+      "LegacyImportPreviewUUIDList": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "uniqueItems": true,
+        "maxItems": 10000,
+        "description": "Unique stable UUIDs sorted by their canonical UUID string within this kind. UUID case is not a separate identity. Total across all eleven kinds must not exceed 10,000."
+      },
+      "LegacyImportPreviewSource": {
+        "type": "object",
+        "properties": {
+          "archiveId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceFingerprint": {
+            "$ref": "#/components/schemas/LegacyImportPreviewSHA256"
+          },
+          "databaseSHA256": {
+            "$ref": "#/components/schemas/LegacyImportPreviewSHA256"
+          },
+          "inventorySHA256": {
+            "$ref": "#/components/schemas/LegacyImportPreviewSHA256"
+          },
+          "selectedProjectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "exportSHA256": {
+            "$ref": "#/components/schemas/LegacyImportPreviewSHA256"
+          },
+          "exportByteCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8388608
+          },
+          "exportFormatVersion": {
+            "type": "integer",
+            "const": 1
+          }
+        },
+        "required": [
+          "archiveId",
+          "sourceFingerprint",
+          "databaseSHA256",
+          "inventorySHA256",
+          "selectedProjectId",
+          "exportSHA256",
+          "exportByteCount",
+          "exportFormatVersion"
+        ],
+        "additionalProperties": false,
+        "description": "Exact binding copied from the immutable native plan. sourceFingerprint describes pre-copy source DB/WAL/document inventory; databaseSHA256 and inventorySHA256 describe verified copied files locally. exportSHA256 hashes the exact native sorted-key JSON bytes and is not a cross-encoder canonical hash. None is verified by this endpoint. selectedProjectId must equal the sole projects entry."
+      },
+      "LegacyImportPreviewDestination": {
+        "type": "object",
+        "properties": {
+          "environment": {
+            "type": "string",
+            "enum": [
+              "development",
+              "staging",
+              "production"
+            ]
+          },
+          "apiOrigin": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 512
+          }
+        },
+        "required": [
+          "environment",
+          "apiOrigin"
+        ],
+        "additionalProperties": false,
+        "description": "Must exactly match the explicit validated server API identity and local plan. Server configuration uses IMPORT_PREVIEW_API_ORIGIN, never PORTAL_ORIGIN, BASE_URL or request Host. Existing backend local maps explicitly to native development. Canonical origin has lowercase scheme/host, no trailing dot, credentials, path, query, fragment or default port. HTTPS is required except development HTTP on loopback. Aliases/domain moves require a separate scope transition."
+      },
+      "LegacyImportPreviewRecordIds": {
+        "type": "object",
+        "properties": {
+          "projects": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+              }
+            ],
+            "minItems": 1,
+            "maxItems": 1
+          },
+          "snags": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          },
+          "photos": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          },
+          "drawings": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          },
+          "contractors": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          },
+          "trades": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          },
+          "folders": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          },
+          "tags": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          },
+          "comments": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          },
+          "statusHistory": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          },
+          "deletionReceipts": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          }
+        },
+        "required": [
+          "projects",
+          "snags",
+          "photos",
+          "drawings",
+          "contractors",
+          "trades",
+          "folders",
+          "tags",
+          "comments",
+          "statusHistory",
+          "deletionReceipts"
+        ],
+        "additionalProperties": false,
+        "description": "All eleven kinds are required, including empty arrays; exactly one selected project and at most 10,000 IDs in total. Counts are derived from arrays. deletionReceipts contains deleted snag UUIDs, not server tombstone row IDs. No relationships, record text, new IDs or proposed remapping are accepted. Unknown kinds are rejected."
+      },
+      "LegacyImportPreviewRequirements": {
+        "type": "object",
+        "properties": {
+          "originalPhotoCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Recorded original-photo file references, including missing/unsafe references; not upload receipts. At most the number of declared photos."
+          },
+          "thumbnailCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Recorded photo thumbnail references, including missing/unsafe references. At most the number of declared photos."
+          },
+          "annotationCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Recorded annotation file references; their relation to original bytes is not validated. At most the number of declared photos."
+          },
+          "coverCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Recorded project-cover references, including missing/unsafe references; zero or one."
+          },
+          "drawingFileCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Recorded drawing-file references, including missing/unsafe references. At most the number of declared drawings."
+          },
+          "drawingThumbnailCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Recorded drawing-thumbnail references, including missing/unsafe references. At most the number of declared drawings."
+          },
+          "attachmentCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Recorded selected-project comment attachment references, including missing/unsafe references."
+          },
+          "deletionMediaCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Recorded media references on selected-project deletion receipts; never an instruction to delete/upload."
+          },
+          "pinCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Selected snags with any recorded pin coordinate. Include invalid or incomplete coordinates; at most the number of declared snags."
+          },
+          "localClosureCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Selected snags with a recorded local closed/approved state or closure timestamp. Unverified history, never canonical acceptance; at most the number of declared snags."
+          },
+          "legacyReferenceCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Count of original project, snag and deletion-receipt reference values retained by the source. Their text is not sent or reserved."
+          },
+          "sourceFindingCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Sum of source export finding counts, including findings omitted from its bounded detail list. No finding text is sent."
+          },
+          "relationshipFindingCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Sum of archive relationship finding counts. This may concern the wider retained archive; it does not send other project records."
+          },
+          "missingMediaReferenceCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Missing source-media references, counted by role/reference rather than deduplicated file paths."
+          },
+          "unsafeMediaReferenceCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Unsafe source-media references, counted without sending the path text or handle."
+          },
+          "unresolvedDrawingAssociationCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100000,
+            "description": "Count of source drawing/pin provenance or association findings; findings may overlap by record. Does not assert unique drawings or canonical page/version identity."
+          }
+        },
+        "required": [
+          "originalPhotoCount",
+          "thumbnailCount",
+          "annotationCount",
+          "coverCount",
+          "drawingFileCount",
+          "drawingThumbnailCount",
+          "attachmentCount",
+          "deletionMediaCount",
+          "pinCount",
+          "localClosureCount",
+          "legacyReferenceCount",
+          "sourceFindingCount",
+          "relationshipFindingCount",
+          "missingMediaReferenceCount",
+          "unsafeMediaReferenceCount",
+          "unresolvedDrawingAssociationCount"
+        ],
+        "additionalProperties": false,
+        "description": "All count indicators are required and client-declared. Media-role counts (originalPhotoCount, thumbnailCount, annotationCount, coverCount, drawingFileCount, drawingThumbnailCount, attachmentCount, deletionMediaCount) total at most 50,000. Photo/drawing/pin/closure counts must not exceed their declared record kind. Unknown fields, negative/out-of-range or contradictory counts are rejected; counts never establish byte verification, authorship or graph completeness."
+      },
+      "LegacyImportPreviewCommand": {
+        "type": "object",
+        "properties": {
+          "formatVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "mutation": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MutationMetadata"
+              }
+            ],
+            "unevaluatedProperties": false,
+            "description": "Stable operationId also identifies the existing native local plan; no separate clientPlanId. deviceId is an explicit stable device identity and part of retry identity, never an account/guest/workspace substitute."
+          },
+          "expectedActorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedWorkspaceKind": {
+            "type": "string",
+            "enum": [
+              "personal",
+              "company"
+            ]
+          },
+          "source": {
+            "$ref": "#/components/schemas/LegacyImportPreviewSource"
+          },
+          "destination": {
+            "$ref": "#/components/schemas/LegacyImportPreviewDestination"
+          },
+          "recordIds": {
+            "$ref": "#/components/schemas/LegacyImportPreviewRecordIds"
+          },
+          "requirements": {
+            "$ref": "#/components/schemas/LegacyImportPreviewRequirements"
+          }
+        },
+        "required": [
+          "formatVersion",
+          "mutation",
+          "expectedActorId",
+          "expectedWorkspaceKind",
+          "source",
+          "destination",
+          "recordIds",
+          "requirements"
+        ],
+        "additionalProperties": false,
+        "description": "Strict selected-project identity manifest, maximum 2 MiB encoded JSON. Extra fields are rejected at every nested request object. Do not send the complete native plan/export, credentials, Contractor link tokens/PINs, contact/comment text, local paths, media URLs/object keys, consent flags or executable pending requests. Actor and workspace selection must be explicit; this payload is not ownership consent."
+      },
+      "LegacyImportPreviewIdentityCheck": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "projects",
+              "snags",
+              "photos",
+              "drawings",
+              "contractors",
+              "trades",
+              "folders",
+              "tags",
+              "comments",
+              "statusHistory",
+              "deletionReceipts"
+            ]
+          },
+          "sourceIds": {
+            "$ref": "#/components/schemas/LegacyImportPreviewUUIDList"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "namespacesChecked": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "contractors",
+                "drawings",
+                "media_assets",
+                "project_comments",
+                "projects",
+                "snag_deletions",
+                "snags",
+                "synced_drawings",
+                "synced_photos",
+                "trades"
+              ]
+            },
+            "uniqueItems": true,
+            "maxItems": 2
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "no_canonical_identity_namespace_checked",
+              "declared_ids_only_not_graph_validation"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "sourceIds",
+          "count",
+          "namespacesChecked",
+          "scope"
+        ],
+        "additionalProperties": false,
+        "description": "Echoes caller-supplied IDs and derived count plus exact namespace coverage. Folders, tags and local status history currently have no checked canonical identity namespace; their empty namespacesChecked is not a clean graph result. Photo/drawing checks cover only listed current/legacy ID namespaces."
+      },
+      "LegacyImportPreviewCollision": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "projects",
+              "snags",
+              "photos",
+              "drawings",
+              "contractors",
+              "trades",
+              "folders",
+              "tags",
+              "comments",
+              "statusHistory",
+              "deletionReceipts"
+            ]
+          },
+          "sourceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "existing_project_reconciliation_required",
+              "existing_record_reconciliation_required",
+              "identifier_unavailable"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "sourceId",
+          "code"
+        ],
+        "additionalProperties": false,
+        "description": "Returns only a caller-supplied ID and generic outcome. Same-workspace existing projects/records require reconciliation. Foreign or unscoped IDs/tombstones are unavailable without revealing their owner, workspace, names, metadata, paths or tokens. Does not reserve, adopt, merge or remap any record."
+      },
+      "LegacyImportPreviewResponse": {
+        "type": "object",
+        "properties": {
+          "formatVersion": {
+            "type": "integer",
+            "const": 1
+          },
+          "state": {
+            "type": "string",
+            "const": "preview_only"
+          },
+          "importExecutable": {
+            "type": "boolean",
+            "const": false
+          },
+          "sourceBytesVerified": {
+            "type": "boolean",
+            "const": false
+          },
+          "graphContentValidation": {
+            "type": "string",
+            "const": "not_performed"
+          },
+          "ownershipConsent": {
+            "type": "string",
+            "const": "not_recorded"
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "actorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspaceKind": {
+            "type": "string",
+            "enum": [
+              "personal",
+              "company"
+            ]
+          },
+          "workspaceRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "actorRole": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "admin"
+            ]
+          },
+          "destination": {
+            "$ref": "#/components/schemas/LegacyImportPreviewDestination"
+          },
+          "source": {
+            "$ref": "#/components/schemas/LegacyImportPreviewSource"
+          },
+          "requestHash": {
+            "$ref": "#/components/schemas/LegacyImportPreviewSHA256"
+          },
+          "previewFingerprint": {
+            "$ref": "#/components/schemas/LegacyImportPreviewSHA256"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "bounded_identity_manifest",
+                "current_actor_and_workspace_authority",
+                "configured_api_binding",
+                "declared_id_collisions",
+                "known_import_capability_gaps"
+              ]
+            },
+            "const": [
+              "bounded_identity_manifest",
+              "current_actor_and_workspace_authority",
+              "configured_api_binding",
+              "declared_id_collisions",
+              "known_import_capability_gaps"
+            ]
+          },
+          "identities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LegacyImportPreviewIdentityCheck"
+            },
+            "minItems": 11,
+            "maxItems": 11
+          },
+          "collisions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LegacyImportPreviewCollision"
+            },
+            "maxItems": 20000
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "import_commit_not_implemented",
+                "source_bytes_not_verified",
+                "graph_content_not_validated",
+                "ownership_consent_not_recorded",
+                "identifier_reconciliation_required",
+                "historical_reference_mapping_not_implemented",
+                "historical_status_is_not_canonical_acceptance",
+                "historical_comment_provenance_not_implemented",
+                "media_source_graph_import_not_implemented",
+                "drawing_source_graph_import_not_implemented",
+                "organisation_graph_import_not_implemented",
+                "directory_assignment_import_not_implemented",
+                "legacy_deletion_reconciliation_not_implemented",
+                "source_findings_require_review",
+                "source_live_and_deleted_snag_conflict"
+              ]
+            },
+            "uniqueItems": true,
+            "minItems": 4,
+            "maxItems": 15,
+            "allOf": [
+              {
+                "contains": {
+                  "const": "import_commit_not_implemented"
+                }
+              },
+              {
+                "contains": {
+                  "const": "source_bytes_not_verified"
+                }
+              },
+              {
+                "contains": {
+                  "const": "graph_content_not_validated"
+                }
+              },
+              {
+                "contains": {
+                  "const": "ownership_consent_not_recorded"
+                }
+              }
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "formatVersion",
+          "state",
+          "importExecutable",
+          "sourceBytesVerified",
+          "graphContentValidation",
+          "ownershipConsent",
+          "operationId",
+          "deviceId",
+          "actorId",
+          "workspaceId",
+          "workspaceKind",
+          "workspaceRevision",
+          "actorRole",
+          "destination",
+          "source",
+          "requestHash",
+          "previewFingerprint",
+          "checks",
+          "identities",
+          "collisions",
+          "blockers",
+          "createdAt",
+          "expiresAt"
+        ],
+        "additionalProperties": false,
+        "description": "Immutable actor-bound diagnostic receipt, never a bearer capability, import approval or proof of historic ownership. The sole durable write is its mutation_receipts row. Checks re-run current authority/collisions before replay; expiry is 30 minutes after server creation. Source bytes, full graph, consent and import commit remain blockers even for a simple project. Entitlement and full native reconstruction are not established. requestHash covers typed request and route; previewFingerprint covers observed authority/collision/capability facts. Neither is the opaque export hash."
       }
     }
   }
