@@ -1,5 +1,7 @@
 # Snaglist Backend - Development Guide
 
+> **Status correction — 12 September 2026:** The released iOS app is offline; online services and the manager portal are planned together for v2.0. Historical feature descriptions below are not evidence of production availability. See `AGENTS.md` and the [current checkpoint](/Users/danielmccann/Documents/Codex/2026-09-06/her/outputs/release-boundary/NEXT-SESSION.md) for the applicable work package and release gates. Read older sections only when relevant, and verify them against current code.
+
 ## Project Overview
 Snaglist is a SaaS platform for construction snag/punch list management. The backend is built with Vapor 4 (Swift) and PostgreSQL.
 
@@ -7,7 +9,7 @@ Snaglist is a SaaS platform for construction snag/punch list management. The bac
 - **Framework**: Vapor 4.89+ (Swift web framework)
 - **Database**: PostgreSQL with Fluent ORM
 - **Authentication**: JWT tokens
-- **Deployment**: Hetzner VPS (Docker) + Cloudflare
+- **Deployment**: Current online work targets Cloudflare Containers with Neon PostgreSQL. Hetzner is retired historical infrastructure. Consult the current checkpoint and deployment configuration for activation state; target architecture is not proof of a live service.
 
 ## Key Directories
 - `Sources/App/Models/` - Fluent database models
@@ -30,7 +32,9 @@ swift run
 
 ---
 
-# Future Release Phases
+# Historical Roadmap — superseded planning reference
+
+The phases below are archived background, not the authorised current work order or production status. They do not authorise new features, offline queues, gamification or navigation changes.
 
 ## Phase 1: PWA Foundation (Upcoming)
 **Goal:** Enable offline support and installability for the web app.
@@ -118,8 +122,8 @@ swift run
 
 ---
 
-## Current Release: Phase 2 - QR Codes & Short URLs
-**Status:** In Development
+## Historical Phase 2 - QR Codes & Short URLs
+**Status:** Historical implementation notes; verify current routes and release evidence.
 
 ### Features Implemented
 - Slug field for human-friendly short URLs (e.g., `abc-x7k2m3`)

@@ -62,3 +62,15 @@ docker-compose.override.yml
 
 # Private platform originals/renditions are never source or build context.
 PrivateMedia/
+
+# Local agent installations and personal context (portable guidance is AGENTS.md)
+.agent/
+.agents/
+.claude/
+.cursor/
+.mcp.json
+
+# Environment files, including local duplicate copies; retain reviewed examples
+.env*
+!.env.example
+!.env.staging.example
