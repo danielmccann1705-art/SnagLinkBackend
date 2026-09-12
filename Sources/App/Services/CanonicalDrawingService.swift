@@ -28,14 +28,48 @@ struct CanonicalDrawingService {
         guard value.uploaderId == actorID else { throw Abort(.notFound, reason: "Drawing source unavailable") }
     }
     static func allocate(_ command: DrawingAllocateCommand, projectID: UUID, actorID: UUID, on database: Database) async throws -> DrawingAssetRecord {
+        try await allocateConfigured(command, projectID: projectID, actorID: actorID, expectedWorkspaceID: nil, runtime: nil, on: database)
+    }
+    /// Explicit internal opt-in, not a client field or runtime activation. The
+    /// default allocate() contract keeps its historical placeholder profile.
+    static func allocateWithExpectedRuntime(_ command: DrawingAllocateCommand, workspaceID: UUID, projectID: UUID,
+                                            actorID: UUID, runtime: DrawingProcessorRuntimeIdentity,
+                                            on database: Database) async throws -> DrawingAssetRecord {
+        try await allocateConfigured(command, projectID: projectID, actorID: actorID,
+                                     expectedWorkspaceID: workspaceID, runtime: runtime, on: database)
+    }
+    private static func allocateConfigured(_ command: DrawingAllocateCommand, projectID: UUID, actorID: UUID,
+                                           expectedWorkspaceID: UUID?, runtime: DrawingProcessorRuntimeIdentity?,
+                                           on database: Database) async throws -> DrawingAssetRecord {
         guard hashValid(command.sha256), validText(command.originalFilename, maximum: 255),
               !command.originalFilename.contains("/"), !command.originalFilename.contains("\\"),
               ["application/pdf", "image/jpeg", "image/png"].contains(command.mimeType), command.byteCount > 0,
               command.byteCount <= (command.mimeType == "application/pdf" ? 52428800 : 10485760) else { throw invalid() }
-        let hash = try PlatformMutationService.requestHash(command, route: "drawing.allocate:\(projectID)")
+        let selectedProfile = runtime?.processorProfile ?? processorProfile
+        let route: String
+        if let runtime {
+            guard let expectedWorkspaceID else { throw invalid() }
+            route = "drawing.allocate.expected-runtime:\(expectedWorkspaceID):\(projectID):\(runtime.processorProfile):\(runtime.imageDigest)"
+        } else { route = "drawing.allocate:\(projectID)" }
+        let hash = try PlatformMutationService.requestHash(command, route: route)
         return try await database.transaction { db in
             try await PlatformMutationService.lock(actorID: actorID, mutation: command.mutation, on: db)
+            if let expectedWorkspaceID {
+                try await WorkspaceAccessService.lock(expectedWorkspaceID, on: db)
+                // No source/FK protects scope yet. Hold the project row through
+                // the access helper and insert so a concurrent legacy write
+                // cannot turn this explicit selection into implicit adoption.
+                guard let candidate = try await VerifiedIdentityService.sql(db).raw("""
+                    /* drawing-runtime-allocation-scope */
+                    SELECT workspace_id, platform_managed FROM projects WHERE id = \(bind: projectID) FOR UPDATE
+                    """).first(),
+                      try candidate.decode(column: "workspace_id", as: UUID?.self) == expectedWorkspaceID,
+                      try candidate.decode(column: "platform_managed", as: Bool.self) else {
+                    throw Abort(.notFound, reason: "Drawing source unavailable")
+                }
+            }
             let project = try await project(projectID, actorID: actorID, on: db)
+            if let expectedWorkspaceID, project.workspaceId != expectedWorkspaceID { throw conflict("Drawing project scope changed") }
             if let old = try await PlatformMutationService.replay(DrawingAssetRecord.self, actorID: actorID, mutation: command.mutation, hash: hash, on: db) {
                 _ = try await asset(command.id, projectID: projectID, on: db)
                 return old
@@ -47,7 +81,7 @@ struct CanonicalDrawingService {
             let key = "drawings/\(project.workspaceId!)/\(projectID)/\(command.id)/original"
             try await sql.raw("""
                 INSERT INTO drawing_assets(id,workspace_id,project_id,uploader_id,purpose,original_sha256,original_size,original_mime,original_filename,original_key,processor_profile,state,revision,created_at,expires_at)
-                VALUES(\(bind: command.id),\(bind: project.workspaceId!),\(bind: projectID),\(bind: actorID),'drawing_source',\(bind: command.sha256),\(bind: command.byteCount),\(bind: command.mimeType),\(bind: command.originalFilename),\(bind: key),\(bind: processorProfile),'allocated',1,\(bind: now),\(bind: expires))
+                VALUES(\(bind: command.id),\(bind: project.workspaceId!),\(bind: projectID),\(bind: actorID),'drawing_source',\(bind: command.sha256),\(bind: command.byteCount),\(bind: command.mimeType),\(bind: command.originalFilename),\(bind: key),\(bind: selectedProfile),'allocated',1,\(bind: now),\(bind: expires))
                 """).run()
             let result = try await asset(command.id, projectID: projectID, on: db)
             try await PlatformMutationService.record(result, actorID: actorID, workspaceID: project.workspaceId!, mutation: command.mutation, hash: hash, on: db)

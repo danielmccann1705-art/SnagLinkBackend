@@ -76,6 +76,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateProjectDiscoveryAndComments())
         app.migrations.add(CreateProjectMetadataParity())
         app.migrations.add(CreateCanonicalDrawings())
+        app.migrations.add(CreateDrawingOriginalReceipts())
 
         try await app.autoMigrate()
     } else {
