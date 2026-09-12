@@ -141,12 +141,17 @@ final class PrivateMediaTests: XCTestCase {
         _ = try await call(.PUT, path + "/\(asset.id)/content", member, bytes: Self.png)
         let hidden = try await call(.GET, path + "/\(asset.id)/content", owner)
         XCTAssertEqual(hidden.status, .notFound)
+        let hiddenOriginal = try await call(.GET, path + "/\(asset.id)/original", owner)
+        XCTAssertEqual(hiddenOriginal.status, .notFound)
         let hijack = try await call(.POST, path + "/\(asset.id)/attach", owner, body: ["mutation": meta(), "expectedRevision": 1])
         XCTAssertEqual(hijack.status, .notFound)
         let attach = try await call(.POST, path + "/\(asset.id)/attach", member, body: ["mutation": meta(), "expectedRevision": 1])
         XCTAssertEqual(attach.status, .ok)
         let shared = try await call(.GET, path + "/\(asset.id)/content", owner)
         XCTAssertEqual(shared.status, .ok)
+        let sharedOriginal = try await call(.GET, path + "/\(asset.id)/original", owner)
+        XCTAssertEqual(sharedOriginal.status, .ok)
+        XCTAssertEqual(Data(buffer: sharedOriginal.body), Self.png)
         try await app.db.transaction { db in try await WorkspaceAccessService.changeMember(workspaceID: project.workspaceId, targetID: member.requireID(), newRole: nil, expectedRevision: 1, actorID: owner.requireID(), on: db) }
         for method in [HTTPMethod.GET, .PUT] {
             let denied = try await call(method, path + "/\(asset.id)/content", member, bytes: method == .PUT ? Self.png : nil)
@@ -154,6 +159,8 @@ final class PrivateMediaTests: XCTestCase {
         }
         let replay = try await call(.POST, path, member, body: command)
         XCTAssertEqual(replay.status, .notFound)
+        let removedOriginal = try await call(.GET, path + "/\(asset.id)/original", member)
+        XCTAssertEqual(removedOriginal.status, .notFound)
     }
     func testCrossScopeReferencesAndAnonymousAccessCannotUsePrivateMedia() async throws {
         let owner = try await user(), stranger = try await user(), project = try await project(owner), other = try await self.project(stranger)
@@ -164,6 +171,12 @@ final class PrivateMediaTests: XCTestCase {
         XCTAssertEqual(anonymous.status, .unauthorized)
         let strangerRead = try await call(.GET, path + "/\(asset.id)/content", stranger)
         XCTAssertEqual(strangerRead.status, .notFound)
+        let anonymousOriginal = try await call(.GET, path + "/\(asset.id)/original", nil)
+        XCTAssertEqual(anonymousOriginal.status, .unauthorized)
+        let strangerOriginal = try await call(.GET, path + "/\(asset.id)/original", stranger)
+        XCTAssertEqual(strangerOriginal.status, .notFound)
+        let foreignOriginal = try await call(.GET, self.path(other, otherSnag) + "/\(asset.id)/original", stranger)
+        XCTAssertEqual(foreignOriginal.status, .notFound)
         let substituted = try await call(.POST, self.path(other, otherSnag) + "/\(asset.id)/attach", stranger, body: ["mutation": meta(), "expectedRevision": 1])
         XCTAssertEqual(substituted.status, .notFound)
         do {
@@ -194,5 +207,78 @@ final class PrivateMediaTests: XCTestCase {
         XCTAssertEqual(archive.status, .ok)
         let lateUpload = try await call(.PUT, path + "/\(asset.id)/content", owner, bytes: Self.png)
         XCTAssertEqual(lateUpload.status, .gone)
+    }
+
+    func testManagerDescriptorsVerifyBothOriginalAndProcessedBytesAndDecodeOlderReceipts() async throws {
+        let owner = try await user(), project = try await project(owner), snag = try await snag(owner, project), path = path(project, snag)
+        let asset = try await allocate(owner, path, command(snag))
+        XCTAssertNil(asset.original); XCTAssertNil(asset.processed)
+        let unready = try await call(.GET, path + "/\(asset.id)/original", owner)
+        XCTAssertEqual(unready.status, .notFound)
+        let uploaded = try await call(.PUT, path + "/\(asset.id)/content", owner, bytes: Self.png)
+        let ready = try uploaded.content.decode(MediaAssetResponse.self)
+        let original = try XCTUnwrap(ready.original), processed = try XCTUnwrap(ready.processed)
+        XCTAssertEqual(original.contentPath, "/" + path + "/\(asset.id)/original")
+        XCTAssertEqual(processed.contentPath, ready.contentPath)
+        XCTAssertEqual(original.mimeType, "image/png"); XCTAssertEqual(processed.mimeType, "image/jpeg")
+        XCTAssertEqual(original.sha256, ready.originalSHA256); XCTAssertEqual(original.byteCount, ready.byteCount)
+        for descriptor in [original, processed] {
+            let response = try await call(.GET, descriptor.contentPath, owner)
+            XCTAssertEqual(response.status, .ok, response.body.string)
+            let bytes = Data(buffer: response.body)
+            XCTAssertEqual(PrivateImageProcessor.digest(bytes), descriptor.sha256)
+            XCTAssertEqual(bytes.count, descriptor.byteCount)
+            XCTAssertEqual(response.headers.contentType?.description, descriptor.mimeType)
+            XCTAssertTrue(response.headers[.cacheControl].contains("no-store"))
+            XCTAssertEqual(response.headers.first(name: "Referrer-Policy"), "no-referrer")
+            XCTAssertEqual(response.headers.first(name: "X-Content-Type-Options"), "nosniff")
+            if descriptor.mimeType == "image/png" { XCTAssertEqual(bytes, Self.png) }
+            else { XCTAssertNotEqual(bytes, Self.png); XCTAssertFalse(response.body.string.contains("PRIVATE_LOCATION_TEST_MARKER")) }
+        }
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(buffer: uploaded.body)) as? [String: Any])
+        legacy.removeValue(forKey: "original"); legacy.removeValue(forKey: "processed")
+        let old = try PlatformMutationService.decode(MediaAssetResponse.self, String(decoding: JSONSerialization.data(withJSONObject: legacy), as: UTF8.self))
+        XCTAssertEqual(old.id, ready.id); XCTAssertEqual(old.contentPath, ready.contentPath)
+        XCTAssertNil(old.original); XCTAssertNil(old.processed)
+        let attach = try await call(.POST, path + "/\(asset.id)/attach", owner, body: ["mutation": meta(), "expectedRevision": snag.revision])
+        XCTAssertEqual(attach.status, .ok)
+        let snapshot = try await app.db.transaction { db in try await RegisterSyncService.create(projectID: project.project.id, actorID: owner.requireID(), on: db) }
+        let item = try XCTUnwrap(snapshot.items.first { $0.type == "media" && $0.id == asset.id })
+        let snapshotMedia = try PlatformMutationService.decode(MediaAssetResponse.self, PlatformMutationService.encode(item.data))
+        XCTAssertEqual(snapshotMedia.original?.sha256, original.sha256)
+        XCTAssertEqual(snapshotMedia.processed?.sha256, processed.sha256)
+        XCTAssertFalse(uploaded.body.string.contains("original_key")); XCTAssertFalse(uploaded.body.string.contains("rendition_key"))
+    }
+
+    func testOriginalDownloadRejectsStoredByteCorruptionAndDeclaredSizeMismatch() async throws {
+        let owner = try await user(), project = try await project(owner), snag = try await snag(owner, project), path = path(project, snag)
+        let asset = try await allocate(owner, path, command(snag))
+        _ = try await call(.PUT, path + "/\(asset.id)/content", owner, bytes: Self.png)
+        let row = try await PrivateMediaService.row(asset.id, snagID: snag.snag.id, projectID: project.project.id, on: app.db)
+        let key = try row.decode(column: "original_key", as: String.self)
+        var corrupt = Self.png; corrupt[corrupt.count - 1] ^= 1
+        try await StorageService.uploadPrivate(corrupt, key: key, mime: "image/png", app: app)
+        let denied = try await call(.GET, path + "/\(asset.id)/original", owner)
+        XCTAssertEqual(denied.status, .serviceUnavailable); XCTAssertTrue(denied.body.string.contains("media_unavailable"))
+        try await StorageService.uploadPrivate(Self.png, key: key, mime: "image/png", app: app)
+        try await VerifiedIdentityService.sql(app.db).raw("UPDATE media_assets SET original_size = original_size + 1 WHERE id = \(bind: asset.id)").run()
+        let wrongSize = try await call(.GET, path + "/\(asset.id)/original", owner)
+        XCTAssertEqual(wrongSize.status, .serviceUnavailable)
+        let processed = try await call(.GET, path + "/\(asset.id)/content", owner)
+        XCTAssertEqual(processed.status, .ok, "An unavailable original does not replace the separate processed bytes")
+    }
+
+    func testIncompleteReadyMetadataRequiresRepairButPreservesOriginalRecoveryAccess() async throws {
+        let owner = try await user(), project = try await project(owner), snag = try await snag(owner, project), path = path(project, snag)
+        let asset = try await allocate(owner, path, command(snag))
+        _ = try await call(.PUT, path + "/\(asset.id)/content", owner, bytes: Self.png)
+        try await VerifiedIdentityService.sql(app.db).raw("UPDATE media_assets SET rendition_sha256 = 'historical-unavailable' WHERE id = \(bind: asset.id)").run()
+        for suffix in ["", "/content"] {
+            let response = try await call(.GET, path + "/\(asset.id)" + suffix, owner)
+            XCTAssertEqual(response.status, .serviceUnavailable)
+            XCTAssertTrue(response.body.string.contains("media_metadata_unavailable"))
+        }
+        let original = try await call(.GET, path + "/\(asset.id)/original", owner)
+        XCTAssertEqual(original.status, .ok); XCTAssertEqual(Data(buffer: original.body), Self.png)
     }
 }

@@ -15,6 +15,7 @@ struct PrivateMediaController: RouteCollection {
         media.get(":assetId", use: get)
         media.on(.PUT, ":assetId", "content", body: .collect(maxSize: "10mb"), use: upload)
         media.get(":assetId", "content", use: download)
+        media.get(":assetId", "original", use: downloadOriginal)
         media.post(":assetId", "attach", use: attach)
     }
     private func id(_ key: String, _ req: Request) throws -> UUID {
@@ -130,18 +131,33 @@ struct PrivateMediaController: RouteCollection {
         }
     }
     @Sendable func download(req: Request) async throws -> Response {
+        try await download(req: req, original: false)
+    }
+    @Sendable func downloadOriginal(req: Request) async throws -> Response {
+        try await download(req: req, original: true)
+    }
+    /// Originals remain behind manager authentication. Contractor routes continue
+    /// to expose only their selected processed evidence through their own policy.
+    @Sendable private func download(req: Request, original: Bool) async throws -> Response {
         let projectID = try id("projectId", req), snagID = try id("snagId", req), assetID = try id("assetId", req), actorID = try req.requireAuthenticatedUserId()
-        let target: (String, String) = try await req.db.transaction { db in
+        let target: (key: String, sha256: String, size: Int, mime: String) = try await req.db.transaction { db in
             let (project, _) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
             try PlatformMutationService.requireManaged(project)
             let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: projectID, on: db)
             try PrivateMediaService.requireVisible(row, actorID: actorID)
-            return try (row.decode(column: "rendition_key", as: String.self), row.decode(column: "rendition_sha256", as: String.self))
+            let prefix = original ? "original" : "rendition"
+            guard let sha = try row.decode(column: prefix + "_sha256", as: String?.self),
+                  sha.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+                  let size = try row.decode(column: prefix + "_size", as: Int?.self), size > 0 else {
+                throw Abort(.serviceUnavailable, reason: "Photo verification details are unavailable. This photo needs repair before it can finish syncing", identifier: "media_metadata_unavailable")
+            }
+            return try (row.decode(column: prefix + "_key", as: String.self), sha, size,
+                        original ? row.decode(column: "original_mime", as: String.self) : "image/jpeg")
         }
         let data: Data
-        do { data = try await StorageService.downloadPrivate(key: target.0, app: req.application) }
+        do { data = try await StorageService.downloadPrivate(key: target.key, app: req.application) }
         catch { throw Abort(.serviceUnavailable, reason: "This photo is temporarily unavailable. Try again", identifier: "media_unavailable") }
-        guard PrivateImageProcessor.digest(data) == target.1 else { throw Abort(.serviceUnavailable, reason: "Photo integrity check failed", identifier: "media_unavailable") }
+        guard data.count == target.size, PrivateImageProcessor.digest(data) == target.sha256 else { throw Abort(.serviceUnavailable, reason: "Photo integrity check failed", identifier: "media_unavailable") }
         // No long-lived signed URL. Check again after fetching bytes so a removed
         // member cannot complete a slow download after its access has been revoked.
         try await req.db.transaction { db in
@@ -149,6 +165,7 @@ struct PrivateMediaController: RouteCollection {
             try PlatformMutationService.requireManaged(project)
             try await PrivateMediaService.requireVisible(PrivateMediaService.row(assetID, snagID: snagID, projectID: projectID, on: db), actorID: actorID)
         }
-        return Response(status: .ok, headers: ["Content-Type": "image/jpeg", "Cache-Control": "private, no-store", "Vary": "Cookie, Authorization", "X-Content-Type-Options": "nosniff", "Content-Disposition": "inline; filename=snag-photo.jpg", "Referrer-Policy": "no-referrer"], body: .init(data: data))
+        let filename = original ? "snag-photo-original." + (target.mime == "image/png" ? "png" : "jpg") : "snag-photo.jpg"
+        return Response(status: .ok, headers: ["Content-Type": target.mime, "Cache-Control": "private, no-store", "Vary": "Cookie, Authorization", "X-Content-Type-Options": "nosniff", "Content-Disposition": "inline; filename=\(filename)", "Referrer-Policy": "no-referrer"], body: .init(data: data))
     }
 }

@@ -170,6 +170,30 @@ final class ContractorGrantTests: XCTestCase {
         let expiredSession = try await call(.GET, root, nil, cookie: cookie); XCTAssertEqual(expiredSession.status, .forbidden)
         XCTAssertFalse(read.body.string.contains(project.workspaceId.uuidString)); XCTAssertFalse(read.body.string.contains("ownerId"))
     }
+    func testVerifiedContractorPINAndGrantTokenCannotReadManagerOriginals() async throws {
+        let (_, project, snag, _, token, photo) = try await fixture(pin: "618294", photo: true)
+        let asset = try XCTUnwrap(photo), cookie = try await verify(token, pin: "618294")
+        let contractorMedia = "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media/\(asset)"
+        let selected = try await call(.GET, contractorMedia + "/content", nil, cookie: cookie)
+        XCTAssertEqual(selected.status, .ok); XCTAssertEqual(selected.headers.contentType?.description, "image/jpeg")
+        XCTAssertFalse(selected.body.string.contains("PRIVATE_LOCATION_TEST_MARKER"))
+        let nonexistent = try await call(.GET, contractorMedia + "/original", nil, cookie: cookie)
+        XCTAssertEqual(nonexistent.status, .notFound)
+        let managerOriginal = path(project, snag) + "/\(asset)/original"
+        let pinOnly = try await call(.GET, managerOriginal, nil, cookie: cookie)
+        XCTAssertEqual(pinOnly.status, .unauthorized)
+        try await app.test(.GET, managerOriginal, beforeRequest: { req in
+            req.headers.bearerAuthorization = .init(token: token)
+            req.headers.replaceOrAdd(name: .cookie, value: cookie)
+            req.headers.replaceOrAdd(name: "X-Snaglist-Contractor", value: "1")
+        }, afterResponse: { response async in
+            XCTAssertEqual(response.status, .unauthorized)
+            XCTAssertFalse(response.body.string.contains("PRIVATE_LOCATION_TEST_MARKER"))
+        })
+        let page = try await call(.GET, "api/v2/contractor/\(token)", nil, cookie: cookie)
+        XCTAssertEqual(page.status, .ok)
+        XCTAssertFalse(page.body.string.contains("/original")); XCTAssertFalse(page.body.string.contains("originalSHA256"))
+    }
     func testContractorSubmitIsHonestAndAnotherManagerAcceptsWithoutDirectClosure() async throws {
         let (owner, project, snag, activation, token, _) = try await fixture()
         let reviewer = try await user(); try await join(reviewer, owner: owner, project: project, role: "manager")

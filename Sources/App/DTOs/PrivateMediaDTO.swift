@@ -12,6 +12,15 @@ struct MediaAllocateCommand: Content {
     let mimeType: String
 }
 
+/// Exact bytes returned by one authenticated manager gateway. No storage key or
+/// reusable object URL crosses this contract.
+struct MediaRenditionDescriptor: Content {
+    let sha256: String
+    let byteCount: Int
+    let mimeType: String
+    let contentPath: String
+}
+
 struct MediaAssetResponse: Content {
     let id: UUID
     let projectId: UUID
@@ -30,6 +39,11 @@ struct MediaAssetResponse: Content {
     let attachedAt: Date?
     /// Relative, authenticated gateway. Never an R2 URL or token.
     let contentPath: String?
+    /// Optional for old immutable receipts/snapshots and assets not yet ready.
+    /// Fresh ready responses require both descriptors. Existing contentPath
+    /// remains the processed JPEG route for older clients.
+    let original: MediaRenditionDescriptor?
+    let processed: MediaRenditionDescriptor?
 
     init(_ row: SQLRow) throws {
         id = try row.decode(column: "id", as: UUID.self)
@@ -48,5 +62,18 @@ struct MediaAssetResponse: Content {
         expiresAt = try row.decode(column: "expires_at", as: Date.self)
         attachedAt = try row.decode(column: "attached_at", as: Date?.self)
         contentPath = state == "ready" ? "/api/v2/projects/\(projectId)/snags/\(snagId)/media/\(id)/content" : nil
+        if let contentPath {
+            guard let sha = try row.decode(column: "rendition_sha256", as: String?.self),
+                  sha.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+                  let size = try row.decode(column: "rendition_size", as: Int?.self), size > 0 else {
+                throw Abort(.serviceUnavailable, reason: "Photo verification details are unavailable. The original has been retained; this photo needs repair before it can finish syncing", identifier: "media_metadata_unavailable")
+            }
+            original = .init(sha256: originalSHA256, byteCount: byteCount, mimeType: mimeType,
+                             contentPath: "/api/v2/projects/\(projectId)/snags/\(snagId)/media/\(id)/original")
+            processed = .init(sha256: sha, byteCount: size, mimeType: "image/jpeg", contentPath: contentPath)
+        } else {
+            original = nil
+            processed = nil
+        }
     }
 }

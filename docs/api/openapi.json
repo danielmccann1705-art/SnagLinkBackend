@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Snaglist implemented platform API",
-    "version": "0.12.0-candidate",
+    "version": "0.12.1-candidate",
     "description": "Implemented platform candidate, not production readiness or a complete unified platform. Adds nonce-bound Google sign-in exchanges for web and iOS, secure browser sessions and explicit recent-account linking. Existing company administration, fixed Contractor links, PIN/private evidence and manager acceptance retain their recorded evidence. Full native sync, provider UI acceptance, company branding/seats/billing, durable jobs, private R2/Linux staging and full design/integration gates remain incomplete. Adds actor-bound immutable project discovery and normalised internal comments in register snapshots/deltas; full native graph remains incomplete."
   },
   "servers": [
@@ -12447,6 +12447,186 @@
           }
         }
       }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/media/{assetId}/original": {
+      "get": {
+        "operationId": "getManagerMediaOriginal",
+        "summary": "Read the exact private original photo (authenticated project reader)",
+        "description": "Returns unchanged uploaded JPEG/PNG bytes after current project read and asset visibility checks, repeated after storage fetch. Before attachment only the uploader can read. Contractor grant tokens and PIN sessions do not authorise this route. Original image metadata may be retained. Compare both byte count and SHA-256 with the original descriptor; no public storage URL or key is returned. No range support.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "assetId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact original bytes, no-store; MIME matches the original descriptor.",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SnagRevisionConflict"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Original bytes unavailable or checksum/size verification failed (media_unavailable); required metadata absent or invalid (media_metadata_unavailable). Retain local originals and do not mark sync complete.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Image exceeds 10 MB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported or mismatched image signature",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Checksum, image decoding or dimension validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -14605,6 +14785,22 @@
           "contentPath": {
             "type": "string",
             "description": "Relative authenticated JPEG gateway, absent before processing. Never a public object URL."
+          },
+          "original": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MediaRenditionDescriptor"
+              }
+            ],
+            "description": "Exact original upload, including any retained image metadata. Present together in fresh ready responses; absent before readiness and in older immutable receipts/snapshots. Missing descriptors require refetch, not inferred byte parity."
+          },
+          "processed": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MediaRenditionDescriptor"
+              }
+            ],
+            "description": "Processed JPEG returned by existing contentPath. Present together in fresh ready responses; absent before readiness and in older immutable receipts/snapshots. Missing descriptors require refetch, not inferred byte parity."
           }
         },
         "required": [
@@ -14619,7 +14815,8 @@
           "mimeType",
           "createdAt",
           "expiresAt"
-        ]
+        ],
+        "description": "Manager media metadata. Fresh ready rows require valid original/processed descriptors; incomplete stored verification metadata returns 503 media_metadata_unavailable instead of claiming successful reconstruction. Previously encoded receipts/snapshots remain decodable with optional descriptors. No complete-graph coverage is added."
       },
       "MediaAllocateCommand": {
         "type": "object",
@@ -16793,6 +16990,37 @@
           "createdAt"
         ],
         "description": "Immutable normalised assignment record, snapshot/delta entity type assignmentHistory. Event revision 1; snagRevision is the revision stored at assignment time, including old rows. Historical IDs may refer to retired or transferred directory entries. No names or verified identities are fabricated. No mutation endpoint."
+      },
+      "MediaRenditionDescriptor": {
+        "type": "object",
+        "description": "Verification descriptor for exact bytes at an authenticated manager gateway. Never an object-store key, public URL or contractor grant.",
+        "properties": {
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "byteCount": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "mimeType": {
+            "type": "string",
+            "enum": [
+              "image/jpeg",
+              "image/png"
+            ]
+          },
+          "contentPath": {
+            "type": "string",
+            "description": "Relative manager route; requires current project and asset visibility on every read."
+          }
+        },
+        "required": [
+          "sha256",
+          "byteCount",
+          "mimeType",
+          "contentPath"
+        ]
       }
     }
   }
