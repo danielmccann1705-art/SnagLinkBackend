@@ -30,5 +30,12 @@ export async function portalResponse(request, env) {
   if (!['GET','HEAD'].includes(request.method)) {
     return privateResponse(new Response('Method not allowed.', {status:405, headers:{Allow:'GET, HEAD'}}));
   }
-  return privateResponse(await env.ASSETS.fetch(request));
+  const response = privateResponse(await env.ASSETS.fetch(request));
+  if (response.ok && response.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() === 'text/html') {
+    // Google Identity Services must receive the site's registered origin.
+    // strict-origin never discloses a route, query, fragment or token, even to
+    // same-origin resources. API/Contractor/error responses stay no-referrer.
+    response.headers.set('Referrer-Policy', 'strict-origin');
+  }
+  return response;
 }

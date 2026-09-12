@@ -71,3 +71,25 @@ test('backend network failure is explicit, redacted and never retries a write',a
   assert.equal(response.status,503);
   assert.doesNotMatch(await response.text(),/synthetic-bearer/);
 });
+
+test('successful portal HTML supplies only the origin required by Google, including token-bearing SPA navigation',async()=>{
+  const htmlEnv={...env(),ASSETS:{fetch:async()=>new Response('<!doctype html><title>Snaglist</title>',
+    {headers:{'Content-Type':'text/html; charset=utf-8'}})}};
+  for(const path of ['/','/sign-in/verify?token=synthetic','/account/verify-email?token=synthetic','/projects/synthetic']) {
+    const response=await portalResponse(new Request(portalOrigin+path),htmlEnv);
+    assert.equal(response.headers.get('Referrer-Policy'),'strict-origin');
+    assert.equal(response.headers.get('Cache-Control'),'no-store');
+    assert.equal(response.headers.get('X-Robots-Tag'),'noindex, nofollow');
+  }
+});
+
+test('API, asset errors, script resources and Contractor paths retain no-referrer',async()=>{
+  const htmlEnv={...env(async()=>new Response('private API',{headers:{'Content-Type':'text/html'}})),
+    ASSETS:{fetch:async request=>new Response('asset',{status:request.url.includes('missing')?404:200,
+      headers:{'Content-Type':request.url.endsWith('.js')?'text/javascript':'text/html'}})}};
+  for(const path of ['/api/v2/auth/session','/health','/m/c2_synthetic','/missing','/assets/index.js']) {
+    const response=await portalResponse(new Request(portalOrigin+path),htmlEnv);
+    assert.equal(response.headers.get('Referrer-Policy'),'no-referrer',path);
+    assert.equal(response.headers.get('Cache-Control'),'no-store',path);
+  }
+});
