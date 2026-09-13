@@ -136,6 +136,12 @@ final class StagedLegacyImportTests: XCTestCase {
         await rejected(.gone) { _ = try await StagedLegacyImportService.loadVerifiedGraph(scope, actor: actor, binding: self.binding, on: self.app.db) }
         let records = try await count("staged_legacy_import_records", session: command.sessionId); XCTAssertEqual(records, 16)
         let actions = try await count("staged_legacy_import_actions", session: command.sessionId); XCTAssertEqual(actions, 2)
+        // The same source can be prepared again after a stop; the stopped session stays retained, and only one open one exists.
+        let again = try changed(command) { body in body["sessionId"] = UUID().uuidString; body["mutation"] = ["deviceId": command.mutation.deviceId.uuidString, "operationId": UUID().uuidString] }
+        let fresh = try await create(again, actor, workspace); XCTAssertEqual(fresh.state, "staged_incomplete"); XCTAssertNotEqual(fresh.sessionId, command.sessionId)
+        let third = try changed(command) { body in body["sessionId"] = UUID().uuidString; body["mutation"] = ["deviceId": command.mutation.deviceId.uuidString, "operationId": UUID().uuidString] }
+        await rejected(.conflict) { _ = try await self.create(third, actor, workspace) }
+        let retained = try await count("staged_legacy_import_records", session: command.sessionId); XCTAssertEqual(retained, 16)
     }
 
     func testOtherAccountDeviceAPISourceAndAuthGenerationCannotReadOrResume() async throws {

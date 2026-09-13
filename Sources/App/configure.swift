@@ -81,6 +81,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateStagedImportOriginalReceipts())
         app.migrations.add(CreateLegacyCanonicalProjections())
         app.migrations.add(CreateLegacyImportPublication())
+        app.migrations.add(RelaxStagedLegacyImportSourceUniqueness())
 
         try await app.autoMigrate()
     } else {

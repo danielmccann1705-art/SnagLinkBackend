@@ -64,7 +64,8 @@ struct StagedLegacyImportService {
                 return receipt // An aborted first write stays aborted, never reactivated.
             }
             let sql = try VerifiedIdentityService.sql(db)
-            guard try await sql.raw("SELECT id FROM staged_legacy_imports WHERE id = \(bind: command.sessionId) OR (actor_id = \(bind: actor.id) AND environment = \(bind: binding.environment) AND api_origin = \(bind: binding.apiOrigin) AND source_fingerprint = \(bind: command.sourceFingerprint) AND source_project_id = \(bind: command.selectedProjectId)) LIMIT 1").first() == nil else { throw conflict() }
+            // A stopped preparation stays retained but no longer claims the source.
+            guard try await sql.raw("SELECT id FROM staged_legacy_imports WHERE id = \(bind: command.sessionId) OR (actor_id = \(bind: actor.id) AND environment = \(bind: binding.environment) AND api_origin = \(bind: binding.apiOrigin) AND source_fingerprint = \(bind: command.sourceFingerprint) AND source_project_id = \(bind: command.selectedProjectId) AND state <> 'aborted') LIMIT 1").first() == nil else { throw conflict() }
             // Serialize quota across different source/workspace preparations by one actor.
             try await VerifiedIdentityService.lock("staged-import-actor-quota:\(actor.id)", on: db)
             let quota = try await sql.raw("SELECT count(*) AS n, coalesce(sum(export_byte_count),0) AS bytes FROM staged_legacy_imports WHERE actor_id = \(bind: actor.id)").first()!
