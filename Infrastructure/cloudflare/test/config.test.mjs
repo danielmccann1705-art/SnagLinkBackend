@@ -139,3 +139,29 @@ test('Google stays unavailable unless both distinct staging client IDs are provi
     assert.throws(() => containerEnvironment({...sample(),...platform(),...google(),...override}));
   }
 });
+
+const candidate = () => ({...sample(),...platform(),STAGING_DEPLOYMENT:'unified-candidate',
+  STAGING_DATABASE_HOST:'ep-solitary-union-zav239mi.c-2.eu-west-2.aws.neon.tech',
+  DATABASE_URL:'postgresql://synthetic:synthetic@ep-solitary-union-zav239mi.c-2.eu-west-2.aws.neon.tech/snaglist_platform_test_0910222943_fc44?sslmode=require',
+  BASE_URL:'https://snaglist-api-unified-staging.danielmccann1705.workers.dev',
+  MAGIC_LINK_BASE_URL:'https://snaglist-api-unified-staging.danielmccann1705.workers.dev',
+  R2_ACCOUNT_ID:'387d49014cd0d45f9e6434196ab513c0', R2_BUCKET_NAME:'snaglist-unified-staging-uploads',
+  R2_PUBLIC_URL:'https://pub-d7c456d4b396462fb5ee8ef008dcf93b.r2.dev'});
+const importOptIn = () => ({STAGED_LEGACY_IMPORT_ENABLED:'true',
+  IMPORT_PREVIEW_API_ORIGIN:'https://snaglist-api-unified-staging.danielmccann1705.workers.dev'});
+
+test('legacy import preparation stays off unless the enabled candidate opts in on its own origin', () => {
+  const off=containerEnvironment(candidate());
+  assert.equal(off.STAGED_LEGACY_IMPORT_ENABLED,undefined);
+  assert.equal(off.IMPORT_PREVIEW_API_ORIGIN,undefined);
+  const on=containerEnvironment({...candidate(),...importOptIn()});
+  assert.equal(on.STAGED_LEGACY_IMPORT_ENABLED,'true');
+  assert.equal(on.IMPORT_PREVIEW_API_ORIGIN,importOptIn().IMPORT_PREVIEW_API_ORIGIN);
+  for (const override of [{STAGED_LEGACY_IMPORT_ENABLED:'1'},{STAGED_LEGACY_IMPORT_ENABLED:'false'},
+    {IMPORT_PREVIEW_API_ORIGIN:undefined},{IMPORT_PREVIEW_API_ORIGIN:'https://snaglist-api-staging.danielmccann1705.workers.dev'},
+    {IMPORT_PREVIEW_API_ORIGIN:'https://api.snaglist.dev'}]) {
+    assert.throws(() => containerEnvironment({...candidate(),...importOptIn(),...override}));
+  }
+  assert.throws(() => containerEnvironment({...sample(),...platform(),...importOptIn()}),'the recovery deployment cannot opt in');
+  assert.throws(() => containerEnvironment({...candidate(),STAGED_LEGACY_IMPORT_ENABLED:'true'}),'half-supplied opt-in fails closed');
+});

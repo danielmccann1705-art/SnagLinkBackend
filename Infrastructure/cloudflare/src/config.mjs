@@ -70,8 +70,21 @@ export function containerEnvironment(env) {
     R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
     PORT: '8080',
     ...email,
-    ...platformEnvironment(env)
+    ...platformEnvironment(env),
+    ...importPreparation(env, candidate, base)
   };
+}
+
+// Private legacy import preparation/publication is an explicit staging opt-in for the
+// enabled unified candidate only, bound to the candidate's own API origin. The backend
+// separately refuses it outside development/staging; production never receives it.
+function importPreparation(env, candidate, base) {
+  if (env.STAGED_LEGACY_IMPORT_ENABLED === undefined && env.IMPORT_PREVIEW_API_ORIGIN === undefined) return {};
+  if (!candidate || env.STAGING_PLATFORM_ENABLED !== 'true' ||
+      env.STAGED_LEGACY_IMPORT_ENABLED !== 'true' || env.IMPORT_PREVIEW_API_ORIGIN !== base) {
+    throw new Error('Legacy import preparation requires the enabled unified candidate bound to its own API origin');
+  }
+  return { STAGED_LEGACY_IMPORT_ENABLED: 'true', IMPORT_PREVIEW_API_ORIGIN: base };
 }
 
 // Keep the recovery image's configuration valid until the unified candidate is
