@@ -33,6 +33,7 @@ enum LegacyImportPublicationPolicy {
         "drawings: only single-page raster originals are rendered as sheets (rendered_single_raster_v1); other originals remain opaque files with source pin coordinates retained on the snag",
         "history: comments, status changes and deletion receipts are typed imported history rows, never authenticated comments, attempts or decisions",
         "directory: contractor/trade/folder/tag reuse requires the same source lineage, unchanged intrinsic digest and unchanged published canonical content",
+        "provenance: a device copy without a recorded inventory baseline (source_inventory_unavailable / inventory_baseline_unavailable) is published with that qualification recorded; missing files and relationship findings still block",
     ]
 }
 

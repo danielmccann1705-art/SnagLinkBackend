@@ -135,9 +135,12 @@ enum LegacyCanonicalProjectionMapper {
         var findings: [P.Finding] = graph.issues.map { issue in
             let qualified: Bool
             switch issue.code {
-            case "historical_workflow_requires_reconciliation", "drawing_source_revision_unverified", "archive_relationship_findings_not_project_scoped": qualified = true
+            // An earlier device copy without a recorded inventory baseline cannot be compared
+            // against one; every record, edge and file hash is still checked independently, so
+            // this is a recorded provenance qualification, not a repairable defect.
+            case "historical_workflow_requires_reconciliation", "drawing_source_revision_unverified", "archive_relationship_findings_not_project_scoped", "source_inventory_unavailable": qualified = true
             case "source_findings_require_review":
-                qualified = source.findingCounts.allSatisfy { ["drawing_provenance_unverified", "local_closure_unverified"].contains($0.category) }
+                qualified = source.findingCounts.allSatisfy { ["drawing_provenance_unverified", "local_closure_unverified", "inventory_baseline_unavailable"].contains($0.category) }
             default: qualified = false
             }
             return .init(code: issue.code, kind: issue.kind, sourceId: issue.recordID, field: issue.field, disposition: qualified ? .qualification : .blocker)

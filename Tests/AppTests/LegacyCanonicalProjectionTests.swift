@@ -112,6 +112,24 @@ final class LegacyCanonicalProjectionMapperTests:XCTestCase {
         XCTAssertTrue(p.findings.contains { $0.code == "invalid_pin" && $0.disposition == .blocker })
         XCTAssertTrue(p.findings.contains { $0.field == "costEstimate" && $0.disposition == .blocker })
     }
+    func testMissingInventoryBaselineIsARecordedQualificationWhileMissingFilesStillBlock() throws {
+        // Real device copies from the first staging build carry no inventory.json baseline.
+        let unbaselined = try ProjectionFixture.data { root in
+            var source = root["source"] as! [String:Any];source["inventoryComparison"] = "not_recorded_in_legacy_copy";root["source"] = source
+            root["findings"] = [["code":"inventory_baseline_unavailable","field":"inventory"]];root["findingCounts"] = [["category":"inventory_baseline_unavailable","count":1]]
+        }
+        let p = try ProjectionFixture.projection(unbaselined)
+        XCTAssertTrue(p.findings.contains { $0.code == "source_inventory_unavailable" && $0.disposition == .qualification })
+        XCTAssertTrue(p.findings.contains { $0.code == "source_findings_require_review" && $0.disposition == .qualification })
+        XCTAssertTrue(p.findings.filter { $0.disposition == .blocker }.isEmpty)
+        let missing = try ProjectionFixture.data { root in
+            var source = root["source"] as! [String:Any];source["inventoryComparison"] = "not_recorded_in_legacy_copy";root["source"] = source
+            root["findings"] = [["code":"inventory_baseline_unavailable","field":"inventory"],["code":"archive_recorded_missing_files","field":"source_manifest"]]
+            root["findingCounts"] = [["category":"inventory_baseline_unavailable","count":1],["category":"archive_recorded_missing_files","count":1]]
+        }
+        let blocked = try ProjectionFixture.projection(missing)
+        XCTAssertTrue(blocked.findings.contains { $0.code == "source_findings_require_review" && $0.disposition == .blocker })
+    }
     func testSourceDigestsAndFileDeclarationsCannotBeSwapped() throws {
         let g = try ProjectionFixture.graph(ProjectionFixture.data()),(records,declarations,uses) = try ProjectionFixture.values(g)
         let wrong = records.enumerated().map { index,r in LegacyCanonicalProjection.SourceRecord(kind:r.kind,sourceId:r.sourceId,mappingId:r.mappingId,sourceSHA256:index == 0 ? String(repeating:"0",count:64) : r.sourceSHA256) }
