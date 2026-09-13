@@ -59,6 +59,21 @@ enum CanonicalWorkflowService {
         guard snag.publishedAt != nil else { throw Abort(.conflict, reason: "Log this draft before starting completion or review", identifier: "snag_not_published") }
         guard ["open", "in_progress", "awaiting_review", "changes_requested", "closed"].contains(snag.status) else { throw Abort(.conflict, reason: "Reconcile this historical status before changing its workflow", identifier: "workflow_reconciliation_required") }
         var affected: UUID?, decisions: [ReviewDecisionResponse] = []
+        // An imported legacy state has no canonical attempt or decision behind it. The only
+        // permitted transition is an explicit reviewer reopen, which records the reconciliation
+        // and returns the snag to ordinary canonical `open`. Accept/send-back/start/submit are refused.
+        if snag.workflowQualification != nil {
+            guard action == .reopen, actorID != nil, actions.contains(.review) else {
+                throw Abort(.conflict, reason: "This snag carries an unverified legacy status. A reviewer must reopen it before any other workflow action", identifier: "workflow_reconciliation_required")
+            }
+            decisions.append(try await decision("reopen", attemptID: nil, command: command, reason: reason(command.reason), snag: snag, project: project, actorID: actorID!, on: db))
+            snag.status = "open"; snag.closedAt = nil; snag.workflowQualification = nil
+            snag.revision += 1; snag.workflowRevision += 1
+            try await snag.save(on: db)
+            let updated = try await PlatformSnagService.changed(snag, project: project, actorID: actorID, grantID: nil, kind: "workflow_reconciled", fields: ["status", "workflowRevision", "workflow"], on: db)
+            try await WorkspaceAccessService.activity(workspaceID: workspaceID, actorID: actorID, action: "workflow_reconciled", targetID: snagID, detail: command.reason, on: db)
+            return .init(snag: updated, attempt: nil, decisions: decisions)
+        }
         switch action {
         case .start:
             guard ["open", "changes_requested"].contains(snag.status) else { throw Abort(.conflict, reason: "This snag is already in progress, awaiting review or closed") }

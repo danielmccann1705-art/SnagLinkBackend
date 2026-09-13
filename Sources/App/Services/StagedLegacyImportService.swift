@@ -113,13 +113,17 @@ struct StagedLegacyImportService {
     /// The callback must keep DB work inside this transaction. Never hold this
     /// lease across a network upload; re-enter after IO before retaining a receipt.
     /// No auth token, database or authority value may be cached as future permission.
+    /// Once a session is published, its preparation is frozen: file uploads, projection
+    /// changes and abort are refused (`allowPublished: false`). Readers of the commit
+    /// receipt and processing status pass `allowPublished: true`.
     static func withActiveSession<T>(_ scope: StagedLegacyImportScope, actor: StagedLegacyImportActor,
-                                     binding: ImportServerBinding, on database: Database,
+                                     binding: ImportServerBinding, on database: Database, allowPublished: Bool = false,
                                      body: @escaping (StagedLegacyImportReceipt, Database) async throws -> T) async throws -> T {
         try await transaction(database) { db, cancellation in
             let authority = try await authority(workspaceID: scope.workspaceId, actor: actor, on: db)
             let receipt = try await readLocked(scope, actor: actor, authority: authority, binding: binding, on: db)
             guard receipt.state == "staged_incomplete" else { throw Abort(.gone, reason: "This preparation was aborted", identifier: "import_preparation_aborted") }
+            if !allowPublished { try await LegacyImportProcessingService.requireUnpublished(receipt.sessionId, on: db) }
             try cancellation.check()
             return try await body(receipt, db)
         }
@@ -154,6 +158,7 @@ struct StagedLegacyImportService {
                 return current
             }
             guard current.state == "staged_incomplete", current.revision == command.expectedRevision else { throw conflict() }
+            try await LegacyImportProcessingService.requireUnpublished(current.sessionId, on: db)
             // Change only state/revision/present-day action. Source and mappings remain immutable.
             let updated = current.aborted(at: now)
             try await VerifiedIdentityService.sql(db).raw("UPDATE staged_legacy_imports SET state = 'aborted', revision = \(bind: updated.revision), updated_at = \(bind: now), summary_json = \(bind: PlatformMutationService.encode(updated)) WHERE id = \(bind: current.sessionId)").run()

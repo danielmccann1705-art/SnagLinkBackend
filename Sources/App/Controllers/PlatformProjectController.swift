@@ -12,6 +12,8 @@ struct PlatformProjectResponse: Content {
     // Optional only for decoding old immutable manifests and receipts. A fresh
     // projectMetadataV2 snapshot always includes this object, even with nil dates.
     let canonical: CanonicalProjectValues?
+    /// Present only for a project published from a legacy import.
+    let imported: ProjectImportProvenance?
     init(_ project: Project, actions: Set<ProjectAccessPolicy.Action>) throws {
         self.project = ProjectResponse(from: project)
         guard let workspaceID = project.workspaceId else { throw Abort(.conflict, reason: "Project ownership needs reconciliation") }
@@ -21,11 +23,26 @@ struct PlatformProjectResponse: Content {
         self.archivedAt = project.archivedAt
         self.platformManaged = project.platformManaged
         self.canonical = CanonicalProjectValues(project)
+        self.imported = ProjectImportProvenance(project)
     }
     func withCapabilities(_ actions: Set<ProjectAccessPolicy.Action>) -> Self {
         var copy = self
         copy.capabilities = actions.map(\.rawValue).sorted()
         return copy
+    }
+}
+
+struct ProjectImportProvenance: Content, Equatable {
+    let importedAt: Date
+    let importSessionId: UUID
+    let sourceStatus: String?
+    let sourceCreatedAt: Date?
+    let sourceUpdatedAt: Date?
+    let coverFileId: UUID?
+    init?(_ project: Project) {
+        guard let importedAt = project.importedAt, let session = project.importSessionId else { return nil }
+        self.importedAt = importedAt; importSessionId = session; sourceStatus = project.sourceStatus
+        sourceCreatedAt = project.sourceCreatedAt; sourceUpdatedAt = project.sourceUpdatedAt; coverFileId = project.coverFileId
     }
 }
 

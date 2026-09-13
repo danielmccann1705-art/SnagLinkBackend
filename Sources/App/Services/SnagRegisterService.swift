@@ -36,7 +36,9 @@ enum SnagRegisterService {
     struct ContractorLabel: Content {
         let id: UUID; let companyName: String; let contactName: String?; let isArchived: Bool
     }
-    struct Summary: Content { let total: Int; let awaitingReview: Int; let overdue: Int }
+    /// `awaitingReview` counts only actionable canonical submissions; imported legacy
+    /// states are reported separately and never enter the review queue count.
+    struct Summary: Content { let total: Int; let awaitingReview: Int; let overdue: Int; var legacyUnverified: Int = 0 }
     struct EvidencePreview: Content { let snagId: UUID; let asset: MediaAssetResponse; let count: Int }
     struct Page: Content {
         let items: [PlatformSnagResponse]; let page: Int; let hasMore: Bool
@@ -60,7 +62,8 @@ enum SnagRegisterService {
             query.filter(\.$dueOn < today).filter(\.$status != "closed")
         }
         let summary = try await Summary(total: base().count(),
-            awaitingReview: base().filter(\.$status == "awaiting_review").count(), overdue: overdue(base()).count())
+            awaitingReview: base().filter(\.$status == "awaiting_review").filter(\.$workflowQualification == nil).count(), overdue: overdue(base()).count(),
+            legacyUnverified: base().filter(\.$workflowQualification != nil).count())
         let query = base()
         if let text = filters.q?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
             // POSITION treats %, _ and backslashes literally. Every user value

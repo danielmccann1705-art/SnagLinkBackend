@@ -28,7 +28,7 @@ struct ProjectChangePage: Content {
 /// Stable register download, with its workspace directory. It is not the complete
 /// native graph bootstrap: drawing/annotation and project organisation graphs follow.
 struct RegisterSyncService {
-    static let coverage = ["project", "snags", "contractors", "trades", "attachedMedia", "completionAttempts", "reviewDecisions", "comments", "assignmentHistory", "projectMetadataV2"]
+    static let coverage = ["project", "snags", "contractors", "trades", "attachedMedia", "completionAttempts", "reviewDecisions", "comments", "assignmentHistory", "projectMetadataV2"] + LegacyImportCommitService.coverage
     static func fingerprint(_ project: Project, actorID: UUID, on db: Database) async throws -> String {
         let row = try await VerifiedIdentityService.sql(db).raw("""
             SELECT t.owner_user_id, t.kind, COALESCE(m.revision, 0) AS membership_revision,
@@ -55,7 +55,10 @@ struct RegisterSyncService {
         let decisionCount = try await sql.raw("SELECT count(*) AS n FROM review_decisions WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
         let commentCount = try await sql.raw("SELECT count(*) AS n FROM project_comments WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
         let assignmentCount = try await sql.raw("SELECT count(*) AS n FROM assignment_history WHERE project_id = \(bind: projectID)").first()!.decode(column: "n", as: Int.self)
-        let total = count + contractorCount + tradeCount + mediaCount + attemptCount + decisionCount + commentCount + assignmentCount + 1
+        let imported = try await LegacyImportReadService.graph(projectID: projectID, workspaceID: workspaceID, on: db)
+        let importedCount = imported.files.count + imported.fileUses.count + imported.photos.count + imported.drawings.count + imported.opaqueDrawings.count + imported.pins.count
+            + imported.comments.count + imported.statusChanges.count + imported.deletions.count + imported.folders.count + imported.tags.count + 1 + (imported.receipt == nil ? 0 : 1)
+        let total = count + contractorCount + tradeCount + mediaCount + attemptCount + decisionCount + commentCount + assignmentCount + 1 + importedCount
         guard total <= 10000 else { throw Abort(.payloadTooLarge, reason: "This project needs a background snapshot. No partial download was created", identifier: "snapshot_job_required") }
         // Expired private snapshots can be removed without deleting customer work.
         try await sql.raw("DELETE FROM register_snapshots WHERE actor_id = \(bind: actorID) AND expires_at < \(bind: now)").run()
@@ -113,6 +116,21 @@ struct RegisterSyncService {
             try await item(snapshotID: id, position: position, type: "assignmentHistory", id: assignment.id, value: assignment, on: db)
             position += 1
         }
+        // Imported graph coverage: files, photos, drawings, pins, history, organisation, receipt.
+        for value in imported.files { try await item(snapshotID: id, position: position, type: "importedFile", id: value.id, value: value, on: db); position += 1 }
+        for value in imported.fileUses { try await item(snapshotID: id, position: position, type: "importedFileUse", id: value.id, value: value, on: db); position += 1 }
+        for value in imported.photos { try await item(snapshotID: id, position: position, type: "importedPhoto", id: value.id, value: value, on: db); position += 1 }
+        for value in imported.drawings { try await item(snapshotID: id, position: position, type: "drawing", id: value.id, value: value, on: db); position += 1 }
+        for value in imported.opaqueDrawings { try await item(snapshotID: id, position: position, type: "opaqueDrawing", id: value.id, value: value, on: db); position += 1 }
+        for value in imported.pins { try await item(snapshotID: id, position: position, type: "drawingPin", id: value.snagId, value: value, on: db); position += 1 }
+        for value in imported.comments { try await item(snapshotID: id, position: position, type: "importedComment", id: value.id, value: value, on: db); position += 1 }
+        for value in imported.statusChanges { try await item(snapshotID: id, position: position, type: "importedStatusChange", id: value.id, value: value, on: db); position += 1 }
+        for value in imported.deletions { try await item(snapshotID: id, position: position, type: "importedDeletion", id: value.deletedSnagId, value: value, on: db); position += 1 }
+        for value in imported.folders { try await item(snapshotID: id, position: position, type: "folder", id: value.id, value: value, on: db); position += 1 }
+        for value in imported.tags { try await item(snapshotID: id, position: position, type: "tag", id: value.id, value: value, on: db); position += 1 }
+        try await item(snapshotID: id, position: position, type: "projectOrganisation", id: projectID, value: imported.organisation, on: db); position += 1
+        if let receipt = imported.receipt { try await item(snapshotID: id, position: position, type: "importReceipt", id: receipt.commitId, value: receipt, on: db); position += 1 }
+        guard position == total else { throw Abort(.internalServerError, reason: "Snapshot item count diverged") }
         return try await page(token: token, offset: 0, projectID: projectID, actorID: actorID, on: db)
     }
     private static func item<T: Encodable>(snapshotID: UUID, position: Int, type: String, id: UUID, value: T, on db: Database) async throws {
@@ -150,7 +168,7 @@ struct RegisterSyncService {
         let sequence = try saved.decode(column: "sequence", as: Int64.self)
         let cursorCoverage = try saved.decode(column: "coverage", as: [String].self)
         try await ProjectCommentService.requireCurrentContent(projectID: projectID, since: sequence, on: db)
-        let rows = try await sql.raw("SELECT * FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade'))) AND sequence > \(bind: sequence) ORDER BY sequence LIMIT 101").all()
+        let rows = try await sql.raw("SELECT * FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade', 'folder', 'tag'))) AND sequence > \(bind: sequence) ORDER BY sequence LIMIT 101").all()
         // A page targets 100 rows, then includes the remainder of its final
         // transaction. A client applies each complete group in one local commit.
         // Do not advance a cursor through half a review/evidence transition.
@@ -158,7 +176,7 @@ struct RegisterSyncService {
         if let last = selected.last {
             let lastSequence = try last.decode(column: "sequence", as: Int64.self)
             let groupID = try last.decode(column: "transaction_group", as: UUID.self)
-            let tail = try await sql.raw("SELECT * FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND transaction_group = \(bind: groupID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade'))) AND sequence > \(bind: lastSequence) ORDER BY sequence LIMIT 1001").all()
+            let tail = try await sql.raw("SELECT * FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND transaction_group = \(bind: groupID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade', 'folder', 'tag'))) AND sequence > \(bind: lastSequence) ORDER BY sequence LIMIT 1001").all()
             guard tail.count <= 1000 else { throw Abort(.payloadTooLarge, reason: "This historical change batch requires a new project download. Keep unsent edits", identifier: "rebootstrap_required") }
             selected.append(contentsOf: tail)
         }
@@ -177,7 +195,7 @@ struct RegisterSyncService {
         let next: String, hasMore: Bool
         if let last {
             next = try await issueCursor(project: project, actorID: actorID, sequence: last, fingerprint: access, coverage: cursorCoverage, on: db)
-            hasMore = try await sql.raw("SELECT sequence FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade'))) AND sequence > \(bind: last) LIMIT 1").first() != nil
+            hasMore = try await sql.raw("SELECT sequence FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND (project_id = \(bind: projectID) OR (project_id IS NULL AND entity_type IN ('contractor', 'trade', 'folder', 'tag'))) AND sequence > \(bind: last) LIMIT 1").first() != nil
         } else { next = cursor; hasMore = false }
         return .init(changes: changes, cursor: next, hasMore: hasMore, coverage: cursorCoverage)
     }

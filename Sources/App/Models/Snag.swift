@@ -78,6 +78,14 @@ final class Snag: Model, Content, @unchecked Sendable {
     @OptionalField(key: "published_at") var publishedAt: Date?
     @OptionalField(key: "archived_at") var archivedAt: Date?
     @OptionalField(key: "archive_reason") var archiveReason: String?
+    // Imported legacy workflow qualification. NULL means ordinary canonical state.
+    // `closed_at` stays NULL for a qualified closure; the source instant is kept separately.
+    @OptionalField(key: "workflow_qualification") var workflowQualification: String?
+    @OptionalField(key: "source_status") var sourceStatus: String?
+    @OptionalField(key: "source_closed_at") var sourceClosedAt: Date?
+    @OptionalField(key: "imported_at") var importedAt: Date?
+    @OptionalField(key: "source_created_at") var sourceCreatedAt: Date?
+    @OptionalField(key: "source_updated_at") var sourceUpdatedAt: Date?
 
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?

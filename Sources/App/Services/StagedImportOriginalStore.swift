@@ -131,6 +131,30 @@ protocol StagedImportOriginalStore: Sendable {
     func putIfAbsent(_ address: StagedImportOriginalAddress, body: AWSHTTPBody, bytes: Int64,
                      budget: StagedImportIOBudget) async throws -> StagedImportObjectWrite
     func read(_ address: StagedImportOriginalAddress, budget: StagedImportIOBudget) async throws -> AWSHTTPBody
+    /// Derived private objects (image renditions, drawing pages) addressed only by
+    /// server-computed keys. Content-addressed keys make repeated processing idempotent.
+    func putDerived(_ key: ImportedObjectKey, data: Data, mime: String, budget: StagedImportIOBudget) async throws
+    func readDerived(_ key: ImportedObjectKey, limit: Int, budget: StagedImportIOBudget) async throws -> Data
+}
+
+/// A closed private namespace for import objects. Never built from request input.
+struct ImportedObjectKey: Hashable, Sendable {
+    let value: String
+    private init(_ value: String) { self.value = value }
+    static func original(_ address: StagedImportOriginalAddress) -> ImportedObjectKey {
+        .init("staged-import/\(address.workspaceId.uuidString.lowercased())/\(address.sessionId.uuidString.lowercased())/\(address.declarationId.uuidString.lowercased())/original")
+    }
+    static func derived(_ address: StagedImportOriginalAddress, purpose: String, sha256: String) throws -> ImportedObjectKey {
+        guard ["rendition", "drawing-page", "drawing-thumb"].contains(purpose), CanonicalDrawingService.hashValid(sha256) else { throw StagedImportOriginalError.invalidDeclaration }
+        return .init("staged-import/\(address.workspaceId.uuidString.lowercased())/\(address.sessionId.uuidString.lowercased())/\(address.declarationId.uuidString.lowercased())/\(purpose)-\(sha256).jpg")
+    }
+    /// Re-validates a stored key before any storage read.
+    static func stored(_ key: String) throws -> ImportedObjectKey {
+        let parts = key.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 5, parts[0] == "staged-import", parts[1...3].allSatisfy({ UUID(uuidString: String($0)) != nil && String($0) == String($0).lowercased() }),
+              parts[4] == "original" || String(parts[4]).range(of: "^(rendition|drawing-page|drawing-thumb)-[a-f0-9]{64}\\.jpg$", options: .regularExpression) != nil else { throw StagedImportOriginalError.invalidDeclaration }
+        return .init(key)
+    }
 }
 
 /// Uses StorageService's existing S3/AWSClient. Logger stays disabled; SDK error
@@ -139,9 +163,7 @@ struct SotoStagedImportOriginalStore: StagedImportOriginalStore {
     private let s3: S3
     private let bucket: String
     init(s3: S3, privateBucket: String) { self.s3 = s3; self.bucket = privateBucket }
-    private func key(_ address: StagedImportOriginalAddress) -> String {
-        "staged-import/\(address.workspaceId.uuidString.lowercased())/\(address.sessionId.uuidString.lowercased())/\(address.declarationId.uuidString.lowercased())/original"
-    }
+    private func key(_ address: StagedImportOriginalAddress) -> String { ImportedObjectKey.original(address).value }
     private func client(_ budget: StagedImportIOBudget) throws -> S3 {
         // R2 does not receive AWS-signed chunk framing. Soto 7 skips automatic
         // retries for streaming PUT bodies; callers retain the same operation ID.
@@ -167,6 +189,30 @@ struct SotoStagedImportOriginalStore: StagedImportOriginalStore {
             let response = try await client(budget).getObject(.init(bucket: bucket, key: key(address)))
             try budget.check()
             return response.body
+        } catch is CancellationError { throw CancellationError() }
+        catch let error as StagedImportOriginalError { throw error }
+        catch { throw StagedImportOriginalError.objectUnavailable }
+    }
+    func putDerived(_ key: ImportedObjectKey, data: Data, mime: String, budget: StagedImportIOBudget) async throws {
+        do {
+            _ = try await client(budget).putObject(.init(body: .init(buffer: ByteBuffer(data: data)), bucket: bucket, cacheControl: "private, no-store",
+                contentLength: Int64(data.count), contentType: mime, ifNoneMatch: "*", key: key.value))
+            try budget.check()
+        } catch is CancellationError { throw CancellationError() }
+        catch let error as StagedImportOriginalError { throw error }
+        catch {
+            try budget.check()
+            // Content-addressed: an existing object with this key already holds these bytes.
+            if (error as? AWSErrorType)?.context?.responseCode.code == 412 { return }
+            throw StagedImportOriginalError.storageUnavailable
+        }
+    }
+    func readDerived(_ key: ImportedObjectKey, limit: Int, budget: StagedImportIOBudget) async throws -> Data {
+        do {
+            let response = try await client(budget).getObject(.init(bucket: bucket, key: key.value))
+            let bytes = try await response.body.collect(upTo: limit)
+            try budget.check()
+            return Data(buffer: bytes)
         } catch is CancellationError { throw CancellationError() }
         catch let error as StagedImportOriginalError { throw error }
         catch { throw StagedImportOriginalError.objectUnavailable }

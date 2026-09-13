@@ -155,6 +155,8 @@ func routes(_ app: Application) throws {
     try app.register(collection: LegacyImportPreviewController())
     try app.register(collection: StagedLegacyImportController())
     try app.register(collection: StagedImportFileController())
+    try app.register(collection: LegacyImportCommitController())
+    try app.register(collection: ImportedProjectController())
     try app.register(collection: PlatformProjectController())
     try app.register(collection: PlatformSnagController())
     try app.register(collection: PrivateMediaController())

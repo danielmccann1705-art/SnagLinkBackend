@@ -11,7 +11,12 @@ import Glibc
 /// Decode and re-encode a bounded still image. Original bytes are retained privately;
 /// only a fresh metadata-free JPEG is available through the shared gateway.
 enum PrivateImageProcessor {
-    struct Result: Sendable { let jpeg: Data; let width: Int; let height: Int }
+    struct Result: Sendable {
+        let jpeg: Data; let width: Int; let height: Int
+        /// Decoded source pixel size before any resize (upright orientation).
+        var sourceWidth: Int = 0; var sourceHeight: Int = 0
+    }
+    static let maximumPixelSize = 4096
     static let maximumBytes = 10 * 1024 * 1024
     static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 
@@ -24,7 +29,15 @@ enum PrivateImageProcessor {
             throw Abort(.unsupportedMediaType, reason: "Use a genuine JPEG or PNG photo", identifier: "invalid_image")
         }
     }
-    static func process(_ data: Data, mime: String) throws -> Result {
+    /// Sniffs a supported still-image type from leading bytes; nil for anything else.
+    static func detectMime(_ data: Data) -> String? {
+        let bytes = Array(data.prefix(12))
+        if bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) { return "image/png" }
+        if bytes.starts(with: [255, 216, 255]) { return "image/jpeg" }
+        return nil
+    }
+    static func process(_ data: Data, mime: String, maximumPixelSize: Int = maximumPixelSize) throws -> Result {
+        guard (16...Self.maximumPixelSize).contains(maximumPixelSize) else { throw invalid() }
         try validateSignature(data, mime: mime)
         #if canImport(ImageIO)
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
@@ -36,14 +49,16 @@ enum PrivateImageProcessor {
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 4096,
+            kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
             kCGImageSourceShouldCacheImmediately: true
         ] as CFDictionary), CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete else { throw invalid() }
         let output = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(output, "public.jpeg" as CFString, 1, nil) else { throw invalid() }
         CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
         guard CGImageDestinationFinalize(destination), output.length <= maximumBytes else { throw invalid() }
-        return .init(jpeg: output as Data, width: image.width, height: image.height)
+        let orientation = (properties[kCGImagePropertyOrientation] as? UInt32) ?? 1
+        let swapped = (5...8).contains(orientation)
+        return .init(jpeg: output as Data, width: image.width, height: image.height, sourceWidth: swapped ? height : width, sourceHeight: swapped ? width : height)
         #else
         // The runtime image includes ImageMagick. No shell, URL, delegate-selected
         // input format, client filename or unbounded pixel/disk allocation is used.
@@ -58,12 +73,15 @@ enum PrivateImageProcessor {
         let values = String(decoding: info, as: UTF8.self).split(separator: " ").compactMap { Int($0) }
         guard values.count == 3, values[2] == 1 else { throw invalid() }
         try dimensions(values[0], values[1])
-        _ = try run("/usr/bin/convert", limits + ["\(format):\(input.path)", "-auto-orient", "-resize", "4096x4096>", "-background", "white", "-alpha", "remove", "-strip", "-quality", "90", "jpeg:\(output.path)"])
+        // Upright source size follows the same auto-orient rule as the rendition.
+        let orientation = try run("/usr/bin/identify", limits + ["-ping", "-format", "%[orientation]", "\(format):\(input.path)"])
+        let swapped = ["LeftTop", "RightTop", "RightBottom", "LeftBottom"].contains(String(decoding: orientation, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+        _ = try run("/usr/bin/convert", limits + ["\(format):\(input.path)", "-auto-orient", "-resize", "\(maximumPixelSize)x\(maximumPixelSize)>", "-background", "white", "-alpha", "remove", "-strip", "-quality", "90", "jpeg:\(output.path)"])
         let outputInfo = try run("/usr/bin/identify", limits + ["-ping", "-format", "%w %h %n", "jpeg:\(output.path)"])
         let size = String(decoding: outputInfo, as: UTF8.self).split(separator: " ").compactMap { Int($0) }
         let jpeg = try Data(contentsOf: output)
         guard size.count == 3, size[2] == 1, !jpeg.isEmpty, jpeg.count <= maximumBytes else { throw invalid() }
-        return .init(jpeg: jpeg, width: size[0], height: size[1])
+        return .init(jpeg: jpeg, width: size[0], height: size[1], sourceWidth: swapped ? values[1] : values[0], sourceHeight: swapped ? values[0] : values[1])
         #endif
     }
     private static func dimensions(_ width: Int, _ height: Int) throws {

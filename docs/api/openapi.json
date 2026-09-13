@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Snaglist implemented platform API",
-    "version": "0.12.1-candidate",
-    "description": "Implemented platform candidate, not production readiness or a complete unified platform. Adds nonce-bound Google sign-in exchanges for web and iOS, secure browser sessions and explicit recent-account linking. Existing company administration, fixed Contractor links, PIN/private evidence and manager acceptance retain their recorded evidence. Full native sync, provider UI acceptance, company branding/seats/billing, durable jobs, private R2/Linux staging and full design/integration gates remain incomplete. Adds actor-bound immutable project discovery and normalised internal comments in register snapshots/deltas; full native graph remains incomplete."
+    "version": "0.13.0-candidate",
+    "description": "Implemented platform candidate, not production readiness or a complete unified platform. Adds nonce-bound Google sign-in exchanges for web and iOS, secure browser sessions and explicit recent-account linking. Existing company administration, fixed Contractor links, PIN/private evidence and manager acceptance retain their recorded evidence. Full native sync, provider UI acceptance, company branding/seats/billing, durable jobs, private R2/Linux staging and full design/integration gates remain incomplete. Adds actor-bound immutable project discovery and normalised internal comments in register snapshots/deltas; full native graph remains incomplete. Adds staging-gated legacy import preparation/publication (projection, processing, acknowledged atomic commit) and authenticated readback of published import records, drawings and verified bytes; imported legacy workflow states are qualified (legacy_unverified) and never enter the review queue."
   },
   "servers": [
     {
@@ -12994,6 +12994,307 @@
           }
         }
       }
+    },
+    "/api/v2/projects/{projectId}/imported-graph": {
+      "get": {
+        "summary": "Published import records for a project (files, photos, drawings, pins, typed history, organisation, receipt)",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportedProjectGraph"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Project unavailable"
+          }
+        },
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v2/projects/{projectId}/drawings": {
+      "get": {
+        "summary": "Published drawing sheets with their rendered pages",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DrawingSheetResponse"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Project unavailable"
+          }
+        },
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v2/projects/{projectId}/imported-files/{fileId}/original": {
+      "get": {
+        "summary": "Retained original bytes of an imported file (verified against its recorded digest)",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified bytes (private, no-store)",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unavailable"
+          }
+        },
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v2/projects/{projectId}/imported-files/{fileId}/rendition": {
+      "get": {
+        "summary": "Fresh JPEG rendition of a decoded imported image",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified bytes (private, no-store)",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unavailable"
+          }
+        },
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v2/projects/{projectId}/drawings/pages/{pageId}/rendition": {
+      "get": {
+        "summary": "Rendered drawing page JPEG",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "pageId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified bytes (private, no-store)",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unavailable"
+          }
+        },
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ]
+      }
+    },
+    "/api/v2/projects/{projectId}/drawings/pages/{pageId}/thumbnail": {
+      "get": {
+        "summary": "Drawing page thumbnail JPEG",
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "pageId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verified bytes (private, no-store)",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unavailable"
+          }
+        },
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -13905,6 +14206,16 @@
                 "type": "null"
               }
             ]
+          },
+          "imported": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProjectImportProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -14222,6 +14533,16 @@
           "canonical": {
             "$ref": "#/components/schemas/CanonicalSnagValues",
             "description": "Authoritative exact dates/costs. The nested snag retains compatibility timestamp/number mirrors. Missing only in stored pre-parity candidate receipts or snapshots: refetch before presenting/editing these fields."
+          },
+          "workflow": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SnagWorkflowQualification"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -15037,6 +15358,11 @@
           "overdue": {
             "type": "integer",
             "minimum": 0
+          },
+          "legacyUnverified": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Imported snags whose historical status is unverified. Not part of awaitingReview."
           }
         },
         "required": [
@@ -18006,6 +18332,1343 @@
         ],
         "additionalProperties": false,
         "description": "Immutable actor-bound diagnostic receipt, never a bearer capability, import approval or proof of historic ownership. The sole durable write is its mutation_receipts row. Checks re-run current authority/collisions before replay; expiry is 30 minutes after server creation. Source bytes, full graph, consent and import commit remain blockers even for a simple project. Entitlement and full native reconstruction are not established. requestHash covers typed request and route; previewFingerprint covers observed authority/collision/capability facts. Neither is the opaque export hash."
+      },
+      "SnagWorkflowQualification": {
+        "type": "object",
+        "description": "Present only for a snag published from a legacy import whose source state was not plain open. Render a closed qualified snag as 'Legacy closure — unverified', never as Accepted. It never enters the actionable review queue; a reviewer reopen reconciles it.",
+        "properties": {
+          "qualification": {
+            "type": "string",
+            "enum": [
+              "legacy_unverified"
+            ]
+          },
+          "sourceStatus": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceClosedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "requiresReconciliation": {
+            "type": "boolean"
+          },
+          "legacyClosureUnverified": {
+            "type": "boolean"
+          },
+          "actionableReview": {
+            "type": "boolean"
+          },
+          "importedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "qualification",
+          "requiresReconciliation",
+          "legacyClosureUnverified",
+          "actionableReview"
+        ]
+      },
+      "ProjectImportProvenance": {
+        "type": "object",
+        "properties": {
+          "importedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "importSessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceStatus": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceCreatedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceUpdatedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverFileId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "importedAt",
+          "importSessionId"
+        ]
+      },
+      "ImportedFileResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "byteCount": {
+            "type": "integer"
+          },
+          "decodedMime": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "original": {
+            "$ref": "#/components/schemas/MediaRenditionDescriptor"
+          },
+          "rendition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MediaRenditionDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "sha256",
+          "byteCount",
+          "revision",
+          "original"
+        ]
+      },
+      "ImportedFileUseResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "sourceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "projectCover",
+              "photoOriginal",
+              "photoThumbnail",
+              "photoAnnotation",
+              "drawingFile",
+              "drawingThumbnail",
+              "commentAttachment",
+              "deletedPhoto"
+            ]
+          },
+          "position": {
+            "type": "integer"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "availability": {
+            "type": "string"
+          },
+          "fileId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "usedLegacyDrawingLocation": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "kind",
+          "sourceId",
+          "role",
+          "position",
+          "required",
+          "availability",
+          "usedLegacyDrawingLocation"
+        ]
+      },
+      "ImportedPhotoResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snagId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "originalUseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "thumbnailUseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "annotationUseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourceLabelJSON": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceLegacyLabelJSON": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "labelResolution": {
+            "type": "string"
+          },
+          "capturedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "latitude": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "longitude": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sortOrder": {
+            "type": "integer"
+          },
+          "sourceCreatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "importedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "snagId",
+          "originalUseId",
+          "thumbnailUseId",
+          "annotationUseId",
+          "labelResolution",
+          "capturedAt",
+          "sortOrder",
+          "sourceCreatedAt",
+          "revision",
+          "importedAt"
+        ]
+      },
+      "ImportedCommentResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snagId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unverifiedAuthorId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unverifiedAuthorName": {
+            "type": "string"
+          },
+          "unverifiedAuthorType": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "parentCommentId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mentions": {
+            "$ref": "#/components/schemas/JSONValue"
+          },
+          "isFromContractorLink": {
+            "type": "boolean"
+          },
+          "attachmentListState": {
+            "type": "string"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "importedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "redactedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "snagId",
+          "unverifiedAuthorName",
+          "unverifiedAuthorType",
+          "createdAt",
+          "mentions",
+          "isFromContractorLink",
+          "attachmentListState",
+          "provenance",
+          "revision",
+          "importedAt"
+        ]
+      },
+      "ImportedStatusChangeResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "snagId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "fromStatus": {
+            "type": "string"
+          },
+          "toStatus": {
+            "type": "string"
+          },
+          "unverifiedChangedById": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "unverifiedChangedByName": {
+            "type": "string"
+          },
+          "unverifiedChangedByType": {
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "importedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "snagId",
+          "fromStatus",
+          "toStatus",
+          "unverifiedChangedByName",
+          "unverifiedChangedByType",
+          "createdAt",
+          "provenance",
+          "importedAt"
+        ]
+      },
+      "ImportedDeletionResponse": {
+        "type": "object",
+        "properties": {
+          "deletedSnagId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reference": {
+            "type": "string"
+          },
+          "unverifiedSourceOwnerId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "historicalNeedsRemoteDeletion": {
+            "type": "boolean"
+          },
+          "execution": {
+            "type": "string"
+          },
+          "importedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "deletedSnagId",
+          "projectId",
+          "reference",
+          "createdAt",
+          "historicalNeedsRemoteDeletion",
+          "execution",
+          "importedAt"
+        ]
+      },
+      "WorkspaceFolderResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "colorHex": {
+            "type": "string"
+          },
+          "sortOrder": {
+            "type": "integer"
+          },
+          "parentId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "sourceCreatedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceUpdatedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "workspaceId",
+          "name",
+          "colorHex",
+          "sortOrder",
+          "revision"
+        ]
+      },
+      "WorkspaceTagResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "colorHex": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "sourceCreatedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceUpdatedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "workspaceId",
+          "name",
+          "colorHex",
+          "revision"
+        ]
+      },
+      "ProjectOrganisationResponse": {
+        "type": "object",
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "folderId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tagIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "required": [
+          "projectId",
+          "tagIds"
+        ]
+      },
+      "DrawingPageGeometry": {
+        "type": "object",
+        "properties": {
+          "mediaBox": {
+            "$ref": "#/components/schemas/JSONValue"
+          },
+          "cropBox": {
+            "$ref": "#/components/schemas/JSONValue"
+          },
+          "displayBox": {
+            "$ref": "#/components/schemas/JSONValue"
+          },
+          "rotation": {
+            "type": "integer"
+          },
+          "userUnit": {
+            "type": "number"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "sourceToDisplay": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "coordinateSystem": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mediaBox",
+          "cropBox",
+          "displayBox",
+          "rotation",
+          "userUnit",
+          "width",
+          "height",
+          "sourceToDisplay",
+          "coordinateSystem"
+        ]
+      },
+      "ImportedDrawingProvenance": {
+        "type": "object",
+        "properties": {
+          "fileUseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "thumbnailUseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourcePageNumber": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourceCreatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sourceUpdatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "provenance": {
+            "type": "string"
+          },
+          "rendering": {
+            "type": "string",
+            "enum": [
+              "rendered_single_raster_v1",
+              "opaque_unrendered"
+            ]
+          },
+          "importedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "fileUseId",
+          "thumbnailUseId",
+          "sourceCreatedAt",
+          "sourceUpdatedAt",
+          "provenance",
+          "rendering",
+          "importedAt"
+        ]
+      },
+      "DrawingSheetPage": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "versionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "assetId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "assetPageId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "pageIndex": {
+            "type": "integer"
+          },
+          "sourcePageLabel": {
+            "type": "string"
+          },
+          "geometry": {
+            "$ref": "#/components/schemas/DrawingPageGeometry"
+          },
+          "rendition": {
+            "$ref": "#/components/schemas/MediaRenditionDescriptor"
+          },
+          "thumbnail": {
+            "$ref": "#/components/schemas/MediaRenditionDescriptor"
+          }
+        },
+        "required": [
+          "id",
+          "versionId",
+          "assetId",
+          "assetPageId",
+          "pageIndex",
+          "sourcePageLabel",
+          "geometry",
+          "rendition",
+          "thumbnail"
+        ]
+      },
+      "DrawingSheetResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sortOrder": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "currentVersionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "createdBy": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "archivedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DrawingSheetPage"
+            }
+          },
+          "imported": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ImportedDrawingProvenance"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "name",
+          "sortOrder",
+          "revision",
+          "currentVersionId",
+          "createdBy",
+          "createdAt",
+          "updatedAt",
+          "pages"
+        ]
+      },
+      "OpaqueImportedDrawingResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sortOrder": {
+            "type": "integer"
+          },
+          "imported": {
+            "$ref": "#/components/schemas/ImportedDrawingProvenance"
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "name",
+          "sortOrder",
+          "imported"
+        ]
+      },
+      "DrawingPinResponse": {
+        "type": "object",
+        "properties": {
+          "snagId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "drawingId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "versionId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "versionPageId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "x": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "y": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "snagRevision": {
+            "type": "integer"
+          },
+          "recordedBy": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "recordedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deletedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "snagId",
+          "projectId",
+          "revision",
+          "snagRevision",
+          "recordedBy",
+          "recordedAt"
+        ]
+      },
+      "LegacyImportCommitReceipt": {
+        "type": "object",
+        "properties": {
+          "formatVersion": {
+            "type": "integer"
+          },
+          "commitId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sessionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "operationId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "deviceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "actorId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "graphSHA256": {
+            "type": "string"
+          },
+          "acknowledgementVersion": {
+            "type": "string"
+          },
+          "policyVersion": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "published"
+            ]
+          },
+          "transactionGroup": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "firstSequence": {
+            "type": "integer"
+          },
+          "lastSequence": {
+            "type": "integer"
+          },
+          "journalEventCount": {
+            "type": "integer"
+          },
+          "publishedCounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "reusedDirectoryCount": {
+            "type": "integer"
+          },
+          "renderedDrawingCount": {
+            "type": "integer"
+          },
+          "opaqueDrawingCount": {
+            "type": "integer"
+          },
+          "decodedFileCount": {
+            "type": "integer"
+          },
+          "opaqueFileCount": {
+            "type": "integer"
+          },
+          "qualificationCounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "coverage": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "formatVersion",
+          "commitId",
+          "sessionId",
+          "projectionId",
+          "operationId",
+          "deviceId",
+          "actorId",
+          "workspaceId",
+          "projectId",
+          "graphSHA256",
+          "acknowledgementVersion",
+          "policyVersion",
+          "state",
+          "transactionGroup",
+          "firstSequence",
+          "lastSequence",
+          "journalEventCount",
+          "publishedCounts",
+          "reusedDirectoryCount",
+          "renderedDrawingCount",
+          "opaqueDrawingCount",
+          "decodedFileCount",
+          "opaqueFileCount",
+          "qualificationCounts",
+          "coverage",
+          "createdAt"
+        ]
+      },
+      "ImportedProjectGraph": {
+        "type": "object",
+        "description": "Published import records for one project under current project read authority. Byte content paths are authenticated gateways.",
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportedFileResponse"
+            }
+          },
+          "fileUses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportedFileUseResponse"
+            }
+          },
+          "photos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportedPhotoResponse"
+            }
+          },
+          "drawings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DrawingSheetResponse"
+            }
+          },
+          "opaqueDrawings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OpaqueImportedDrawingResponse"
+            }
+          },
+          "pins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DrawingPinResponse"
+            }
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportedCommentResponse"
+            }
+          },
+          "statusChanges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportedStatusChangeResponse"
+            }
+          },
+          "deletions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportedDeletionResponse"
+            }
+          },
+          "organisation": {
+            "$ref": "#/components/schemas/ProjectOrganisationResponse"
+          },
+          "folders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceFolderResponse"
+            }
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceTagResponse"
+            }
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LegacyImportCommitReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "projectId",
+          "files",
+          "fileUses",
+          "photos",
+          "drawings",
+          "opaqueDrawings",
+          "pins",
+          "comments",
+          "statusChanges",
+          "deletions",
+          "organisation",
+          "folders",
+          "tags"
+        ]
       }
     }
   }

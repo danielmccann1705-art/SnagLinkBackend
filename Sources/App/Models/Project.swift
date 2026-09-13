@@ -64,6 +64,12 @@ final class Project: Model, Content, @unchecked Sendable {
     @Field(key: "revision") var revision: Int64
     @Field(key: "platform_managed") var platformManaged: Bool
     @OptionalField(key: "archived_at") var archivedAt: Date?
+    @OptionalField(key: "imported_at") var importedAt: Date?
+    @OptionalField(key: "import_session_id") var importSessionId: UUID?
+    @OptionalField(key: "source_status") var sourceStatus: String?
+    @OptionalField(key: "source_created_at") var sourceCreatedAt: Date?
+    @OptionalField(key: "source_updated_at") var sourceUpdatedAt: Date?
+    @OptionalField(key: "cover_file_id") var coverFileId: UUID?
 
     @Timestamp(key: "created_at", on: .create)
     var createdAt: Date?

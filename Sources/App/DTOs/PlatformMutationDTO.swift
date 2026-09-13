@@ -54,6 +54,23 @@ struct CanonicalSnagValues: Content {
         currency = snag.currency
     }
 }
+/// Present only for imported legacy snags. `legacyClosureUnverified` must render
+/// as "Legacy closure — unverified", never as Accepted; `actionableReview` is false
+/// until a real completion attempt exists.
+struct SnagWorkflowQualification: Content, Equatable {
+    let qualification: String
+    let sourceStatus: String?
+    let sourceClosedAt: Date?
+    let requiresReconciliation: Bool
+    let legacyClosureUnverified: Bool
+    let actionableReview: Bool
+    let importedAt: Date?
+    init?(_ snag: Snag) {
+        guard let qualification = snag.workflowQualification else { return nil }
+        self.qualification = qualification; sourceStatus = snag.sourceStatus; sourceClosedAt = snag.sourceClosedAt
+        requiresReconciliation = true; legacyClosureUnverified = snag.status == "closed"; actionableReview = false; importedAt = snag.importedAt
+    }
+}
 struct PlatformSnagResponse: Content {
     let snag: SnagResponse
     /// Authoritative exact values for new clients. Optional only to decode stored
@@ -65,10 +82,13 @@ struct PlatformSnagResponse: Content {
     let publishedAt: Date?
     let archivedAt: Date?
     let archiveReason: String?
+    /// Absent for ordinary canonical snags and for older stored receipts.
+    let workflow: SnagWorkflowQualification?
     init(_ snag: Snag) {
         self.snag = SnagResponse(from: snag); revision = snag.revision; workflowRevision = snag.workflowRevision
         canonical = CanonicalSnagValues(snag)
         displayNumber = snag.displayNumber; publishedAt = snag.publishedAt; archivedAt = snag.archivedAt; archiveReason = snag.archiveReason
+        workflow = SnagWorkflowQualification(snag)
     }
 }
 struct RevisionConflict: Error {
