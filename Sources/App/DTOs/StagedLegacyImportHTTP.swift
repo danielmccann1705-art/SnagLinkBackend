@@ -63,26 +63,26 @@ struct StagedLegacyImportHTTP {
         try match(value.scope, workspaceID, sessionID)
         return .init(scope: value.scope, mutation: value.mutation, expectedRevision: value.expectedRevision)
     }
-    private static func match(_ scope: StagedLegacyImportScope, _ workspace: UUID, _ session: UUID) throws {
+    static func match(_ scope: StagedLegacyImportScope, _ workspace: UUID, _ session: UUID) throws {
         guard scope.workspaceId == workspace, scope.sessionId == session else { throw StagedLegacyImportService.bindingChanged() }
         guard LegacyProjectImportDecoder.validDigest(scope.exportSHA256), LegacyProjectImportDecoder.validDigest(scope.sourceFingerprint) else { throw invalid() }
         guard let canonical = try? ImportServerBinding(environment: scope.destination.environment, apiOrigin: scope.destination.apiOrigin),
               canonical.destination == scope.destination else { throw invalid() }
     }
-    @discardableResult private static func keys(_ value: Any?, _ names: Set<String>) throws -> [String: Any] {
+    @discardableResult static func keys(_ value: Any?, _ names: Set<String>) throws -> [String: Any] {
         guard let object = value as? [String: Any], Set(object.keys) == names else { throw invalid() }
         return object
     }
     private static func destination(_ value: Any?) throws { try keys(value, ["environment", "apiOrigin"]) }
     private static func mutation(_ value: Any?) throws { try keys(value, ["operationId", "deviceId"]) }
-    private static func scope(_ value: Any?) throws {
+    static func scope(_ value: Any?) throws {
         let object = try keys(value, ["sessionId", "workspaceId", "deviceId", "destination", "exportSHA256", "sourceFingerprint", "selectedProjectId"])
         try destination(object["destination"])
     }
-    private static func decode<T: Decodable>(_ data: Data) throws -> T {
+    static func decode<T: Decodable>(_ data: Data) throws -> T {
         do { return try JSONDecoder().decode(T.self, from: data) } catch { throw invalid() }
     }
-    private static func object(_ data: Data, limit: Int) throws -> [String: Any] {
+    static func object(_ data: Data, limit: Int) throws -> [String: Any] {
         guard !data.isEmpty, data.count <= limit else { throw oversized() }
         var scanner = EnvelopeKeys(bytes: Array(data)); try scanner.validate()
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw invalid() }

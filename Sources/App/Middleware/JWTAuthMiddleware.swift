@@ -29,7 +29,7 @@ struct JWTAuthMiddleware: AsyncMiddleware {
         return try await next.respond(to: request)
     }
 
-    static func authenticate(_ request: Request) async throws -> UserJWTPayload {
+    static func authenticate(_ request: Request, on database: Database? = nil) async throws -> UserJWTPayload {
         // Check for Authorization header
         guard let authHeader = request.headers.bearerAuthorization else {
             throw Abort(.unauthorized, reason: "Missing authorization header")
@@ -42,7 +42,7 @@ struct JWTAuthMiddleware: AsyncMiddleware {
         } catch {
             throw Abort(.unauthorized, reason: "Invalid or expired token")
         }
-        guard let user = try await User.find(payload.userId, on: request.db),
+        guard let user = try await User.find(payload.userId, on: database ?? request.db),
               user.lifecycleState == "active", user.authVersion == (payload.authVersion ?? 0),
               payload.subject.value == payload.userId.uuidString else {
             throw Abort(.unauthorized, reason: "Account is no longer available")

@@ -78,6 +78,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateCanonicalDrawings())
         app.migrations.add(CreateDrawingOriginalReceipts())
         app.migrations.add(CreateStagedLegacyImports())
+        app.migrations.add(CreateStagedImportOriginalReceipts())
 
         try await app.autoMigrate()
     } else {

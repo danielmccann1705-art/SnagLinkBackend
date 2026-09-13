@@ -14,7 +14,7 @@ struct StagedLegacyImportController: RouteCollection {
         let binding = try StagedLegacyImportHTTPGate.require(on: req.application)
         let workspaceID = try id("workspaceId", req)
         let value = try StagedLegacyImportHTTP.create(body(req))
-        let actor = try await actor(req)
+        let actor = try await StagedImportRequestBoundary.actor(req)
         do {
             let receipt = try await StagedLegacyImportService.create(value.command.bound(to: actor), descriptor: value.descriptor,
                 workspaceID: workspaceID, actor: actor, binding: binding, on: req.db)
@@ -24,32 +24,12 @@ struct StagedLegacyImportController: RouteCollection {
     @Sendable func receipt(req: Request) async throws -> Response {
         let binding = try StagedLegacyImportHTTPGate.require(on: req.application)
         let value = try StagedLegacyImportHTTP.read(body(req), workspaceID: id("workspaceId", req), sessionID: id("sessionId", req))
-        return try await response(StagedLegacyImportService.read(value.scope, actor: actor(req), binding: binding, on: req.db))
+        return try await response(StagedLegacyImportService.read(value.scope, actor: StagedImportRequestBoundary.actor(req), binding: binding, on: req.db))
     }
     @Sendable func abort(req: Request) async throws -> Response {
         let binding = try StagedLegacyImportHTTPGate.require(on: req.application)
         let command = try StagedLegacyImportHTTP.abort(body(req), workspaceID: id("workspaceId", req), sessionID: id("sessionId", req))
-        return try await response(StagedLegacyImportService.abort(command, actor: actor(req), binding: binding, on: req.db))
-    }
-    /// Refresh authentication after bounded body decoding; never upgrade a stale
-    /// JWT/browser request into a new authVersion merely by loading today's user.
-    private func actor(_ req: Request) async throws -> StagedLegacyImportActor {
-        let id = try req.requireAuthenticatedUserId()
-        let version: Int
-        if let jwt = req.auth.get(UserJWTPayload.self) {
-            let current = try await JWTAuthMiddleware.authenticate(req)
-            guard current.userId == id, current.authVersion == jwt.authVersion else { throw Abort(.unauthorized) }
-            version = current.authVersion ?? 0
-        }
-        else if let original = req.auth.get(BrowserPrincipal.self) {
-            let current = try await BrowserSessionService.authenticate(req, config: PlatformConfiguration.load(on: req.application))
-            guard current.userID == id, current.sessionID == original.sessionID,
-                  let row = try await VerifiedIdentityService.sql(req.db).raw("SELECT auth_version FROM browser_sessions WHERE id = \(bind: current.sessionID) AND user_id = \(bind: id) AND revoked_at IS NULL AND expires_at > \(bind: Date())").first() else { throw Abort(.unauthorized) }
-            version = try row.decode(column: "auth_version", as: Int.self)
-        } else { throw Abort(.unauthorized) }
-        let user = try await VerifiedIdentityService.activeUser(id, on: req.db)
-        guard user.authVersion == version else { throw Abort(.unauthorized) }
-        return .init(id: id, authVersion: version)
+        return try await response(StagedLegacyImportService.abort(command, actor: StagedImportRequestBoundary.actor(req), binding: binding, on: req.db))
     }
     private func body(_ req: Request) throws -> Data {
         guard req.headers.contentType == .json, req.headers.first(name: .contentEncoding) == nil,

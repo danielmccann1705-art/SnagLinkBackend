@@ -67,9 +67,9 @@ struct BrowserSessionService {
         return (token, BrowserPrincipal(userID: userID, sessionID: id, authenticatedAt: now, csrfToken: csrf))
     }
 
-    static func authenticate(_ req: Request, config: PlatformConfiguration) async throws -> BrowserPrincipal {
+    static func authenticate(_ req: Request, config: PlatformConfiguration, on database: Database? = nil) async throws -> BrowserPrincipal {
         guard let raw = RequestCredentialCookie.value(cookieName, on: req), raw.count <= 128,
-              let row = try await VerifiedIdentityService.sql(req.db).raw("""
+              let row = try await VerifiedIdentityService.sql(database ?? req.db).raw("""
                 SELECT s.id, s.user_id, s.authenticated_at, s.csrf_hash
                 FROM browser_sessions s JOIN users u ON u.id = s.user_id
                 WHERE s.token_hash = \(bind: SHA256Hasher.hash(token: raw))

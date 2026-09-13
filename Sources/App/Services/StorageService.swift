@@ -175,6 +175,18 @@ enum StorageService {
         return nil
     }
     static func requirePrivateStorage(app: Application) throws { _ = try privateBucket(app: app) }
+
+    /// Internal import-original transport only. Reuses the existing AWSClient and
+    /// private bucket; no public/local fallback or generic caller-supplied key.
+    /// Tests inject an in-memory/Soto HTTP test store. Real local disk transport
+    /// and public upload routes require separate lifecycle/size-limit work.
+    static func stagedImportOriginalStore(app: Application) throws -> SotoStagedImportOriginalStore {
+        guard let bucket = try privateBucket(app: app) else {
+            throw Abort(.serviceUnavailable, reason: "Private import original storage is not configured")
+        }
+        return .init(s3: _s3Client, privateBucket: bucket)
+    }
+
     private static func privatePath(_ key: String, app: Application) throws -> URL {
         let parts = key.split(separator: "/")
         guard parts.count == 5, parts[0] == "platform", parts[1...3].allSatisfy({ UUID(uuidString: String($0)) != nil }),
