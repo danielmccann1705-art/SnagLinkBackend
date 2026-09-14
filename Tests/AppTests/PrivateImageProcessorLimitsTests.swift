@@ -11,7 +11,9 @@ final class PrivateImageProcessorLimitsTests: XCTestCase {
         XCTAssertNotEqual(value("map"), "0", "a zero map limit confines the pixel cache to RAM and large photos fail to decode")
         XCTAssertNotEqual(value("disk"), "0")
         XCTAssertEqual(value("thread"), "1")
-        XCTAssertNotNil(value("time"))
+        let time = Int(value("time") ?? "0") ?? 0
+        XCTAssertGreaterThanOrEqual(time, 60, "a 25-megapixel sheet takes about 21 s on a quarter of a core; a 30 s ceiling made it an opaque file")
+        XCTAssertGreaterThan(PrivateImageProcessor.magickWait, Double(time), "the wall-clock wait must outlast the resource limit")
         #if canImport(ImageIO)
         throw XCTSkip("ImageMagick path is only used on the Linux runtime")
         #else

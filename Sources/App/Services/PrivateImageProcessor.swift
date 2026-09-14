@@ -23,9 +23,12 @@ enum PrivateImageProcessor {
     /// must be allowed to spill from memory into a bounded memory-mapped/disk cache under the
     /// private temporary directory; with `map 0` and `disk 0` every photo above roughly
     /// 16 megapixels failed to decode and was silently kept as an opaque file.
-    static let magickLimits = ["-limit", "memory", "256MiB", "-limit", "map", "512MiB", "-limit", "disk", "1GiB", "-limit", "thread", "1", "-limit", "time", "30"]
-    /// Wall-clock allowance for one ImageMagick invocation; a little above the `time` limit above.
-    static let magickWait: TimeInterval = 35
+    static let magickLimits = ["-limit", "memory", "256MiB", "-limit", "map", "512MiB", "-limit", "disk", "1GiB", "-limit", "thread", "1", "-limit", "time", "90"]
+    /// Wall-clock allowance for one ImageMagick invocation, a little above the `time` limit
+    /// above and inside the caller's whole-operation budget. Measured on a quarter of a core,
+    /// a 25-megapixel sheet takes about 21 s and a 17-megapixel photo about 11 s; the earlier
+    /// 30 s ceiling turned the larger ones into opaque files whenever the container was busy.
+    static let magickWait: TimeInterval = 100
     static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 
     static func validateSignature(_ data: Data, mime: String) throws {
