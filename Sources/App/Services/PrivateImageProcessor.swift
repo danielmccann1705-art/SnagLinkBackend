@@ -18,6 +18,14 @@ enum PrivateImageProcessor {
     }
     static let maximumPixelSize = 4096
     static let maximumBytes = 10 * 1024 * 1024
+    /// ImageMagick resource limits for the Linux runtime. The pixel cache of a photo up to the
+    /// 40-megapixel ceiling in `dimensions` is about 640 MB at 16 bytes per pixel, so the cache
+    /// must be allowed to spill from memory into a bounded memory-mapped/disk cache under the
+    /// private temporary directory; with `map 0` and `disk 0` every photo above roughly
+    /// 16 megapixels failed to decode and was silently kept as an opaque file.
+    static let magickLimits = ["-limit", "memory", "256MiB", "-limit", "map", "512MiB", "-limit", "disk", "1GiB", "-limit", "thread", "1", "-limit", "time", "30"]
+    /// Wall-clock allowance for one ImageMagick invocation; a little above the `time` limit above.
+    static let magickWait: TimeInterval = 35
     static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
 
     static func validateSignature(_ data: Data, mime: String) throws {
@@ -61,14 +69,14 @@ enum PrivateImageProcessor {
         return .init(jpeg: output as Data, width: image.width, height: image.height, sourceWidth: swapped ? height : width, sourceHeight: swapped ? width : height)
         #else
         // The runtime image includes ImageMagick. No shell, URL, delegate-selected
-        // input format, client filename or unbounded pixel/disk allocation is used.
+        // input format or client filename is used; pixel, cache and time allocation are bounded.
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("snaglist-image-\(UUID())")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: root) }
         let input = root.appendingPathComponent("input"), output = root.appendingPathComponent("output.jpg")
         try data.write(to: input, options: .atomic)
         let format = mime == "image/png" ? "png" : "jpeg"
-        let limits = ["-limit", "memory", "256MiB", "-limit", "map", "0", "-limit", "disk", "0", "-limit", "thread", "1", "-limit", "time", "15"]
+        let limits = magickLimits
         let info = try run("/usr/bin/identify", limits + ["-ping", "-format", "%w %h %n", "\(format):\(input.path)"])
         let values = String(decoding: info, as: UTF8.self).split(separator: " ").compactMap { Int($0) }
         guard values.count == 3, values[2] == 1 else { throw invalid() }
@@ -98,7 +106,7 @@ enum PrivateImageProcessor {
         process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
         process.terminationHandler = { _ in ended.signal() }
         try process.run()
-        if ended.wait(timeout: .now() + 20) == .timedOut {
+        if ended.wait(timeout: .now() + magickWait) == .timedOut {
             process.terminate()
             if ended.wait(timeout: .now() + 2) == .timedOut { kill(process.processIdentifier, SIGKILL); _ = ended.wait(timeout: .now() + 2) }
             throw invalid()
