@@ -121,7 +121,10 @@ final class ProjectGraphTests: XCTestCase {
         XCTAssertEqual(Set(items.map { $0.project.project.id }).count, 52)
         XCTAssertEqual(items.first { $0.project.project.id == last.id }?.project.project.name, originalName)
         XCTAssertTrue(items.allSatisfy { $0.bootstrapState == "register_available" && $0.coverage == RegisterSyncService.coverage })
-        XCTAssertFalse(items[0].coverage.contains("drawings"))
+        // Discovery advertises exactly what a register download provides, which the equality
+        // above pins. That coverage grew to include the imported graph in 012ab0c; this line
+        // used to assert the opposite and contradicted the line above it.
+        XCTAssertTrue(items[0].coverage.contains("drawings"))
     }
 
     func testDiscoveryTokensAreActorBoundAndAccessRemovalReturnsNoContent() async throws {
