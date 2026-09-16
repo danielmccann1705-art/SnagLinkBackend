@@ -27,6 +27,9 @@
         "R2_BUCKET_NAME": "snaglist-staging-uploads",
         "R2_PUBLIC_URL": ""
       },
+      // The container sleeps after ten minutes; cron is what wakes it. An in-process
+      // timer inside a sleeping container never reaches its next tick.
+      "triggers": { "crons": ["0 * * * *"] },
       "containers": [{
         "class_name": "SnaglistBackend",
         "image": "../../Dockerfile",

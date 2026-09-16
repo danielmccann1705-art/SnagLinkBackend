@@ -1,5 +1,6 @@
 // This adapter is deliberately staging-only. Production gets a separately reviewed
 // configuration after fresh-database compatibility and end-to-end acceptance.
+/** @returns {Record<string, string>} */
 export function containerEnvironment(env) {
   if (env.STAGING_ENABLED !== 'true') throw new Error('Staging is not enabled');
   for (const key of ['DATABASE_URL', 'STAGING_DATABASE_HOST', 'JWT_SECRET',
@@ -43,6 +44,16 @@ export function containerEnvironment(env) {
     throw new Error('The unified candidate requires its separate account-scoped upload bucket');
   }
   if (env.JWT_SECRET.length < 32) throw new Error('A separate strong staging JWT secret is required');
+  // Optional. Absent, the container's maintenance route does not exist and the
+  // scheduled handler does nothing — which is a visible no-op, not a silent failure.
+  const maintenance = {};
+  if (env.MAINTENANCE_SECRET !== undefined) {
+    if (typeof env.MAINTENANCE_SECRET !== 'string' || env.MAINTENANCE_SECRET.length < 32 ||
+        env.MAINTENANCE_SECRET === env.JWT_SECRET || env.MAINTENANCE_SECRET === env.LINK_GRANT_TOKEN_KEY) {
+      throw new Error('The maintenance secret must be at least 32 characters and distinct from the JWT and Contractor link keys');
+    }
+    maintenance.MAINTENANCE_SECRET = env.MAINTENANCE_SECRET;
+  }
   if (env.REVENUECAT_SECRET_API_KEY || env.APNS_PRIVATE_KEY) {
     throw new Error('Purchase and push providers are disabled in staging');
   }
@@ -69,6 +80,7 @@ export function containerEnvironment(env) {
     R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID,
     R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
     PORT: '8080',
+    ...maintenance,
     ...email,
     ...platformEnvironment(env),
     ...appleEnvironment(env, candidate),
@@ -80,6 +92,7 @@ export function containerEnvironment(env) {
 // and the team credential that turns an authorization code into a refresh token so a
 // deleted account's Apple grant can be revoked. Both are optional, both are all-or-
 // nothing, and the audience is named explicitly — never widened to make a build work.
+/** @returns {Record<string, string>} */
 function appleEnvironment(env, candidate) {
   const keys = ['APPLE_BUNDLE_ID', 'APPLE_CLIENT_ID', 'APPLE_TEAM_ID', 'APPLE_KEY_ID',
     'APPLE_PRIVATE_KEY', 'APPLE_CREDENTIAL_KEY', 'APPLE_CREDENTIAL_PREVIOUS_KEY'];
@@ -124,6 +137,7 @@ function appleEnvironment(env, candidate) {
 // Private legacy import preparation/publication is an explicit staging opt-in for the
 // enabled unified candidate only, bound to the candidate's own API origin. The backend
 // separately refuses it outside development/staging; production never receives it.
+/** @returns {Record<string, string>} */
 function importPreparation(env, candidate, base) {
   if (env.STAGED_LEGACY_IMPORT_ENABLED === undefined && env.IMPORT_PREVIEW_API_ORIGIN === undefined) return {};
   if (!candidate || env.STAGING_PLATFORM_ENABLED !== 'true' ||
@@ -135,6 +149,7 @@ function importPreparation(env, candidate, base) {
 
 // Keep the recovery image's configuration valid until the unified candidate is
 // deliberately enabled. Never silently drop a partially supplied platform config.
+/** @returns {Record<string, string>} */
 function platformEnvironment(env) {
   const keys = ['PLATFORM_ENVIRONMENT', 'PORTAL_ORIGIN', 'R2_PRIVATE_BUCKET_NAME',
     'LINK_GRANT_TOKEN_KEY', 'LINK_GRANT_TOKEN_PREVIOUS_KEY', 'GOOGLE_AUTH_ENVIRONMENT',

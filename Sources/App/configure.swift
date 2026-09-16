@@ -83,6 +83,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateLegacyImportPublication())
         app.migrations.add(RelaxStagedLegacyImportSourceUniqueness())
         app.migrations.add(CreateAppleCredentials())
+        app.migrations.add(CreateCleanupRuns())
 
         try await app.autoMigrate()
     } else {
