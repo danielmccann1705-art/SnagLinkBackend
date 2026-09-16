@@ -71,8 +71,54 @@ export function containerEnvironment(env) {
     PORT: '8080',
     ...email,
     ...platformEnvironment(env),
+    ...appleEnvironment(env, candidate),
     ...importPreparation(env, candidate, base)
   };
+}
+
+// Sign in with Apple. Two separable things: the audience staging is allowed to accept,
+// and the team credential that turns an authorization code into a refresh token so a
+// deleted account's Apple grant can be revoked. Both are optional, both are all-or-
+// nothing, and the audience is named explicitly — never widened to make a build work.
+function appleEnvironment(env, candidate) {
+  const keys = ['APPLE_BUNDLE_ID', 'APPLE_CLIENT_ID', 'APPLE_TEAM_ID', 'APPLE_KEY_ID',
+    'APPLE_PRIVATE_KEY', 'APPLE_CREDENTIAL_KEY', 'APPLE_CREDENTIAL_PREVIOUS_KEY'];
+  if (keys.every(key => env[key] === undefined)) return {};
+  if (!candidate || env.STAGING_PLATFORM_ENABLED !== 'true') {
+    throw new Error('Apple sign-in configuration requires the enabled unified candidate');
+  }
+  // Staging signs in as the staging bundle, and may accept only that audience.
+  if (env.APPLE_BUNDLE_ID !== 'com.snaglist.app.staging' ||
+      env.APPLE_CLIENT_ID !== 'com.snaglist.app.staging') {
+    throw new Error('Staging Apple sign-in requires the staging bundle identifier');
+  }
+  const apple = { APPLE_BUNDLE_ID: env.APPLE_BUNDLE_ID, APPLE_CLIENT_ID: env.APPLE_CLIENT_ID };
+  const exchange = ['APPLE_TEAM_ID', 'APPLE_KEY_ID', 'APPLE_PRIVATE_KEY', 'APPLE_CREDENTIAL_KEY'];
+  if (exchange.some(key => env[key] !== undefined)) {
+    if (exchange.some(key => typeof env[key] !== 'string' || !env[key].trim())) {
+      throw new Error('Apple token exchange needs the team, key, private key and credential key together');
+    }
+    if (!/^[A-Za-z0-9]{1,20}$/.test(env.APPLE_TEAM_ID) || !/^[A-Za-z0-9]{1,20}$/.test(env.APPLE_KEY_ID)) {
+      throw new Error('The Apple team and key identifiers are malformed');
+    }
+    if (!env.APPLE_PRIVATE_KEY.includes('BEGIN PRIVATE KEY')) {
+      throw new Error('The Apple sign-in key must be the PKCS#8 private key Apple issued');
+    }
+    if (!validCapabilityKey(env.APPLE_CREDENTIAL_KEY) ||
+        env.APPLE_CREDENTIAL_KEY === env.JWT_SECRET ||
+        env.APPLE_CREDENTIAL_KEY === env.LINK_GRANT_TOKEN_KEY) {
+      throw new Error('A separate 32-byte Apple credential key is required');
+    }
+    for (const key of exchange) apple[key] = env[key];
+    if (env.APPLE_CREDENTIAL_PREVIOUS_KEY !== undefined) {
+      if (!validCapabilityKey(env.APPLE_CREDENTIAL_PREVIOUS_KEY) ||
+          env.APPLE_CREDENTIAL_PREVIOUS_KEY === env.APPLE_CREDENTIAL_KEY) {
+        throw new Error('The previous Apple credential key must be valid and distinct');
+      }
+      apple.APPLE_CREDENTIAL_PREVIOUS_KEY = env.APPLE_CREDENTIAL_PREVIOUS_KEY;
+    }
+  }
+  return apple;
 }
 
 // Private legacy import preparation/publication is an explicit staging opt-in for the

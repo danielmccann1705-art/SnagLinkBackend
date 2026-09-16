@@ -6,7 +6,9 @@ import Crypto
 
 struct AuthController: RouteCollection {
     // This server authenticates the Snaglist iOS app. Never skip audience validation.
-    static let appleApplicationIdentifier = "com.snaglist.app"
+    // The accepted audiences come from `AppleIdentityConfiguration`, which defaults to
+    // the shipping bundle alone and only ever widens to an explicitly named one.
+    static let appleApplicationIdentifier = AppleIdentityConfiguration.releaseAudience
     func boot(routes: RoutesBuilder) throws {
         let auth = routes.grouped("api", "v1", "auth")
         auth.post("apple", use: appleSignIn)
@@ -23,14 +25,12 @@ struct AuthController: RouteCollection {
     @Sendable
     func appleSignIn(req: Request) async throws -> AuthResponse {
         let input = try req.content.decode(AppleSignInRequest.self)
+        let configuration = AppleIdentityConfiguration.load(on: req.application)
 
         // Verify Apple identity token using JWKS (signature + issuer + expiry)
         let appleToken: AppleIdentityToken
         do {
-            appleToken = try await req.jwt.apple.verify(
-                input.identityToken,
-                applicationIdentifier: Self.appleApplicationIdentifier
-            ).get()
+            appleToken = try await configuration.verify(input.identityToken, on: req)
         } catch {
             throw Abort(.unauthorized, reason: "Invalid Apple identity token")
         }
@@ -42,7 +42,34 @@ struct AuthController: RouteCollection {
             try await VerifiedIdentityService.resolveApple(subject: appleUserId, email: email, name: input.firstName, on: db)
         }
 
+        // The app has always sent the authorization code; until now the server dropped
+        // it. Exchanging it is what gives account deletion something to revoke with.
+        // A failure here never fails sign-in — the user came to sign in, not to
+        // provision a credential — but it is recorded so the gap is visible.
+        await storeRevocationCredential(input: input, user: user, configuration: configuration, on: req)
+
         return try issueAuthResponse(for: user, on: req)
+    }
+
+    /// Best-effort. Absent configuration, an absent code and an Apple refusal are all
+    /// the same outcome from sign-in's point of view: no credential stored, sign-in
+    /// proceeds. Account deletion reports the consequence rather than hiding it.
+    private func storeRevocationCredential(input: AppleSignInRequest, user: User, configuration: AppleIdentityConfiguration, on req: Request) async {
+        guard let exchange = configuration.exchange,
+              let code = input.authorizationCode?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !code.isEmpty, code.count <= 2048 else { return }
+        guard let userID = try? user.requireID() else { return }
+        guard let refreshToken = await AppleTokenService.exchange(
+            authorizationCode: code, exchange: exchange, on: req.client, logger: req.logger
+        ) else { return }
+        do {
+            try await AppleCredentialService.store(
+                refreshToken: refreshToken, userID: userID, clientID: exchange.clientID,
+                app: req.application, on: req.db
+            )
+        } catch {
+            req.logger.error("The Apple revocation credential could not be stored")
+        }
     }
 
     // MARK: - Magic-link request
@@ -194,6 +221,10 @@ struct AuthController: RouteCollection {
 
 struct AppleSignInRequest: Content {
     let identityToken: String
+    /// Sent by the app since the Apple sign-in path was written (`AuthManager` extracts
+    /// it from the credential, `APIClient` puts it in the body). Optional here so an
+    /// older client, or one that received no code, still signs in.
+    let authorizationCode: String?
     let firstName: String?
     let lastName: String?
 }
