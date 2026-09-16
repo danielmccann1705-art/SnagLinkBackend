@@ -88,7 +88,10 @@ struct PlatformSnagService {
         try await apply(command.fields, to: snag, timezone: CanonicalValueService.timezone(project, on: db))
         guard let row = try await VerifiedIdentityService.sql(db).raw("UPDATE projects SET next_snag_number = next_snag_number + 1 WHERE id = \(bind: projectID) RETURNING next_snag_number - 1 AS number").first() else { throw Abort(.notFound) }
         let number = try row.decode(column: "number", as: Int64.self)
-        snag.displayNumber = number; snag.reference = "SL\(number)"
+        snag.displayNumber = number
+        // The register keeps one numbering scheme: an imported project continues the
+        // references its snags arrived with rather than starting a second one beside them.
+        snag.reference = try await SnagReferenceScheme.next(number: number, projectID: projectID, on: db)
         try await snag.save(on: db)
         let response = PlatformSnagResponse(snag)
         try await PlatformMutationService.change(workspaceID: workspaceID, projectID: projectID, type: "snag", entityID: command.id, revision: 1, kind: "created", fields: Array(command.fields.keys) + ["reference", "status"], payload: response, actorID: actorID, on: db)
