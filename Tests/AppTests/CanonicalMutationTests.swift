@@ -198,8 +198,11 @@ final class CanonicalMutationTests: XCTestCase {
         let start = try await request(.POST, path + "/register-snapshots", user: owner)
         XCTAssertEqual(start.status, .ok, start.body.string)
         let first = try start.content.decode(RegisterSnapshotPage.self)
-        XCTAssertEqual(first.total, 102); XCTAssertEqual(first.items.count, 100); XCTAssertNil(first.changesCursor)
-        XCTAssertEqual(first.coverage, ["project", "snags", "contractors", "trades", "attachedMedia", "completionAttempts", "reviewDecisions", "comments", "assignmentHistory", "projectMetadataV2"])
+        // 101 snags, the project, and the project's organisation record.
+        XCTAssertEqual(first.total, 103); XCTAssertEqual(first.items.count, 100); XCTAssertNil(first.changesCursor)
+        // The contract, not a copy of it: a snapshot declares exactly what this server covers,
+        // and a cursor keeps the coverage it was issued with however that list later grows.
+        XCTAssertEqual(first.coverage, RegisterSyncService.coverage)
         let last = records.last!
         let update = try await request(.PATCH, path + "/snags/\(last.snag.id)", user: owner, body: ["mutation": metadata(), "expectedRevision": 1, "fields": ["title": "Changed while download was open"]])
         XCTAssertEqual(update.status, .ok)
@@ -207,11 +210,13 @@ final class CanonicalMutationTests: XCTestCase {
         let page = try await request(.GET, path + "/register-snapshots?snapshot=\(first.snapshotToken)&offset=100", user: owner)
         XCTAssertEqual(page.status, .ok, page.body.string)
         let final = try page.content.decode(RegisterSnapshotPage.self)
-        XCTAssertEqual(final.items.count, 2); XCTAssertNil(final.nextOffset)
-        let downloaded = try final.items.map { try PlatformMutationService.decode(PlatformSnagResponse.self, PlatformMutationService.encode($0.data)) }
+        XCTAssertEqual(final.items.count, 3); XCTAssertNil(final.nextOffset)
+        XCTAssertEqual(final.items.filter { $0.type == "projectOrganisation" }.count, 1, "the organisation record rides the last page")
+        let downloaded = try final.items.filter { $0.type == "snag" }
+            .map { try PlatformMutationService.decode(PlatformSnagResponse.self, PlatformMutationService.encode($0.data)) }
         XCTAssertEqual(downloaded.last?.snag.title, "Plot inspection item 101")
         XCTAssertFalse(final.items.contains { $0.id == new.snag.id })
-        XCTAssertEqual(Set((first.items + final.items).map(\.id)).count, 102)
+        XCTAssertEqual(Set((first.items + final.items).map(\.id)).count, 102, "the organisation record shares the project's ID")
         let delta = try await request(.GET, path + "/changes?cursor=\(final.changesCursor!)", user: owner)
         XCTAssertEqual(delta.status, .ok, delta.body.string)
         let changes = try delta.content.decode(ProjectChangePage.self)
@@ -251,7 +256,9 @@ final class CanonicalMutationTests: XCTestCase {
         let old = try await request(.GET, path + "/changes?cursor=\(snapshot.changesCursor!)", user: member)
         XCTAssertEqual(old.status, .conflict); XCTAssertTrue(old.body.string.contains("rebootstrap_required"))
         let fresh = try await request(.POST, path + "/register-snapshots", user: member)
-        XCTAssertEqual(fresh.status, .ok); XCTAssertEqual(try fresh.content.decode(RegisterSnapshotPage.self).total, 2)
+        XCTAssertEqual(fresh.status, .ok)
+        // The project, its one snag, and the project's organisation record.
+        XCTAssertEqual(try fresh.content.decode(RegisterSnapshotPage.self).total, 3)
     }
     func testExpiredCursorAndSnapshotRequestExplicitRebootstrap() async throws {
         let owner = try await user(), project = try await project(owner), path = "api/v2/projects/\(project.project.id)"
@@ -389,7 +396,7 @@ final class CanonicalMutationTests: XCTestCase {
         let contractor = try await directory(owner, project: project, type: "contractors", fields: ["companyName": "Synthetic Plumbing", "tradeIds": [trade.id.uuidString]])
         let start = try await request(.POST, "api/v2/projects/\(project.project.id)/register-snapshots", user: owner)
         let snapshot = try start.content.decode(RegisterSnapshotPage.self)
-        XCTAssertEqual(Set(snapshot.items.map(\.type)), ["project", "contractor", "trade"])
+        XCTAssertEqual(Set(snapshot.items.map(\.type)), ["project", "contractor", "trade", "projectOrganisation"])
         _ = try await directory(owner, project: project, type: "contractors", fields: ["notes": "Site gate code shared separately"], id: contractor.id, expected: 1)
         let delta = try await request(.GET, "api/v2/projects/\(project.project.id)/changes?cursor=\(snapshot.changesCursor!)", user: owner)
         let changes = try delta.content.decode(ProjectChangePage.self)
