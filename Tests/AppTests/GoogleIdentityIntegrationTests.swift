@@ -18,8 +18,9 @@ final class GoogleIdentityIntegrationTests: XCTestCase {
     }
     override func tearDown() async throws { if let app { try await app.asyncShutdown() } }
 
-    func proof(email: String? = nil) -> GoogleIdentityProof {
-        .init(subject: "synthetic-google-\(UUID())", contactEmail: email.map(EmailValidator.normalize), displayName: "Synthetic manager")
+    func proof(email: String? = nil, verified: Bool = false) -> GoogleIdentityProof {
+        .init(subject: "synthetic-google-\(UUID())", contactEmail: email.map(EmailValidator.normalize),
+              displayName: "Synthetic manager", contactEmailIsVerified: verified && email != nil)
     }
     func apple() async throws -> User {
         try await app.db.transaction { db in
@@ -37,16 +38,59 @@ final class GoogleIdentityIntegrationTests: XCTestCase {
         catch { XCTAssertEqual((error as? Abort)?.status, status, file: file, line: line) }
     }
 
-    func testStableGoogleIdentityDoesNotBecomeVerifiedEmailOrChangeOnContactHint() async throws {
+    func testAnUnverifiedGoogleContactHintNeverBecomesAVerifiedEmail() async throws {
         let first = proof(email: "google-\(UUID())@example.test")
         let user = try await app.db.transaction { db in try await GoogleIdentityService.resolve(first, on: db) }
         let returned = try await app.db.transaction { db in
-            try await GoogleIdentityService.resolve(.init(subject: first.subject, contactEmail: "changed-\(UUID())@example.test", displayName: "Changed"), on: db)
+            try await GoogleIdentityService.resolve(.init(subject: first.subject, contactEmail: "changed-\(UUID())@example.test", displayName: "Changed", contactEmailIsVerified: false), on: db)
         }
         XCTAssertEqual(returned.id, user.id); XCTAssertEqual(returned.authProvider, "google")
         XCTAssertEqual(returned.email, first.contactEmail)
         let emails = try await VerifiedIdentityService.verifiedEmails(for: user.requireID(), on: app.db)
-        XCTAssertTrue(emails.isEmpty, "Google contact hints cannot satisfy company invitation email proof")
+        XCTAssertTrue(emails.isEmpty, "an unverified contact hint cannot satisfy company invitation email proof")
+    }
+
+    /// An address Google says it has verified is proof of the address, so someone
+    /// invited at it can accept without a second round trip by email.
+    func testAVerifiedGoogleEmailBecomesAVerifiedEmailOnTheAccountItSignsIn() async throws {
+        let email = "verified-\(UUID().uuidString.lowercased())@example.test"
+        let signIn = proof(email: email, verified: true)
+        let user = try await app.db.transaction { db in try await GoogleIdentityService.resolve(signIn, on: db) }
+        var emails = try await VerifiedIdentityService.verifiedEmails(for: user.requireID(), on: app.db)
+        XCTAssertEqual(emails, [email])
+        // Repeating the sign-in neither duplicates the identity nor fails.
+        let again = try await app.db.transaction { db in try await GoogleIdentityService.resolve(signIn, on: db) }
+        XCTAssertEqual(again.id, user.id)
+        emails = try await VerifiedIdentityService.verifiedEmails(for: user.requireID(), on: app.db)
+        XCTAssertEqual(emails, [email])
+    }
+
+    /// Proof of an address is never proof of control of an account that already holds
+    /// it. Google sign-in still refuses to select that account, and the address stays
+    /// exactly where it is — verifying it changes nothing about who owns it.
+    func testAVerifiedGoogleEmailHeldByAnotherAccountStillCannotTakeThatAccount() async throws {
+        let email = "contested-\(UUID().uuidString.lowercased())@example.test"
+        let owner = try await app.db.transaction { db in
+            try await VerifiedIdentityService.resolveEmail(email, name: "First owner", on: db)
+        }
+        let contested = proof(email: email, verified: true)
+        await assertStatus(.conflict) {
+            _ = try await app.db.transaction { db in try await GoogleIdentityService.resolve(contested, on: db) }
+        }
+        let held = try await VerifiedIdentityService.verifiedEmails(for: owner.requireID(), on: app.db)
+        XCTAssertEqual(held, [email])
+    }
+
+    /// Connecting Google to an account the caller already proved adopts the address too.
+    func testConnectingGoogleAdoptsItsVerifiedEmail() async throws {
+        let email = "connected-\(UUID().uuidString.lowercased())@example.test"
+        let user = try await apple()
+        let connected = proof(email: email, verified: true)
+        try await app.db.transaction { db in
+            try await GoogleIdentityService.link(connected, to: user.requireID(), on: db)
+        }
+        let emails = try await VerifiedIdentityService.verifiedEmails(for: user.requireID(), on: app.db)
+        XCTAssertEqual(emails, [email])
     }
 
     func testExplicitGoogleLinkKeepsExistingAppleUserAndPurchaseIdentity() async throws {

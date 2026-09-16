@@ -48,7 +48,7 @@ final class GoogleAuthEndpointTests: XCTestCase {
         let claims = GoogleIdentityClaims(iss: .init(value: "https://accounts.google.com"), sub: .init(value: subject),
             aud: .init(value: [provider.webClientID]), exp: .init(value: Date().addingTimeInterval(3600)), iat: .init(value: Date()),
             azp: ios ? provider.iosClientID : nil, nonce: nonce ?? challenge.nonce,
-            email: "synthetic-\(UUID().uuidString.lowercased())@example.test", name: "Synthetic Google manager")
+            email: "synthetic-\(UUID().uuidString.lowercased())@example.test", emailVerified: nil, name: "Synthetic Google manager")
         return try signers.sign(claims, kid: "synthetic-rsa")
     }
     func verifyBody(_ challenge: GoogleChallengeResponse, identity: String) -> [String: String] {

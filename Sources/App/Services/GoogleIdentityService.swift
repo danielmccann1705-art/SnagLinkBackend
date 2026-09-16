@@ -9,7 +9,9 @@ struct GoogleIdentityService {
         let contactEmail = proof.contactEmail.map(EmailValidator.normalize)
         try await VerifiedIdentityService.lock("identity-google:" + proof.subject, on: db)
         if let existing = try await identityOwner(proof.subject, on: db) {
-            return try await VerifiedIdentityService.activeUser(existing, on: db)
+            let user = try await VerifiedIdentityService.activeUser(existing, on: db)
+            try await adoptVerifiedEmail(proof, for: user, on: db)
+            return user
         }
         // A matching contact hint is not account-control evidence. Keep the
         // existing recovery/linking route instead of moving data or purchases.
@@ -27,7 +29,17 @@ struct GoogleIdentityService {
         let user = User(appleUserId: nil, email: contactEmail, name: proof.displayName, authProvider: .google)
         try await user.save(on: db)
         try await insert(proof.subject, for: user.requireID(), on: db)
+        try await adoptVerifiedEmail(proof, for: user, on: db)
         return user
+    }
+
+    /// An address Google says it has verified is proof of that address, so a person
+    /// invited at it can accept without a second round trip by email. It is still
+    /// not account-control evidence: the subject above chose the account, and an
+    /// address another account already holds is left where it is.
+    private static func adoptVerifiedEmail(_ proof: GoogleIdentityProof, for user: User, on db: Database) async throws {
+        guard proof.contactEmailIsVerified, let email = proof.contactEmail else { return }
+        try await VerifiedIdentityService.adoptProviderVerifiedEmail(email, to: user.requireID(), on: db)
     }
 
     /// Both identities must be proven by the caller's account-bound challenge.
@@ -48,6 +60,9 @@ struct GoogleIdentityService {
             throw Abort(.conflict, reason: "Another Google account is already connected to this Snaglist account", identifier: "google_already_connected")
         }
         try await insert(proof.subject, for: userID, on: db)
+        if proof.contactEmailIsVerified, let email = proof.contactEmail {
+            try await VerifiedIdentityService.adoptProviderVerifiedEmail(email, to: userID, on: db)
+        }
     }
 
     private static func identityOwner(_ subject: String, on db: Database) async throws -> UUID? {

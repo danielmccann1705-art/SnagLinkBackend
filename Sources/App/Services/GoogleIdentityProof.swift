@@ -27,10 +27,29 @@ struct GoogleIdentityConfigurationKey: StorageKey { typealias Value = GoogleIden
 
 struct GoogleIdentityProof: Sendable {
     let subject: String
-    /// Contact hints only. Google sign-in never creates an email-provider identity
-    /// or selects an existing Snaglist account by matching these fields.
+    /// Contact hints. Google sign-in never selects an existing Snaglist account by
+    /// matching these fields — the subject alone chooses the account.
     let contactEmail: String?
     let displayName: String?
+    /// Google's own assertion that it has verified this address. That is evidence
+    /// about the address, not about any Snaglist account, so it may be adopted as a
+    /// verified email when no other account holds it — and never otherwise.
+    let contactEmailIsVerified: Bool
+}
+
+/// Google sends this claim as a JSON boolean, and historically as the strings
+/// "true" and "false". Anything else counts as unverified.
+struct GoogleVerifiedEmailClaim: Codable, Sendable {
+    let value: Bool
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let flag = try? container.decode(Bool.self) { value = flag; return }
+        value = (try? container.decode(String.self))?.lowercased() == "true"
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(value)
+    }
 }
 
 enum GoogleIdentitySurface: String, Codable, Sendable { case web, ios }
@@ -44,7 +63,13 @@ struct GoogleIdentityClaims: JWTPayload {
     let azp: String?
     let nonce: String?
     let email: String?
+    let emailVerified: GoogleVerifiedEmailClaim?
     let name: String?
+
+    enum CodingKeys: String, CodingKey {
+        case iss, sub, aud, exp, iat, azp, nonce, email, name
+        case emailVerified = "email_verified"
+    }
 
     func verify(using signer: JWTSigner) throws {
         guard ["https://accounts.google.com", "accounts.google.com"].contains(iss.value),
@@ -101,7 +126,8 @@ struct GoogleIdentityVerifier {
             }
             let name = claims.name?.trimmingCharacters(in: .whitespacesAndNewlines)
             return GoogleIdentityProof(subject: claims.sub.value, contactEmail: email,
-                                       displayName: name.flatMap { $0.isEmpty ? nil : String($0.prefix(100)) })
+                                       displayName: name.flatMap { $0.isEmpty ? nil : String($0.prefix(100)) },
+                                       contactEmailIsVerified: email != nil && claims.emailVerified?.value == true)
         } catch {
             // JWT library diagnostics can contain claim values. Keep those out of
             // the response and logs; a provider credential is never diagnostic text.

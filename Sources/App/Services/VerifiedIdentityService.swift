@@ -74,6 +74,24 @@ struct VerifiedIdentityService {
         try await addIdentity(provider: "email", subject: email, userID: userID, on: db)
     }
 
+    /// Adopts an address the identity provider has itself verified. Proof of the
+    /// address is not proof of control of an account that already holds it, so an
+    /// address claimed elsewhere is left exactly as it is and this reports false
+    /// instead of throwing: a sign-in must not fail because someone else got there
+    /// first.
+    @discardableResult
+    static func adoptProviderVerifiedEmail(_ value: String, to userID: UUID, on db: Database) async throws -> Bool {
+        let email = EmailValidator.normalize(value)
+        guard EmailValidator.isValidFormat(email), email.count <= 254 else { return false }
+        try await lock("identity-email:" + email, on: db)
+        if let row = try await sql(db).raw("SELECT user_id FROM user_identities WHERE provider = 'email' AND subject = \(bind: email)").first() {
+            return try row.decode(column: "user_id", as: UUID.self) == userID
+        }
+        guard try await sql(db).raw("SELECT id FROM users WHERE lower(btrim(email)) = \(bind: email) AND id <> \(bind: userID) LIMIT 1").first() == nil else { return false }
+        try await addIdentity(provider: "email", subject: email, userID: userID, on: db)
+        return true
+    }
+
     static func verifiedEmails(for userID: UUID, on db: Database) async throws -> [String] {
         try await sql(db).raw("SELECT subject FROM user_identities WHERE user_id = \(bind: userID) AND provider = 'email' ORDER BY subject")
             .all().map { try $0.decode(column: "subject", as: String.self) }
