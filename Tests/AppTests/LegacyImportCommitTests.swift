@@ -187,6 +187,62 @@ final class LegacyImportCommitTests: XCTestCase {
         XCTAssertEqual(remaining.count, before.count - 1, "only that one photo should have gone")
     }
 
+    /// A drawing the old app held as a PDF.
+    ///
+    /// The import renders drawings through `PrivateImageProcessor`, which recognises PNG
+    /// and JPEG and nothing else, so a PDF cannot become a pinnable sheet. That is a
+    /// scope boundary rather than a bug — but the boundary only stays honest if the
+    /// import *says so*. This pins that: the drawing is counted as unsupported, the
+    /// retained bytes survive, and nothing pretends a sheet was published.
+    ///
+    /// If PDF rendering is ever added to the import, this test should start failing.
+    /// That is the intended signal, not a regression.
+    func testAPDFDrawingIsReportedUnsupportedRatherThanQuietlyDropped() async throws {
+        // Never parsed — `detectMime` looks at the first bytes and gives up before that.
+        let pdf = Data("%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n".utf8)
+        let digest = LegacyProjectImportDecoder.digest(pdf)
+
+        var drawingPath = ""
+        let original = try await stage { object in
+            var drawings = object["drawings"] as! [[String: Any]]
+            var file = drawings[0]["file"] as! [String: Any]
+            drawingPath = file["archivePath"] as! String
+            file["sha256"] = digest
+            file["bytes"] = pdf.count
+            drawings[0]["file"] = file
+            object["drawings"] = drawings
+        }
+        XCTAssertFalse(drawingPath.isEmpty)
+        var files = original.files
+        files[drawingPath] = pdf
+        let staged = Staged(actor: original.actor, workspace: original.workspace, stage: original.stage,
+                            scope: original.scope, descriptor: original.descriptor, files: files)
+
+        try await transfer(staged)
+        let projection = try await prepare(staged)
+        let status = try await LegacyImportCommitService.status(projectionID: projection.projectionId, scope: staged.scope, actor: staged.actor, binding: binding, on: app.db)
+
+        // Said out loud, before anyone commits.
+        XCTAssertEqual(status.unsupportedDrawingCount, 1, "a drawing that cannot be rendered must be counted, not omitted")
+        XCTAssertEqual(status.renderedDrawingCount, 0)
+        XCTAssertTrue(status.readyToPublish, "an unsupported drawing is a disclosure, not a blocker: \(status)")
+
+        let command = try await commitCommand(staged, projection)
+        let receipt = try await LegacyImportCommitService.commit(command, actor: staged.actor, binding: binding, on: app.db)
+        XCTAssertEqual(receipt.state, "published")
+        XCTAssertEqual(receipt.opaqueDrawingCount, 1, "the receipt has to carry it too — the status is transient, the receipt is the record")
+        XCTAssertEqual(receipt.renderedDrawingCount, 0)
+
+        let source = try JSONDecoder().decode(LegacyProjectImportSource.self, from: staged.descriptor)
+        let projectID = source.project.id
+        // No half-published sheet: no drawing, no version, no page.
+        try await expectCount("drawings", "project_id", projectID, 0)
+        try await expectCount("drawing_version_pages", "project_id", projectID, 0)
+        // The bytes are still retained, so nothing was lost — only unrendered.
+        let retained = try await sql.raw("SELECT count(*) AS n FROM imported_file_objects WHERE project_id = \(bind: projectID) AND decoded_mime IS NULL").first()!
+        XCTAssertGreaterThanOrEqual(try retained.decode(column: "n", as: Int.self), 1)
+    }
+
     func testRichProjectPublishesCompleteGraphOnceWithQualifiedHistoryAndReadback() async throws {
         let staged = try await stage()
         try await transfer(staged)
