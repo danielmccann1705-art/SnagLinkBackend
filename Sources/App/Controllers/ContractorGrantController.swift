@@ -136,6 +136,27 @@ struct ContractorGrantController: RouteCollection {
     }
     @Sendable func download(req: Request) async throws -> Response {
         let token = try Self.token(req), snagID = try LinkGrantController.id("snagId", req), assetID = try LinkGrantController.id("assetId", req)
+
+        // A snag carried over from the old app keeps its photos in the import tables,
+        // not in `media_assets`. Resolve that case explicitly rather than by letting the
+        // media lookup fail and catching it: a not-found here is a real refusal, and it
+        // should not become control flow.
+        let store = try LegacyImportCommitController.store(req)
+        if let imported = try await (req.db.transaction { db -> (key: ImportedObjectKey, sha256: String, size: Int64, mime: String)? in
+            let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
+            return try await LinkGrantService.visibleImportedPhoto(assetID, snagID: snagID, grant: grant, project: project, on: db)
+        }) {
+            let value = try await LegacyImportReadService.verifiedBytes(imported, store: store)
+            // Storage IO ran outside the grant's locks; recheck before disclosure.
+            try await req.db.transaction { db in
+                let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
+                guard try await LinkGrantService.visibleImportedPhoto(assetID, snagID: snagID, grant: grant, project: project, on: db) != nil else {
+                    throw Abort(.notFound)
+                }
+            }
+            return Response(status: .ok, headers: ["Content-Type": value.mime, "Content-Length": String(value.data.count), "Cache-Control": "private, no-store", "Vary": "Cookie", "Content-Disposition": "inline; filename=snag-photo.jpg", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"], body: .init(data: value.data))
+        }
+
         let target: (String, String) = try await req.db.transaction { db in
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
             let media = try await LinkGrantService.visibleMedia(assetID, snagID: snagID, grant: grant, project: project, on: db)

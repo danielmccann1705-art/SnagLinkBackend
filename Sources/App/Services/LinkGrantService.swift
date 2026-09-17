@@ -149,13 +149,20 @@ extension LinkGrantService {
                     AND (m.asset_id IS NOT NULL OR a.id = ANY(\(bind: evidenceIDs)::UUID[]))
                 ORDER BY a.created_at, a.id
                 """).all()
+            let imported = try await importedPhotos(snagIDs: ids, projectID: try project.requireID(), on: db)
             let decisions = try await sql.raw("SELECT d.attempt_id, d.reason FROM review_decisions d JOIN completion_attempts a ON a.id = d.attempt_id WHERE a.actor_grant_id = \(bind: grantID) AND a.id = ANY(\(bind: values.map(\.id))::UUID[]) AND d.kind = 'send_back'").all()
             var feedback: [UUID: String] = [:]
             for decision in decisions { feedback[try decision.decode(column: "attempt_id", as: UUID.self)] = try decision.decode(column: "reason", as: String.self) }
             let date = ISO8601DateFormatter()
             for id in ids {
                 guard let snag = snags.first(where: { $0.id == id }) else { continue }
-                let photos: [ContractorItem.Photo] = try media.filter { try $0.decode(column: "snag_id", as: UUID.self) == id }.map {
+                // Photos carried over from the old app come first: they are the original
+                // record of the defect, and a contractor who cannot see them is being
+                // asked to fix something they have never been shown.
+                var photos: [ContractorItem.Photo] = try imported.filter { try $0.decode(column: "snag_id", as: UUID.self) == id }.map {
+                    try .init(id: $0.decode(column: "id", as: UUID.self), label: "Before", width: $0.decode(column: "width", as: Int?.self), height: $0.decode(column: "height", as: Int?.self))
+                }
+                photos += try media.filter { try $0.decode(column: "snag_id", as: UUID.self) == id }.map {
                     try .init(id: $0.decode(column: "id", as: UUID.self), label: $0.decode(column: "purpose", as: String.self) == "capture" ? "Before" : "After", width: $0.decode(column: "width", as: Int?.self), height: $0.decode(column: "height", as: Int?.self))
                 }
                 // Only this grant's submissions and their send-back reasons are
@@ -182,5 +189,60 @@ extension LinkGrantService {
                   try await VerifiedIdentityService.sql(db).raw("SELECT asset_id FROM link_media WHERE grant_id = \(bind: grantID) AND asset_id = \(bind: id)").first() != nil else { throw Abort(.notFound) }
         }
         return row
+    }
+}
+
+extension LinkGrantService {
+    /// Photos an import carried over from the old app, for snags this grant covers.
+    ///
+    /// These live in `imported_photos`, not `media_assets`, which is why the contractor
+    /// page never showed them: the media query has no reason to know about them and the
+    /// two tables are never joined.
+    ///
+    /// Only photos whose bytes were retained *and* could be decoded are offered. A
+    /// photo we cannot render is left out rather than advertised as a broken tile — the
+    /// contractor cannot act on it either way, and a missing tile invites a support
+    /// question that has no answer. The thumbnail rendition is preferred; where the
+    /// thumbnail has no usable bytes the original's rendition stands in.
+    static func importedPhotos(snagIDs: [UUID], projectID: UUID, on db: Database) async throws -> [SQLRow] {
+        guard !snagIDs.isEmpty else { return [] }
+        return try await VerifiedIdentityService.sql(db).raw("""
+            SELECT p.id, p.snag_id,
+                CASE WHEN t.rendition_key IS NOT NULL THEN t.width  ELSE o.width  END AS width,
+                CASE WHEN t.rendition_key IS NOT NULL THEN t.height ELSE o.height END AS height
+            FROM imported_photos p
+            LEFT JOIN imported_file_uses tu ON tu.id = p.thumbnail_use_id AND tu.project_id = p.project_id AND tu.availability = 'verifiedBytes'
+            LEFT JOIN imported_file_objects t ON t.id = tu.file_object_id AND t.project_id = p.project_id AND t.rendition_key IS NOT NULL
+            LEFT JOIN imported_file_uses ou ON ou.id = p.original_use_id AND ou.project_id = p.project_id AND ou.availability = 'verifiedBytes'
+            LEFT JOIN imported_file_objects o ON o.id = ou.file_object_id AND o.project_id = p.project_id AND o.rendition_key IS NOT NULL
+            WHERE p.project_id = \(bind: projectID) AND p.snag_id = ANY(\(bind: snagIDs)::UUID[])
+                AND COALESCE(t.rendition_key, o.rendition_key) IS NOT NULL
+            ORDER BY p.snag_id, p.sort_order, p.id
+            """).all()
+    }
+
+    /// Resolves one imported photo for download, under the same grant scope the
+    /// `media_assets` path applies: the snag has to be in this grant, and the photo has
+    /// to belong to that snag in that project. Nothing here consults the grant's own
+    /// uploads, so a contractor cannot reach another grant's evidence through it.
+    static func visibleImportedPhoto(_ id: UUID, snagID: UUID, grant: SQLRow, project: Project, on db: Database) async throws -> (key: ImportedObjectKey, sha256: String, size: Int64, mime: String)? {
+        _ = try await item(snagID, grant: grant, project: project, write: false, on: db)
+        guard let row = try await VerifiedIdentityService.sql(db).raw("""
+            SELECT
+                CASE WHEN t.rendition_key IS NOT NULL THEN t.rendition_key    ELSE o.rendition_key    END AS rendition_key,
+                CASE WHEN t.rendition_key IS NOT NULL THEN t.rendition_sha256 ELSE o.rendition_sha256 END AS rendition_sha256,
+                CASE WHEN t.rendition_key IS NOT NULL THEN t.rendition_size   ELSE o.rendition_size   END AS rendition_size
+            FROM imported_photos p
+            LEFT JOIN imported_file_uses tu ON tu.id = p.thumbnail_use_id AND tu.project_id = p.project_id AND tu.availability = 'verifiedBytes'
+            LEFT JOIN imported_file_objects t ON t.id = tu.file_object_id AND t.project_id = p.project_id AND t.rendition_key IS NOT NULL
+            LEFT JOIN imported_file_uses ou ON ou.id = p.original_use_id AND ou.project_id = p.project_id AND ou.availability = 'verifiedBytes'
+            LEFT JOIN imported_file_objects o ON o.id = ou.file_object_id AND o.project_id = p.project_id AND o.rendition_key IS NOT NULL
+            WHERE p.id = \(bind: id) AND p.snag_id = \(bind: snagID) AND p.project_id = \(bind: try project.requireID())
+                AND COALESCE(t.rendition_key, o.rendition_key) IS NOT NULL
+            """).first() else { return nil }
+        return try (ImportedObjectKey.stored(row.decode(column: "rendition_key", as: String.self)),
+                    row.decode(column: "rendition_sha256", as: String.self),
+                    Int64(row.decode(column: "rendition_size", as: Int.self)),
+                    "image/jpeg")
     }
 }

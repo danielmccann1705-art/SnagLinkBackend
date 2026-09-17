@@ -115,6 +115,78 @@ final class LegacyImportCommitTests: XCTestCase {
         catch { if let identifier { XCTAssertEqual((error as? Abort)?.identifier, identifier, "\(error)", file: file, line: line) } }
     }
 
+    /// A snag carried over from the old app keeps its photos in `imported_photos`, not
+    /// `media_assets`. The contractor page builds its photo list from `media_assets`
+    /// alone, so before this these snags reached the contractor with no photos at all —
+    /// asking someone to fix a defect they had never been shown.
+    func testImportedPhotosAreOfferedToTheContractorSurface() async throws {
+        let staged = try await stage()
+        try await transfer(staged)
+        let projection = try await prepare(staged)
+        let command = try await commitCommand(staged, projection)
+        _ = try await LegacyImportCommitService.commit(command, actor: staged.actor, binding: binding, on: app.db)
+        let source = try JSONDecoder().decode(LegacyProjectImportSource.self, from: staged.descriptor), projectID = source.project.id
+        let sql = try VerifiedIdentityService.sql(app.db)
+
+        let snagIDs = try await sql.raw("SELECT id FROM snags WHERE project_id = \(bind: projectID) ORDER BY id").all()
+            .map { try $0.decode(column: "id", as: UUID.self) }
+        XCTAssertFalse(snagIDs.isEmpty)
+
+        let offered = try await LinkGrantService.importedPhotos(snagIDs: snagIDs, projectID: projectID, on: app.db)
+        XCTAssertFalse(offered.isEmpty, "the published import has photos; none reached the contractor query")
+
+        // Every offered photo names a snag the caller asked for, and carries the
+        // dimensions the page needs to lay it out without a reflow.
+        for row in offered {
+            XCTAssertTrue(snagIDs.contains(try row.decode(column: "snag_id", as: UUID.self)))
+            XCTAssertNotNil(try row.decode(column: "width", as: Int?.self))
+            XCTAssertNotNil(try row.decode(column: "height", as: Int?.self))
+        }
+
+        // A grant covers named snags. One it does not name discloses nothing.
+        let unrelated = try await LinkGrantService.importedPhotos(snagIDs: [UUID()], projectID: projectID, on: app.db)
+        XCTAssertTrue(unrelated.isEmpty)
+        let none = try await LinkGrantService.importedPhotos(snagIDs: [], projectID: projectID, on: app.db)
+        XCTAssertTrue(none.isEmpty)
+
+        // Nor does the same snag under somebody else's project.
+        let elsewhere = try await LinkGrantService.importedPhotos(snagIDs: snagIDs, projectID: UUID(), on: app.db)
+        XCTAssertTrue(elsewhere.isEmpty)
+    }
+
+    /// A photo whose bytes were not retained, or could not be decoded, is left out
+    /// rather than offered as a tile that will never load. The contractor cannot act on
+    /// it either way, and a broken tile invites a question with no answer.
+    func testAnImportedPhotoWithoutUsableBytesIsLeftOut() async throws {
+        let staged = try await stage()
+        try await transfer(staged)
+        let projection = try await prepare(staged)
+        let command = try await commitCommand(staged, projection)
+        _ = try await LegacyImportCommitService.commit(command, actor: staged.actor, binding: binding, on: app.db)
+        let source = try JSONDecoder().decode(LegacyProjectImportSource.self, from: staged.descriptor), projectID = source.project.id
+        let sql = try VerifiedIdentityService.sql(app.db)
+        let snagIDs = try await sql.raw("SELECT id FROM snags WHERE project_id = \(bind: projectID) ORDER BY id").all()
+            .map { try $0.decode(column: "id", as: UUID.self) }
+
+        let before = try await LinkGrantService.importedPhotos(snagIDs: snagIDs, projectID: projectID, on: app.db)
+        XCTAssertFalse(before.isEmpty)
+        let target = try before[0].decode(column: "id", as: UUID.self)
+
+        // Mark both of that photo's file uses unavailable, as an import would when the
+        // source file was missing from the export.
+        try await sql.raw("""
+            UPDATE imported_file_uses SET availability = 'missing'
+            WHERE project_id = \(bind: projectID) AND id IN (
+                SELECT thumbnail_use_id FROM imported_photos WHERE id = \(bind: target)
+                UNION SELECT original_use_id FROM imported_photos WHERE id = \(bind: target))
+            """).run()
+
+        let after = try await LinkGrantService.importedPhotos(snagIDs: snagIDs, projectID: projectID, on: app.db)
+        let remaining = try after.map { try $0.decode(column: "id", as: UUID.self) }
+        XCTAssertFalse(remaining.contains(target), "a photo with no usable bytes must not be offered")
+        XCTAssertEqual(remaining.count, before.count - 1, "only that one photo should have gone")
+    }
+
     func testRichProjectPublishesCompleteGraphOnceWithQualifiedHistoryAndReadback() async throws {
         let staged = try await stage()
         try await transfer(staged)
