@@ -35,7 +35,7 @@ struct PrivateRequestLoggingMiddleware: AsyncMiddleware {
                            "Request completed", metadata: ["method": "\(request.method)", "route": "\(pattern)", "status": "\(response.status.code)"])
         response.headers.replaceOrAdd(name: "Referrer-Policy", value: "no-referrer")
         response.headers.replaceOrAdd(name: "X-Content-Type-Options", value: "nosniff")
-        if request.url.path.hasPrefix("/api/") || request.url.path.hasPrefix("/m/") || request.url.path.hasPrefix("/auth/") {
+        if ["/api/", "/m/", "/auth/", "/internal/"].contains(where: request.url.path.hasPrefix) {
             response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
         }
         return response

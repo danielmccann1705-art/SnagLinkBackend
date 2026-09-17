@@ -152,6 +152,16 @@ final class MaintenanceCleanupTests: XCTestCase {
         })
     }
 
+    /// The record has to say whether the *scheduler* reached us, which it cannot do if
+    /// the fallback loop files itself under the same name.
+    func testTheFallbackLoopIsRecordedApartFromTheScheduler() async throws {
+        try await CleanupService.runCleanup(app: app, trigger: .fallback)
+        let row = try await (app.db as! SQLDatabase)
+            .raw("SELECT trigger FROM cleanup_runs ORDER BY started_at DESC LIMIT 1").first()
+        XCTAssertEqual(try row?.decode(column: "trigger", as: String.self), "fallback")
+        XCTAssertNotEqual(CleanupService.Trigger.fallback.rawValue, CleanupService.Trigger.schedule.rawValue)
+    }
+
     func testAConstantTimeComparisonStillCompares() {
         XCTAssertTrue(MaintenanceAuthority.constantTimeEqual("abc", "abc"))
         XCTAssertFalse(MaintenanceAuthority.constantTimeEqual("abc", "abd"))

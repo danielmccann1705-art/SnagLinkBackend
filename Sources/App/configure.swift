@@ -84,6 +84,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(RelaxStagedLegacyImportSourceUniqueness())
         app.migrations.add(CreateAppleCredentials())
         app.migrations.add(CreateCleanupRuns())
+        app.migrations.add(AllowFallbackCleanupTrigger())
 
         try await app.autoMigrate()
     } else {

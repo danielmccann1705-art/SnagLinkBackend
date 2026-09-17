@@ -24,7 +24,11 @@ struct CleanupService {
         var expiredPreviewLinks = 0
     }
 
-    enum Trigger: String, Sendable { case schedule, manual, test }
+    /// `schedule` is the external scheduler reaching us through the maintenance route.
+    /// `fallback` is the in-process loop, which cannot be relied on in a container that
+    /// sleeps. Keeping them apart is the difference between the record answering
+    /// "is the scheduler working?" and merely saying something ran.
+    enum Trigger: String, Sendable { case schedule, fallback, manual, test }
 
     /// Postgres advisory lock key. One pass at a time across every instance; the lock
     /// is released when the session ends, so a pass killed mid-way unlocks by itself
@@ -145,7 +149,7 @@ private struct CleanupLifecycleHandler: LifecycleHandler {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 60 * 60 * 1_000_000_000)
                 do {
-                    try await CleanupService.runCleanup(app: app, trigger: .schedule)
+                    try await CleanupService.runCleanup(app: app, trigger: .fallback)
                 } catch {
                     app.logger.error("Cleanup task failed: \(error)")
                 }
