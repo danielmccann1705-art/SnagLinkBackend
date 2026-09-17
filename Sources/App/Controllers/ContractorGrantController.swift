@@ -141,11 +141,14 @@ struct ContractorGrantController: RouteCollection {
         // not in `media_assets`. Resolve that case explicitly rather than by letting the
         // media lookup fail and catching it: a not-found here is a real refusal, and it
         // should not become control flow.
-        let store = try LegacyImportCommitController.store(req)
         if let imported = try await (req.db.transaction { db -> (key: ImportedObjectKey, sha256: String, size: Int64, mime: String)? in
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
             return try await LinkGrantService.visibleImportedPhoto(assetID, snagID: snagID, grant: grant, project: project, on: db)
         }) {
+            // Resolved only once an imported photo is actually in hand. Asking for the
+            // staged store up front made every ordinary contractor download depend on
+            // import storage being configured, and fail 503 where it is not.
+            let store = try LegacyImportCommitController.store(req)
             let value = try await LegacyImportReadService.verifiedBytes(imported, store: store)
             // Storage IO ran outside the grant's locks; recheck before disclosure.
             try await req.db.transaction { db in
