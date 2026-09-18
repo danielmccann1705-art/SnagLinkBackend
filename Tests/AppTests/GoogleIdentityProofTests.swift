@@ -7,7 +7,11 @@ import JWT
 final class GoogleIdentityProofTests: XCTestCase {
     let config = GoogleIdentityConfiguration(webClientID: "12345-syntheticweb.apps.googleusercontent.com", iosClientID: "12345-syntheticios.apps.googleusercontent.com")
     let nonce = String(repeating: "synthetic-nonce-", count: 3)
-    let created = Date()
+    /// A whole second, deliberately. The claims are carried as seconds since 1970 and
+    /// round-trip through JSON, so a `Date()` with a fractional part puts the exact
+    /// thirty-second boundary a few hundred microseconds on the wrong side of the rule
+    /// and the assertion turns into a coin flip. Whole seconds are represented exactly.
+    let created = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
 
     func signed(_ overrides: [String: Any] = [:], remove: [String] = []) throws -> String {
         var values: [String: Any] = ["iss": "https://accounts.google.com", "sub": "synthetic-subject-1",
@@ -24,11 +28,19 @@ final class GoogleIdentityProofTests: XCTestCase {
         return try signers.sign(claims, kid: "synthetic-rsa")
     }
 
-    func verify(_ token: String, surface: GoogleIdentitySurface = .web, hash: String? = nil) throws -> GoogleIdentityProof {
+    /// The verifier's signers overload already takes the clock as `now`. Pinning it
+    /// to `created` — the same instant every fixture token is minted from — is what
+    /// makes the issued-at rules independent of how long the suite has been running.
+    /// The production entry point keeps its `Date()` default and no rule is relaxed:
+    /// `GoogleIdentityClaims.verify(using:)` still calls `verifyNotExpired()` against
+    /// the real clock, which is why every fixture carries a genuinely unexpired `exp`.
+    func verify(_ token: String, surface: GoogleIdentitySurface = .web, hash: String? = nil,
+                now: Date? = nil) throws -> GoogleIdentityProof {
         let signers = JWTSigners()
         signers.use(.rs256(key: try .public(pem: Self.syntheticPublic)), kid: "synthetic-rsa")
         return try GoogleIdentityVerifier.verify(token, signers: signers, surface: surface,
-            nonceHash: hash ?? SHA256Hasher.hash(token: nonce), challengeCreatedAt: created, config: config)
+            nonceHash: hash ?? SHA256Hasher.hash(token: nonce), challengeCreatedAt: created,
+            config: config, now: now ?? created)
     }
 
     func assertDenied(_ token: String, surface: GoogleIdentitySurface = .web, file: StaticString = #filePath, line: UInt = #line) {
@@ -74,13 +86,25 @@ final class GoogleIdentityProofTests: XCTestCase {
 
     func testExpiryIssuedTimeAndChallengeAgeAreVerified() throws {
         assertDenied(try signed(["exp": created.addingTimeInterval(-1).timeIntervalSince1970]))
-        // Offsets are stated relative to `created` but checked against the wall clock,
-        // which moves while the suite runs. `created + 120` is refused only while the
-        // run is within about ninety seconds of it — in a full sweep the clock catches
-        // up, the token becomes legitimately valid, and the assertion fails for the
-        // right reason at the wrong time. An hour is beyond any run.
-        assertDenied(try signed(["iat": created.addingTimeInterval(3600).timeIntervalSince1970]))
-        assertDenied(try signed(["iat": created.addingTimeInterval(-3600).timeIntervalSince1970]))
+        assertDenied(try signed(["exp": created.timeIntervalSince1970]))
+
+        // The production rule is thirty seconds either side, so both edges are
+        // asserted exactly. `created` is the challenge time and the injected clock,
+        // so these hold whatever else the suite is doing.
+        XCTAssertEqual(try verify(signed(["iat": created.addingTimeInterval(30).timeIntervalSince1970])).subject,
+                       "synthetic-subject-1")
+        assertDenied(try signed(["iat": created.addingTimeInterval(31).timeIntervalSince1970]))
+        XCTAssertEqual(try verify(signed(["iat": created.addingTimeInterval(-30).timeIntervalSince1970])).subject,
+                       "synthetic-subject-1")
+        assertDenied(try signed(["iat": created.addingTimeInterval(-31).timeIntervalSince1970]))
+
+        // The forward bound is measured against the clock, not the challenge: a
+        // token minted ten minutes after the challenge is accepted once the clock
+        // has moved with it, and refused at the earlier instant.
+        let later = created.addingTimeInterval(600)
+        let minted = try signed(["iat": later.timeIntervalSince1970])
+        XCTAssertEqual(try verify(minted, now: later).subject, "synthetic-subject-1")
+        assertDenied(minted)
     }
 
     func testInvalidIssuerAndSubjectAreRejected() throws {
