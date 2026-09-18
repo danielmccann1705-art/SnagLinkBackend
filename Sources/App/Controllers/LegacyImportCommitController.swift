@@ -13,6 +13,7 @@ struct LegacyImportCommitController: RouteCollection {
         let routes = routes.grouped("api", "v2", "workspaces", ":workspaceId", "import-sessions", ":sessionId").grouped(PlatformAuthMiddleware())
         routes.on(.POST, "projection", body: .collect(maxSize: "16kb"), use: projection)
         routes.on(.POST, "projection", "status", body: .collect(maxSize: "16kb"), use: status)
+        routes.on(.POST, "projection", "reprocess", body: .collect(maxSize: "16kb"), use: reprocess)
         routes.on(.POST, "commit", body: .collect(maxSize: "16kb"), use: commit)
         routes.on(.POST, "commit", "receipt", body: .collect(maxSize: "16kb"), use: receipt)
     }
@@ -72,6 +73,25 @@ struct LegacyImportCommitController: RouteCollection {
         let actor = try await StagedImportRequestBoundary.actor(req)
         do { let status = try await LegacyImportCommitService.status(projectionID: value.projectionId, scope: value.scope, actor: actor, binding: binding, on: req.db); return try response(status) }
         catch let error as LegacyProjectImportError { throw StagedLegacyImportHTTP.sourceError(error) }
+        catch let error as LegacyCanonicalProjectionError { throw Self.projectionError(error) }
+    }
+    /// Retries only the files our own image processor failed on, in a preparation
+    /// that has not been published. Same route group, same authentication and same
+    /// gate as every other preparation call: a published preparation is refused by
+    /// `withActiveSession` before anything is read or written, files that are simply
+    /// not images are never revisited, and files already decoded keep the rendition,
+    /// identifiers and processing row they already have.
+    @Sendable func reprocess(req: Request) async throws -> Response {
+        let binding = try StagedLegacyImportHTTPGate.require(on: req.application)
+        let value = try Self.statusRequest(body(req), workspace: id("workspaceId", req), session: id("sessionId", req))
+        let actor = try await StagedImportRequestBoundary.actor(req)
+        let store = try Self.store(req)
+        do {
+            _ = try await LegacyImportProcessingService.process(projectionID: value.projectionId, scope: value.scope, actor: actor,
+                                                               binding: binding, store: store, on: req.db, reprocessFailures: true)
+            let status = try await LegacyImportCommitService.status(projectionID: value.projectionId, scope: value.scope, actor: actor, binding: binding, on: req.db)
+            return try response(status)
+        } catch let error as LegacyProjectImportError { throw StagedLegacyImportHTTP.sourceError(error) }
         catch let error as LegacyCanonicalProjectionError { throw Self.projectionError(error) }
     }
     @Sendable func commit(req: Request) async throws -> Response {

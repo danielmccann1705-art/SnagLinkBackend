@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import Vapor
 @testable import App
 
 final class PrivateImageProcessorLimitsTests: XCTestCase {
@@ -31,5 +32,33 @@ final class PrivateImageProcessorLimitsTests: XCTestCase {
         XCTAssertEqual(result.sourceWidth, 5000); XCTAssertEqual(result.sourceHeight, 4000)
         XCTAssertEqual(max(result.width, result.height), PrivateImageProcessor.maximumPixelSize)
         #endif
+    }
+
+    /// The distinction the whole retry rests on: a file that carries an image
+    /// signature we claim to handle and still will not decode is *our* failure, and is
+    /// retryable; a file with no image signature is a settled fact about the file and
+    /// must never be processed again. Collapsing the two made a processor bug permanent.
+    func testASignedImageThatWillNotDecodeIsOurFailureNotASettledOutcome() throws {
+        var signedButBroken = Data([137, 80, 78, 71, 13, 10, 26, 10])
+        signedButBroken.append(Data(repeating: 0x41, count: 1024))
+        XCTAssertEqual(PrivateImageProcessor.detectMime(signedButBroken), "image/png",
+                       "the bytes claim to be a PNG, so this reaches the processor")
+        XCTAssertThrowsError(try PrivateImageProcessor.process(signedButBroken, mime: "image/png"))
+
+        var truncatedJPEG = Data([255, 216, 255, 224])
+        truncatedJPEG.append(Data(repeating: 0x00, count: 64))
+        XCTAssertEqual(PrivateImageProcessor.detectMime(truncatedJPEG), "image/jpeg")
+        XCTAssertThrowsError(try PrivateImageProcessor.process(truncatedJPEG, mime: "image/jpeg"))
+
+        // No signature: never offered to the processor, so never retried either.
+        XCTAssertNil(PrivateImageProcessor.detectMime(Data("%PDF-1.7\n".utf8)))
+        XCTAssertNil(PrivateImageProcessor.detectMime(Data("Site notes, 12 March.".utf8)))
+        XCTAssertNil(PrivateImageProcessor.detectMime(Data()))
+
+        // The classification recorded against an attempt is a fixed token, never a message.
+        XCTAssertEqual(LegacyImportProcessingService.OpaqueReason.processorFailed.rawValue, "image_processing_failed")
+        XCTAssertEqual(LegacyImportProcessingService.OpaqueReason.notAnImage.rawValue, "not_an_image")
+        XCTAssertEqual(LegacyImportProcessingService.failureKind(Abort(.serviceUnavailable, reason: "s3://bucket/path?signature=secret", identifier: "staged_original_storage_unavailable")), "staged_original_storage_unavailable")
+        XCTAssertEqual(LegacyImportProcessingService.failureKind(Abort(.internalServerError, reason: "s3://bucket/path?signature=secret")), "unknown")
     }
 }

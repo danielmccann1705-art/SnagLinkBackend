@@ -131,4 +131,148 @@ final class LegacyImportCommitHTTPTests: XCTestCase {
         let deniedReceipt = try await post(base + "/commit/receipt", ["formatVersion": 1, "scope": try scopeObject(scope), "commitId": commitID.uuidString], user: stranger)
         XCTAssertEqual(deniedReceipt.status, .notFound)
     }
+
+    /// D9 through the route the app actually calls.
+    ///
+    /// A retained original is bound to its SHA in three places — the declaration, the
+    /// retention receipt and the read in `LegacyImportProcessingService` — so the same
+    /// bytes cannot be made to fail the processor on one pass and decode on the next.
+    /// What a processor bug leaves behind, though, is an ordinary ledger state: an
+    /// `opaque` row with a failed `image_processing_failed` attempt against it. That
+    /// state is written here directly, and everything after it goes through the
+    /// authorised endpoint with the real processor.
+    func testProcessorFailuresAreRetriedOnlyOnRequestAndOnlyBeforePublication() async throws {
+        let user = try await app.db.transaction { db in try await VerifiedIdentityService.resolveEmail("reprocess-http-\(UUID())@example.test", name: "Synthetic manager", on: db) }
+        let actor = try StagedLegacyImportActor(id: user.requireID(), authVersion: user.authVersion)
+        let workspace = try await app.db.transaction { db in try await WorkspaceAccessService.personal(for: actor.id, on: db).requireID() }
+        let raw = try Data(contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/legacy-project-full-v1.json"))
+        let fixture = try JSONSerialization.jsonObject(with: raw) as! [String: Any]
+        let archive = (fixture["source"] as! [String: Any])["archiveID"] as! String
+        let descriptor = try JSONSerialization.data(withJSONObject: LegacyImportCommitTests.remap(fixture, suffix: UUID().uuidString, keep: [archive]), options: [.sortedKeys])
+        let source = try JSONDecoder().decode(LegacyProjectImportSource.self, from: descriptor)
+        let stage = StagedLegacyImportCommand(formatVersion: 1, sessionId: UUID(), mutation: .init(operationId: UUID(), deviceId: UUID()), expectedActorId: actor.id,
+            expectedAuthVersion: actor.authVersion, expectedWorkspaceKind: "personal", destination: binding.destination, selectedProjectId: source.project.id,
+            sourceFingerprint: source.source.sourceFingerprint, exportSHA256: LegacyProjectImportDecoder.digest(descriptor), exportByteCount: descriptor.count,
+            acknowledgement: .init(version: StagedLegacyImportCommand.Acknowledgement.supportedVersion, wording: StagedLegacyImportCommand.Acknowledgement.supportedWording, accepted: true))
+        _ = try await StagedLegacyImportService.create(stage, descriptor: descriptor, workspaceID: workspace, actor: actor, binding: binding, on: app.db)
+        let scope = StagedLegacyImportService.scope(stage, workspaceID: workspace)
+        let filesURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("Fixtures/legacy-project-files-v1.json")
+        let files = Dictionary(uniqueKeysWithValues: (try JSONSerialization.jsonObject(with: Data(contentsOf: filesURL)) as! [[String: Any]]).map { ($0["path"] as! String, Data(base64Encoded: $0["base64"] as! String)!) })
+        let store = app.storage[StagedImportOriginalStoreKey.self]!
+        let sql = try VerifiedIdentityService.sql(app.db)
+        var imageDeclaration: UUID?, plainDeclaration: UUID?
+        for row in try await sql.raw("SELECT declaration_id, archive_path FROM staged_legacy_import_files WHERE session_id = \(bind: scope.sessionId) ORDER BY declaration_id").all() {
+            let declaration = try row.decode(column: "declaration_id", as: UUID.self)
+            let bytes = files[try row.decode(column: "archive_path", as: String.self)]!
+            let command = StagedImportOriginalCommand(scope: scope, declarationId: declaration, operationId: UUID(), expectedSessionRevision: 1)
+            _ = try await StagedImportOriginalService.retain(command, actor: actor, binding: binding, body: stagedTestBody(bytes), store: store, on: app.db)
+            if PrivateImageProcessor.detectMime(bytes) != nil { if imageDeclaration == nil { imageDeclaration = declaration } }
+            else if plainDeclaration == nil { plainDeclaration = declaration }
+        }
+        let target = try XCTUnwrap(imageDeclaration, "the fixture must contain a real image")
+        let settled = try XCTUnwrap(plainDeclaration, "the fixture must contain a file that is not an image")
+
+        let base = "api/v2/workspaces/\(workspace)/import-sessions/\(scope.sessionId)"
+        let projectionID = UUID(), projectionOperation = UUID()
+        let command = LegacyCanonicalProjectionCommand(projectionId: projectionID, scope: scope, operationId: projectionOperation, expectedSourceRevision: 1, policy: LegacyCanonicalProjection.policy)
+        _ = try await LegacyCanonicalProjectionService.prepare(command, actor: actor, binding: binding, on: app.db)
+        let receiptID = try await sql.raw("SELECT receipt_id FROM staged_import_original_receipts WHERE session_id = \(bind: scope.sessionId) AND declaration_id = \(bind: target)").first()!.decode(column: "receipt_id", as: UUID.self)
+        try await sql.raw("""
+            INSERT INTO legacy_import_file_processing (projection_id,session_id,declaration_id,receipt_id,state,processed_at)
+            VALUES (\(bind: projectionID),\(bind: scope.sessionId),\(bind: target),\(bind: receiptID),'opaque',\(bind: Date()))
+            """).run()
+        try await sql.raw("""
+            INSERT INTO legacy_import_processing_attempts (id,projection_id,session_id,declaration_id,attempt_number,outcome,failure_kind,attempted_at)
+            VALUES (\(bind: UUID()),\(bind: projectionID),\(bind: scope.sessionId),\(bind: target),1,'failed','image_processing_failed',\(bind: Date()))
+            """).run()
+
+        let projectionBody: [String: Any] = ["formatVersion": 1, "command": ["projectionId": projectionID.uuidString, "scope": try scopeObject(scope), "operationId": projectionOperation.uuidString, "expectedSourceRevision": 1, "policy": LegacyCanonicalProjection.policy]]
+        let reprocessBody: [String: Any] = ["formatVersion": 1, "scope": try scopeObject(scope), "projectionId": projectionID.uuidString]
+
+        // An ordinary pass processes everything else and leaves the failed file alone.
+        let ordinary = try await post(base + "/projection", projectionBody, user: user)
+        XCTAssertEqual(ordinary.status, .ok, ordinary.body.string)
+        let afterOrdinary = try PlatformMutationService.decode(LegacyImportPreparationStatus.self, ordinary.body.string)
+        XCTAssertEqual(afterOrdinary.failedAttemptCount, 1)
+        var targetState = try await state(projectionID, target, sql)
+        var targetAttempts = try await attempts(projectionID, target, sql)
+        XCTAssertEqual(targetState, "opaque", "an ordinary pass must not revisit a settled row")
+        XCTAssertEqual(targetAttempts, 1)
+        let decodedBefore = afterOrdinary.decodedImageCount
+
+        // Access controls are the route group's, not the handler's.
+        let anonymous = try await post(base + "/projection/reprocess", reprocessBody, user: nil)
+        XCTAssertEqual(anonymous.status, .unauthorized)
+        let stranger = try await app.db.transaction { db in try await VerifiedIdentityService.resolveEmail("reprocess-stranger-\(UUID())@example.test", name: "Synthetic stranger", on: db) }
+        let denied = try await post(base + "/projection/reprocess", reprocessBody, user: stranger)
+        XCTAssertNotEqual(denied.status, .ok)
+        targetState = try await state(projectionID, target, sql)
+        XCTAssertEqual(targetState, "opaque")
+
+        // Asked explicitly, the same endpoint decodes it.
+        let retried = try await post(base + "/projection/reprocess", reprocessBody, user: user)
+        XCTAssertEqual(retried.status, .ok, retried.body.string)
+        let afterRetry = try PlatformMutationService.decode(LegacyImportPreparationStatus.self, retried.body.string)
+        targetState = try await state(projectionID, target, sql)
+        targetAttempts = try await attempts(projectionID, target, sql)
+        XCTAssertEqual(targetState, "decoded_image")
+        XCTAssertEqual(afterRetry.decodedImageCount, decodedBefore + 1)
+        XCTAssertEqual(afterRetry.failedAttemptCount, 1, "the historical failure is kept, not rewritten")
+        XCTAssertEqual(targetAttempts, 2)
+
+        // Original identifiers and the retention receipt are untouched by the retry.
+        let row = try await sql.raw("SELECT receipt_id, session_id, rendition_key FROM legacy_import_file_processing WHERE projection_id = \(bind: projectionID) AND declaration_id = \(bind: target)").first()!
+        XCTAssertEqual(try row.decode(column: "receipt_id", as: UUID.self), receiptID)
+        XCTAssertEqual(try row.decode(column: "session_id", as: UUID.self), scope.sessionId)
+        XCTAssertNotNil(try? row.decode(column: "rendition_key", as: String.self))
+
+        // A file that is simply not an image is never revisited, however often we ask.
+        var settledState = try await state(projectionID, settled, sql)
+        var settledAttempts = try await attempts(projectionID, settled, sql)
+        XCTAssertEqual(settledState, "opaque")
+        XCTAssertEqual(settledAttempts, 1, "one successful attempt from the ordinary pass, and no retry")
+
+        // Repeating the request changes nothing further.
+        let repeated = try await post(base + "/projection/reprocess", reprocessBody, user: user)
+        XCTAssertEqual(repeated.status, .ok, repeated.body.string)
+        targetAttempts = try await attempts(projectionID, target, sql)
+        settledAttempts = try await attempts(projectionID, settled, sql)
+        XCTAssertEqual(targetAttempts, 2)
+        XCTAssertEqual(settledAttempts, 1)
+
+        // Attempt numbers are unique per file, which is what an interrupted run relies on.
+        do {
+            try await sql.raw("""
+                INSERT INTO legacy_import_processing_attempts (id,projection_id,session_id,declaration_id,attempt_number,outcome,failure_kind,attempted_at)
+                VALUES (\(bind: UUID()),\(bind: projectionID),\(bind: scope.sessionId),\(bind: target),2,'failed','unknown',\(bind: Date()))
+                """).run()
+            XCTFail("a duplicate attempt number must be refused")
+        } catch {}
+
+        // Once published, the preparation refuses reprocessing outright.
+        let statusRead = try await post(base + "/projection/status", reprocessBody, user: user)
+        let status = try PlatformMutationService.decode(LegacyImportPreparationStatus.self, statusRead.body.string)
+        XCTAssertTrue(status.readyToPublish, "the retry is what made the preparation complete")
+        let commitBody: [String: Any] = ["formatVersion": 1, "command": ["commitId": UUID().uuidString, "scope": try scopeObject(scope), "projectionId": projectionID.uuidString,
+            "operationId": UUID().uuidString, "expectedSourceRevision": 1, "expectedGraphSHA256": status.projection.graphSHA256,
+            "acknowledgement": ["version": LegacyImportCommitCommand.Acknowledgement.supportedVersion, "wording": LegacyImportCommitCommand.Acknowledgement.supportedWording, "accepted": true]]]
+        let published = try await post(base + "/commit", commitBody, user: user)
+        XCTAssertEqual(published.status, .ok, published.body.string)
+        let refused = try await post(base + "/projection/reprocess", reprocessBody, user: user)
+        XCTAssertEqual(refused.status, .conflict, refused.body.string)
+        XCTAssertTrue(refused.body.string.contains("import_preparation_published"))
+        targetState = try await state(projectionID, target, sql)
+        targetAttempts = try await attempts(projectionID, target, sql)
+        settledState = try await state(projectionID, settled, sql)
+        XCTAssertEqual(targetState, "decoded_image")
+        XCTAssertEqual(targetAttempts, 2)
+        XCTAssertEqual(settledState, "opaque")
+    }
+
+    private func state(_ projection: UUID, _ declaration: UUID, _ sql: SQLDatabase) async throws -> String {
+        try await sql.raw("SELECT state FROM legacy_import_file_processing WHERE projection_id = \(bind: projection) AND declaration_id = \(bind: declaration)").first()!.decode(column: "state", as: String.self)
+    }
+    private func attempts(_ projection: UUID, _ declaration: UUID, _ sql: SQLDatabase) async throws -> Int {
+        try await sql.raw("SELECT count(*) AS n FROM legacy_import_processing_attempts WHERE projection_id = \(bind: projection) AND declaration_id = \(bind: declaration)").first()!.decode(column: "n", as: Int.self)
+    }
 }
