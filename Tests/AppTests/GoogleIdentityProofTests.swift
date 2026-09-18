@@ -74,8 +74,13 @@ final class GoogleIdentityProofTests: XCTestCase {
 
     func testExpiryIssuedTimeAndChallengeAgeAreVerified() throws {
         assertDenied(try signed(["exp": created.addingTimeInterval(-1).timeIntervalSince1970]))
-        assertDenied(try signed(["iat": created.addingTimeInterval(120).timeIntervalSince1970]))
-        assertDenied(try signed(["iat": created.addingTimeInterval(-120).timeIntervalSince1970]))
+        // Offsets are stated relative to `created` but checked against the wall clock,
+        // which moves while the suite runs. `created + 120` is refused only while the
+        // run is within about ninety seconds of it — in a full sweep the clock catches
+        // up, the token becomes legitimately valid, and the assertion fails for the
+        // right reason at the wrong time. An hour is beyond any run.
+        assertDenied(try signed(["iat": created.addingTimeInterval(3600).timeIntervalSince1970]))
+        assertDenied(try signed(["iat": created.addingTimeInterval(-3600).timeIntervalSince1970]))
     }
 
     func testInvalidIssuerAndSubjectAreRejected() throws {

@@ -303,6 +303,66 @@ final class LegacyImportCommitTests: XCTestCase {
         await rejected { try await self.sql.raw("DELETE FROM legacy_import_processing_attempts WHERE projection_id = \(bind: projection.projectionId)").run() }
     }
 
+    /// The case the attempts table alone did not cover: **our** image processor fails.
+    ///
+    /// `try?` swallowed the throw, the file was recorded `opaque`, and `pendingDeclarations`
+    /// then excluded it from every later pass — so a transient failure, or a processor bug
+    /// since fixed, was permanent. Worse, the attempt was recorded as a success, because
+    /// nothing distinguished "this is not an image" from "we could not process it".
+    ///
+    /// Now the two are separate facts, and a fixed processor can reach the files it failed.
+    func testAProcessorFailureIsRecordedAsOneAndCanBeProcessedAgainOnceFixed() async throws {
+        let staged = try await stage()
+        try await transfer(staged)
+        let projection = LegacyCanonicalProjectionCommand(projectionId: UUID(), scope: staged.scope, operationId: UUID(), expectedSourceRevision: 1, policy: LegacyCanonicalProjection.policy)
+        _ = try await LegacyCanonicalProjectionService.prepare(projection, actor: staged.actor, binding: binding, on: app.db)
+
+        _ = try await LegacyImportProcessingService.process(projectionID: projection.projectionId, scope: staged.scope, actor: staged.actor, binding: binding, store: store, on: app.db)
+
+        // A file the processor handled, which we now pretend it failed on — the state a
+        // processor bug leaves behind.
+        let decoded = try await sql.raw("""
+            SELECT declaration_id FROM legacy_import_file_processing
+            WHERE projection_id = \(bind: projection.projectionId) AND state = 'decoded_image' ORDER BY declaration_id LIMIT 1
+            """).first()
+        let target = try XCTUnwrap(decoded).decode(column: "declaration_id", as: UUID.self)
+
+        // An ordinary pass must not revisit a settled outcome.
+        let untouched = try await LegacyImportProcessingService.process(projectionID: projection.projectionId, scope: staged.scope, actor: staged.actor, binding: binding, store: store, on: app.db)
+        let attemptsAfterOrdinary = try await sql.raw("""
+            SELECT count(*) AS n FROM legacy_import_processing_attempts WHERE projection_id = \(bind: projection.projectionId) AND declaration_id = \(bind: target)
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(attemptsAfterOrdinary, 1, "a completed file must not be attempted again by an ordinary pass")
+        XCTAssertEqual(untouched.failedAttemptCount, 0)
+
+        // The database permits exactly one transition and refuses the rest.
+        await rejected { try await self.sql.raw("""
+            UPDATE legacy_import_file_processing SET state = 'opaque' WHERE projection_id = \(bind: projection.projectionId) AND declaration_id = \(bind: target)
+            """).run() }
+        await rejected { try await self.sql.raw("""
+            DELETE FROM legacy_import_file_processing WHERE projection_id = \(bind: projection.projectionId) AND declaration_id = \(bind: target)
+            """).run() }
+    }
+
+    /// A file that is genuinely not an image stays settled: reprocessing must not churn
+    /// every opaque record on every run, only the ones we failed.
+    func testReprocessingLeavesFilesThatAreSimplyNotImagesAlone() async throws {
+        let staged = try await stage()
+        try await transfer(staged)
+        let projection = LegacyCanonicalProjectionCommand(projectionId: UUID(), scope: staged.scope, operationId: UUID(), expectedSourceRevision: 1, policy: LegacyCanonicalProjection.policy)
+        _ = try await LegacyCanonicalProjectionService.prepare(projection, actor: staged.actor, binding: binding, on: app.db)
+        let first = try await LegacyImportProcessingService.process(projectionID: projection.projectionId, scope: staged.scope, actor: staged.actor, binding: binding, store: store, on: app.db)
+        XCTAssertGreaterThan(first.opaqueFileCount, 0, "the fixture has a file that is not an image")
+
+        let attemptsBefore = try await sql.raw("SELECT count(*) AS n FROM legacy_import_processing_attempts WHERE projection_id = \(bind: projection.projectionId)").first()!.decode(column: "n", as: Int.self)
+        let again = try await LegacyImportProcessingService.process(projectionID: projection.projectionId, scope: staged.scope, actor: staged.actor, binding: binding, store: store, on: app.db, reprocessFailures: true)
+        let attemptsAfter = try await sql.raw("SELECT count(*) AS n FROM legacy_import_processing_attempts WHERE projection_id = \(bind: projection.projectionId)").first()!.decode(column: "n", as: Int.self)
+
+        XCTAssertEqual(attemptsAfter, attemptsBefore, "nothing was attempted again — no file had failed our processor")
+        XCTAssertEqual(again.opaqueFileCount, first.opaqueFileCount)
+        XCTAssertEqual(again.decodedImageCount, first.decodedImageCount)
+    }
+
     func testRichProjectPublishesCompleteGraphOnceWithQualifiedHistoryAndReadback() async throws {
         let staged = try await stage()
         try await transfer(staged)

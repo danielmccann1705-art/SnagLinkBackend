@@ -35,18 +35,34 @@ enum LegacyImportProcessingService {
         let drawingSourceId: UUID; let assetId: UUID; let geometry: DrawingPageGeometry
         let page: Data; let pageSHA256: String; let thumbnail: Data; let thumbnailSHA256: String; let resultHash: String
     }
+    /// Why a file produced no rendition.
+    ///
+    /// `notAnImage` is a settled fact about the file — a PDF, a document, an oversized
+    /// original. `processorFailed` is a fact about *us*: the bytes carried an image
+    /// signature we claim to handle and the processor threw anyway. Collapsing the two
+    /// into one `opaque` outcome made a transient failure, or a processor bug since
+    /// fixed, permanent and invisible: the row excluded the file from every later pass,
+    /// and the attempt was recorded as a success.
+    enum OpaqueReason: String, Sendable { case notAnImage = "not_an_image", processorFailed = "image_processing_failed" }
+
     private struct Outcome: Sendable {
         let pending: Pending; let decoded: Decoded?; let rendered: [Rendered]; let unsupportedDrawings: [(UUID, UUID)]
         let renditionKey: ImportedObjectKey?; let pageKeys: [UUID: (ImportedObjectKey, ImportedObjectKey)]
+        var opaqueReason: OpaqueReason? = nil
     }
 
     /// Processes every retained original that has no processing row yet, then reports
     /// the projection's current readiness. Safe to repeat; identical results are reused.
+    /// `reprocessFailures` additionally retries files that our own image processor
+    /// failed on. Off by default, because an ordinary pass should never revisit a
+    /// settled outcome; on, it is the way a processor fix reaches files that were
+    /// recorded opaque before it.
     static func process(projectionID: UUID, scope: StagedLegacyImportScope, actor: StagedLegacyImportActor, binding: ImportServerBinding,
-                        store: any StagedImportOriginalStore, on database: Database, budget: StagedImportIOBudget = try! .init()) async throws -> Summary {
+                        store: any StagedImportOriginalStore, on database: Database, budget: StagedImportIOBudget = try! .init(),
+                        reprocessFailures: Bool = false) async throws -> Summary {
         let projection = try await LegacyCanonicalProjectionService.read(projectionID: projectionID, scope: scope, actor: actor, binding: binding, on: database)
         let pending = try await StagedLegacyImportService.withActiveSession(scope, actor: actor, binding: binding, on: database) { session, db in
-            try await pendingDeclarations(projection, session: session, on: db)
+            try await pendingDeclarations(projection, session: session, reprocessFailures: reprocessFailures, on: db)
         }
         for item in pending {
             try budget.check()
@@ -55,7 +71,12 @@ enum LegacyImportProcessingService {
                 let outcome = try await decode(item, address: address, projection: projection, store: store, budget: budget)
                 _ = try await StagedLegacyImportService.withActiveSession(scope, actor: actor, binding: binding, on: database) { session, db in
                     try await record(outcome, projection: projection, on: db)
-                    try await recordAttempt(projection: projection, declarationID: item.declarationId, failure: nil, on: db)
+                    // A processor failure is a failure even though it produced a row:
+                    // the row exists so publication is not blocked, and the attempt says
+                    // what actually happened so it can be reprocessed later.
+                    try await recordAttempt(projection: projection, declarationID: item.declarationId,
+                                            failure: outcome.opaqueReason == .processorFailed ? OpaqueReason.processorFailed.rawValue : nil,
+                                            on: db)
                 }
             } catch is CancellationError {
                 // Not this file's failure — the whole run stopped. Recording it as one
@@ -79,12 +100,22 @@ enum LegacyImportProcessingService {
         }
     }
 
-    private static func pendingDeclarations(_ projection: LegacyCanonicalProjection, session: StagedLegacyImportReceipt, on db: Database) async throws -> [Pending] {
+    private static func pendingDeclarations(_ projection: LegacyCanonicalProjection, session: StagedLegacyImportReceipt,
+                                            reprocessFailures: Bool = false, on db: Database) async throws -> [Pending] {
         let sql = try VerifiedIdentityService.sql(db)
+        // Never processed, plus — when asked — the ones our own processor failed on.
+        // A file that is simply not an image is never revisited: that outcome is settled
+        // and revisiting it would churn every import for nothing.
         let receipts = try await sql.raw("""
             SELECT r.declaration_id, r.receipt_id, r.measured_sha256, r.measured_bytes FROM staged_import_original_receipts r
             LEFT JOIN legacy_import_file_processing p ON p.projection_id = \(bind: projection.projectionId) AND p.declaration_id = r.declaration_id
-            WHERE r.session_id = \(bind: session.sessionId) AND p.declaration_id IS NULL ORDER BY r.declaration_id
+            WHERE r.session_id = \(bind: session.sessionId)
+              AND (p.declaration_id IS NULL
+                   OR (\(bind: reprocessFailures) AND p.state = 'opaque' AND EXISTS (
+                         SELECT 1 FROM legacy_import_processing_attempts a
+                         WHERE a.projection_id = p.projection_id AND a.declaration_id = p.declaration_id
+                           AND a.outcome = 'failed' AND a.failure_kind = 'image_processing_failed')))
+            ORDER BY r.declaration_id
             """).all()
         let filesByDeclaration = Dictionary(uniqueKeysWithValues: projection.files.map { ($0.declarationId, $0) })
         let usesByFile = Dictionary(grouping: projection.fileUses.filter { $0.fileObjectId != nil }, by: { $0.fileObjectId! })
@@ -100,7 +131,8 @@ enum LegacyImportProcessingService {
 
     private static func decode(_ item: Pending, address: StagedImportOriginalAddress, projection: LegacyCanonicalProjection,
                                store: any StagedImportOriginalStore, budget: StagedImportIOBudget) async throws -> Outcome {
-        let opaque = Outcome(pending: item, decoded: nil, rendered: [], unsupportedDrawings: drawingAssets(item, projection), renditionKey: nil, pageKeys: [:])
+        let opaque = Outcome(pending: item, decoded: nil, rendered: [], unsupportedDrawings: drawingAssets(item, projection),
+                             renditionKey: nil, pageKeys: [:], opaqueReason: .notAnImage)
         // Oversized originals stay retained and readable; only bounded images decode.
         guard item.bytes > 0, item.bytes <= Int64(renditionMaximumBytes) else { return opaque }
         let data: Data
@@ -113,7 +145,15 @@ enum LegacyImportProcessingService {
         guard data.count == Int(item.bytes), LegacyProjectImportDecoder.digest(data) == item.sha256 else {
             throw Abort(.conflict, reason: "Retained original bytes no longer match their receipt", identifier: "staged_original_bytes_mismatch")
         }
-        guard let mime = PrivateImageProcessor.detectMime(data), let result = try? PrivateImageProcessor.process(data, mime: mime) else { return opaque }
+        guard let mime = PrivateImageProcessor.detectMime(data) else { return opaque }
+        let result: PrivateImageProcessor.Result
+        do { result = try PrivateImageProcessor.process(data, mime: mime) }
+        catch {
+            // The bytes carry a signature we claim to handle, so this is our failure,
+            // not the file's. Kept opaque so publication is not blocked by it, but
+            // marked so it can be attempted again once the processor is fixed.
+            var failed = opaque; failed.opaqueReason = .processorFailed; return failed
+        }
         let renditionSHA = PrivateImageProcessor.digest(result.jpeg)
         let renditionKey = try ImportedObjectKey.derived(address, purpose: "rendition", sha256: renditionSHA)
         try await store.putDerived(renditionKey, data: result.jpeg, mime: "image/jpeg", budget: budget)
@@ -148,7 +188,20 @@ enum LegacyImportProcessingService {
 
     private static func record(_ outcome: Outcome, projection: LegacyCanonicalProjection, on db: Database) async throws {
         let sql = try VerifiedIdentityService.sql(db), item = outcome.pending, now = Date()
-        if try await sql.raw("SELECT 1 FROM legacy_import_file_processing WHERE projection_id = \(bind: projection.projectionId) AND declaration_id = \(bind: item.declarationId)").first() != nil { return }
+        let existing = try await sql.raw("SELECT state FROM legacy_import_file_processing WHERE projection_id = \(bind: projection.projectionId) AND declaration_id = \(bind: item.declarationId)").first()
+        if let existing {
+            // The only change the database permits: an opaque row that has now decoded.
+            guard try existing.decode(column: "state", as: String.self) == "opaque",
+                  let decoded = outcome.decoded, let key = outcome.renditionKey else { return }
+            try await sql.raw("""
+                UPDATE legacy_import_file_processing
+                SET state = 'decoded_image', decoded_mime = \(bind: decoded.mime), width = \(bind: decoded.width), height = \(bind: decoded.height),
+                    rendition_key = \(bind: key.value), rendition_sha256 = \(bind: decoded.renditionSHA256), rendition_size = \(bind: decoded.rendition.count),
+                    processed_at = \(bind: now)
+                WHERE projection_id = \(bind: projection.projectionId) AND declaration_id = \(bind: item.declarationId)
+                """).run()
+            return
+        }
         if let decoded = outcome.decoded, let key = outcome.renditionKey {
             try await sql.raw("""
                 INSERT INTO legacy_import_file_processing (projection_id,session_id,declaration_id,receipt_id,state,decoded_mime,width,height,rendition_key,rendition_sha256,rendition_size,processed_at)
