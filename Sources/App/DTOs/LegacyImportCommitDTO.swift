@@ -77,6 +77,11 @@ struct LegacyImportPreparationStatus: Codable, Sendable {
     let renderedDrawingCount: Int
     let unsupportedDrawingCount: Int
     let missingRequiredFileCount: Int
+    /// Processing attempts that failed, across every pass. Re-running a preparation
+    /// keeps what already succeeded, so a rising count with no progress is the signal
+    /// that running it again will not help.
+    let failedAttemptCount: Int
+    let repeatedlyFailingFileCount: Int
     let blockers: [LegacyCanonicalProjection.Finding]
     let qualifications: [LegacyCanonicalProjection.Finding]
     let readyToPublish: Bool

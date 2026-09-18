@@ -16,6 +16,13 @@ enum LegacyImportProcessingService {
         let declaredFileCount: Int, receivedFileCount: Int, processedFileCount: Int
         let decodedImageCount: Int, opaqueFileCount: Int, renderedDrawingCount: Int, unsupportedDrawingCount: Int
         let missingRequiredFileCount: Int
+        /// Attempts that failed, across every pass. Zero on a preparation that went
+        /// through first time; a rising number on one that is stuck.
+        let failedAttemptCount: Int
+        /// Files that have failed three times or more and have still not succeeded.
+        /// Re-running keeps what is already done, so this is the number that says
+        /// whether running it again is worth anything.
+        let repeatedlyFailingFileCount: Int
     }
     private struct Pending: Sendable {
         let declarationId: UUID; let receiptId: UUID; let sha256: String; let bytes: Int64
@@ -44,9 +51,21 @@ enum LegacyImportProcessingService {
         for item in pending {
             try budget.check()
             let address = StagedImportOriginalAddress(workspaceId: projection.binding.workspaceId, sessionId: projection.binding.sessionId, declarationId: item.declarationId)
-            let outcome = try await decode(item, address: address, projection: projection, store: store, budget: budget)
-            _ = try await StagedLegacyImportService.withActiveSession(scope, actor: actor, binding: binding, on: database) { session, db in
-                try await record(outcome, projection: projection, on: db)
+            do {
+                let outcome = try await decode(item, address: address, projection: projection, store: store, budget: budget)
+                _ = try await StagedLegacyImportService.withActiveSession(scope, actor: actor, binding: binding, on: database) { session, db in
+                    try await record(outcome, projection: projection, on: db)
+                    try await recordAttempt(projection: projection, declarationID: item.declarationId, failure: nil, on: db)
+                }
+            } catch is CancellationError {
+                // Not this file's failure — the whole run stopped. Recording it as one
+                // would make an operator hunt a file that is probably fine.
+                throw CancellationError()
+            } catch {
+                _ = try? await StagedLegacyImportService.withActiveSession(scope, actor: actor, binding: binding, on: database) { session, db in
+                    try await recordAttempt(projection: projection, declarationID: item.declarationId, failure: failureKind(error), on: db)
+                }
+                throw error
             }
         }
         return try await StagedLegacyImportService.withActiveSession(scope, actor: actor, binding: binding, on: database, allowPublished: true) { session, db in
@@ -90,7 +109,7 @@ enum LegacyImportProcessingService {
             let buffer = try await body.collect(upTo: renditionMaximumBytes)
             data = Data(buffer: buffer)
         } catch is CancellationError { throw CancellationError() }
-        catch { throw Abort(.serviceUnavailable, reason: "Private original storage could not be read; retry preparation", identifier: "staged_original_storage_unavailable") }
+        catch { throw Abort(.serviceUnavailable, reason: "Private original storage could not be read. Run the preparation again — files already processed are kept", identifier: "staged_original_storage_unavailable") }
         guard data.count == Int(item.bytes), LegacyProjectImportDecoder.digest(data) == item.sha256 else {
             throw Abort(.conflict, reason: "Retained original bytes no longer match their receipt", identifier: "staged_original_bytes_mismatch")
         }
@@ -156,6 +175,30 @@ enum LegacyImportProcessingService {
         }
     }
 
+    /// Appends one attempt. `attempt_number` is derived inside the same session the
+    /// caller already holds, so two passes cannot claim the same number.
+    static func recordAttempt(projection: LegacyCanonicalProjection, declarationID: UUID, failure: String?, on db: Database) async throws {
+        let sql = try VerifiedIdentityService.sql(db)
+        let previous = try await sql.raw("""
+            SELECT coalesce(max(attempt_number), 0) AS n FROM legacy_import_processing_attempts
+            WHERE projection_id = \(bind: projection.projectionId) AND declaration_id = \(bind: declarationID)
+            """).first()!.decode(column: "n", as: Int.self)
+        try await sql.raw("""
+            INSERT INTO legacy_import_processing_attempts
+                (id, projection_id, session_id, declaration_id, attempt_number, outcome, failure_kind, attempted_at)
+            VALUES (\(bind: UUID()), \(bind: projection.projectionId), \(bind: projection.binding.sessionId), \(bind: declarationID),
+                    \(bind: previous + 1), \(bind: failure == nil ? "succeeded" : "failed"), \(bind: failure), \(bind: Date()))
+            """).run()
+    }
+
+    /// A classification, never the message. Anything unrecognised is `unknown` rather
+    /// than the error's text, which is where a storage path or a signed URL would leak.
+    static func failureKind(_ error: Error) -> String {
+        guard let abort = error as? Abort, !abort.identifier.isEmpty,
+              abort.identifier.range(of: "^[a-z_]{1,64}$", options: .regularExpression) != nil else { return "unknown" }
+        return abort.identifier
+    }
+
     static func summary(_ projection: LegacyCanonicalProjection, session: StagedLegacyImportReceipt, on db: Database) async throws -> Summary {
         let sql = try VerifiedIdentityService.sql(db)
         let received = try await sql.raw("SELECT count(*) AS n FROM staged_import_original_receipts WHERE session_id = \(bind: session.sessionId)").first()!.decode(column: "n", as: Int.self)
@@ -166,6 +209,18 @@ enum LegacyImportProcessingService {
         var rendered = 0, unsupported = 0
         for row in drawings { if try row.decode(column: "state", as: String.self) == "rendered" { rendered = try row.decode(column: "n", as: Int.self) } else { unsupported = try row.decode(column: "n", as: Int.self) } }
         let processedDeclarations = Set(try await sql.raw("SELECT declaration_id FROM legacy_import_file_processing WHERE projection_id = \(bind: projection.projectionId)").all().map { try $0.decode(column: "declaration_id", as: UUID.self) })
+        let failedAttempts = try await sql.raw("SELECT count(*) AS n FROM legacy_import_processing_attempts WHERE projection_id = \(bind: projection.projectionId) AND outcome = 'failed'").first()!.decode(column: "n", as: Int.self)
+        // Three failures with no success is the point at which running it again stops
+        // being optimism. The row still stands; this only makes it visible.
+        let stuck = try await sql.raw("""
+            SELECT count(*) AS n FROM (
+                SELECT a.declaration_id FROM legacy_import_processing_attempts a
+                WHERE a.projection_id = \(bind: projection.projectionId) AND a.outcome = 'failed'
+                    AND NOT EXISTS (SELECT 1 FROM legacy_import_processing_attempts s
+                                    WHERE s.projection_id = a.projection_id AND s.declaration_id = a.declaration_id AND s.outcome = 'succeeded')
+                GROUP BY a.declaration_id HAVING count(*) >= 3
+            ) repeated
+            """).first()!.decode(column: "n", as: Int.self)
         let fileByID = Dictionary(uniqueKeysWithValues: projection.files.map { ($0.id, $0) })
         let missing = projection.fileUses.filter { use in
             guard use.required else { return false }
@@ -173,6 +228,7 @@ enum LegacyImportProcessingService {
             return !processedDeclarations.contains(file.declarationId)
         }.count
         return .init(declaredFileCount: projection.files.count, receivedFileCount: received, processedFileCount: decoded + opaque,
-            decodedImageCount: decoded, opaqueFileCount: opaque, renderedDrawingCount: rendered, unsupportedDrawingCount: unsupported, missingRequiredFileCount: missing)
+            decodedImageCount: decoded, opaqueFileCount: opaque, renderedDrawingCount: rendered, unsupportedDrawingCount: unsupported, missingRequiredFileCount: missing,
+            failedAttemptCount: failedAttempts, repeatedlyFailingFileCount: stuck)
     }
 }

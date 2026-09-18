@@ -243,6 +243,66 @@ final class LegacyImportCommitTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(try retained.decode(column: "n", as: Int.self), 1)
     }
 
+    /// Retrying one file's processing, and being able to see that it happened.
+    ///
+    /// Re-running a preparation was already incremental — `pendingDeclarations` skips
+    /// anything already recorded — but only successes were written down, so a run that
+    /// took four passes looked identical to one that went through first time. Nobody
+    /// could see which file kept failing, or tell a preparation that was progressing
+    /// from one stuck on the same file forever.
+    func testAFailedFileIsRecordedRetriedIncrementallyAndTheAttemptsAreImmutable() async throws {
+        let staged = try await stage()
+        try await transfer(staged)
+        let projection = LegacyCanonicalProjectionCommand(projectionId: UUID(), scope: staged.scope, operationId: UUID(), expectedSourceRevision: 1, policy: LegacyCanonicalProjection.policy)
+        _ = try await LegacyCanonicalProjectionService.prepare(projection, actor: staged.actor, binding: binding, on: app.db)
+
+        // Storage hands back bytes that do not match their receipt.
+        await http.configure(corrupt: true)
+        do {
+            _ = try await LegacyImportProcessingService.process(projectionID: projection.projectionId, scope: staged.scope, actor: staged.actor, binding: binding, store: store, on: app.db)
+            XCTFail("processing should not have succeeded against corrupt bytes")
+        } catch {}
+
+        let failed = try await sql.raw("""
+            SELECT declaration_id, attempt_number, outcome, failure_kind FROM legacy_import_processing_attempts
+            WHERE projection_id = \(bind: projection.projectionId) ORDER BY attempt_number
+            """).all()
+        XCTAssertEqual(failed.count, 1, "the failure has to be written down, not just thrown")
+        XCTAssertEqual(try failed[0].decode(column: "outcome", as: String.self), "failed")
+        XCTAssertEqual(try failed[0].decode(column: "attempt_number", as: Int.self), 1)
+        // A classification, never a message — an error string is where a storage path leaks.
+        XCTAssertEqual(try failed[0].decode(column: "failure_kind", as: String.self), "staged_original_bytes_mismatch")
+        let stuckDeclaration = try failed[0].decode(column: "declaration_id", as: UUID.self)
+
+        // Storage recovers. Re-running keeps everything already processed.
+        await http.configure(corrupt: false)
+        let summary = try await LegacyImportProcessingService.process(projectionID: projection.projectionId, scope: staged.scope, actor: staged.actor, binding: binding, store: store, on: app.db)
+
+        XCTAssertEqual(summary.failedAttemptCount, 1, "the failure stays on the record after the retry succeeds")
+        XCTAssertEqual(summary.repeatedlyFailingFileCount, 0, "one failure is not a stuck file")
+        XCTAssertEqual(summary.processedFileCount, summary.receivedFileCount, "the retry finished the preparation rather than restarting it")
+
+        let after = try await sql.raw("""
+            SELECT attempt_number, outcome FROM legacy_import_processing_attempts
+            WHERE projection_id = \(bind: projection.projectionId) AND declaration_id = \(bind: stuckDeclaration) ORDER BY attempt_number
+            """).all()
+        XCTAssertEqual(after.count, 2)
+        XCTAssertEqual(try after[1].decode(column: "attempt_number", as: Int.self), 2)
+        XCTAssertEqual(try after[1].decode(column: "outcome", as: String.self), "succeeded")
+
+        // Every file was attempted exactly once beyond the one that failed: the second
+        // pass did not redo work the first pass had already recorded.
+        let succeeded = try await sql.raw("""
+            SELECT count(*) AS n FROM legacy_import_processing_attempts
+            WHERE projection_id = \(bind: projection.projectionId) AND outcome = 'succeeded'
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(succeeded, summary.processedFileCount)
+
+        // The record cannot be tidied up afterwards.
+        await rejected { try await self.sql.raw("UPDATE legacy_import_processing_attempts SET outcome = 'succeeded' WHERE projection_id = \(bind: projection.projectionId)").run() }
+        await rejected { try await self.sql.raw("DELETE FROM legacy_import_processing_attempts WHERE projection_id = \(bind: projection.projectionId)").run() }
+    }
+
     func testRichProjectPublishesCompleteGraphOnceWithQualifiedHistoryAndReadback() async throws {
         let staged = try await stage()
         try await transfer(staged)

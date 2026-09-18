@@ -29,7 +29,8 @@ enum LegacyImportCommitService {
             return .init(projection: receipt, declaredFileCount: summary.declaredFileCount, receivedFileCount: summary.receivedFileCount,
                 processedFileCount: summary.processedFileCount, decodedImageCount: summary.decodedImageCount, opaqueFileCount: summary.opaqueFileCount,
                 renderedDrawingCount: summary.renderedDrawingCount, unsupportedDrawingCount: summary.unsupportedDrawingCount,
-                missingRequiredFileCount: summary.missingRequiredFileCount, blockers: blockers,
+                missingRequiredFileCount: summary.missingRequiredFileCount,
+                failedAttemptCount: summary.failedAttemptCount, repeatedlyFailingFileCount: summary.repeatedlyFailingFileCount, blockers: blockers,
                 qualifications: projection.findings.filter { $0.disposition == .qualification },
                 readyToPublish: commit == nil && blockers.isEmpty && summary.missingRequiredFileCount == 0 && summary.processedFileCount == summary.receivedFileCount, commit: commit)
         }
