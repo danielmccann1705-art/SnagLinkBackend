@@ -40,13 +40,10 @@ struct LegalPageRenderer {
                         <p>When you sign in with Apple, we receive your Apple User ID and, if you choose to share it, your name and email address. We do not receive or store your Apple ID password.</p>
 
                         <h3>Project Data</h3>
-                        <p>We store the project data you create within Snaglist, including project names, snag descriptions, locations, photos, and completion records. This data is stored securely and is only accessible to you and those you choose to share it with via magic links or team invites.</p>
+                        <p>We store the project data you create within Snaglist, including project names, snag descriptions, locations, photos, and completion records. This data is stored securely and is only accessible to you and to those you choose to share it with, through a Contractor link or a team invitation.</p>
 
                         <h3>Photos</h3>
                         <p>Photos you upload to document snags are stored securely on our servers. We do not access, analyse, or share your photos for any purpose other than providing the Snaglist service to you.</p>
-
-                        <h3>Device Information</h3>
-                        <p>We may collect device tokens for the purpose of sending push notifications that you have opted into, such as completion approval updates.</p>
 
                         <h3>Usage Data</h3>
                         <p>We may collect anonymous usage analytics to improve the app experience. This data does not personally identify you.</p>
@@ -58,8 +55,7 @@ struct LegalPageRenderer {
                         <ul>
                             <li>Provide, maintain, and improve the Snaglist service</li>
                             <li>Authenticate your identity and manage your account</li>
-                            <li>Send push notifications you have opted into</li>
-                            <li>Generate reports and magic links you request</li>
+                            <li>Generate the reports and Contractor links you request</li>
                             <li>Process subscription payments (via Apple)</li>
                             <li>Respond to support requests</li>
                         </ul>
@@ -77,7 +73,6 @@ struct LegalPageRenderer {
                         <ul>
                             <li><strong>Apple Sign In</strong> — for secure authentication</li>
                             <li><strong>Apple App Store / RevenueCat</strong> — for subscription payment processing</li>
-                            <li><strong>Apple Push Notification Service (APNs)</strong> — for push notifications</li>
                             <li><strong>Hetzner / Cloudflare</strong> — for server hosting and data storage</li>
                         </ul>
                         <p>These services have their own privacy policies governing how they handle your data.</p>
@@ -87,7 +82,7 @@ struct LegalPageRenderer {
                         <h2>6. Data Sharing</h2>
                         <p>We do not sell, trade, or rent your personal information to third parties. We may share data only in the following circumstances:</p>
                         <ul>
-                            <li>With contractors or team members you explicitly invite via magic links or team invites</li>
+                            <li>With the contractors and team members you invite, through a Contractor link or a team invitation you send</li>
                             <li>When required by law or to comply with legal processes</li>
                             <li>To protect our rights, safety, or property</li>
                         </ul>
@@ -95,7 +90,8 @@ struct LegalPageRenderer {
 
                     <section>
                         <h2>7. Data Retention</h2>
-                        <p>We retain your data for as long as your account is active or as needed to provide the service. If you wish to delete your account and associated data, please contact us at the email below.</p>
+                        <p>We keep your projects, snags, photos and the records that go with them for as long as your account exists. Material we hold while preparing an import of data from an earlier version of Snaglist is kept on the same basis: until the account or company it belongs to is deleted.</p>
+                        <p>You can delete your account from inside the Snaglist app, in Settings. Deleting your account removes the data held for it. Where a project is owned by a company you belong to, that project stays with the company, and it is the company's own deletion that removes it.</p>
                     </section>
 
                     <section>

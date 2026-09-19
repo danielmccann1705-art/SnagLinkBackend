@@ -86,8 +86,17 @@ func routes(_ app: Application) throws {
 
     // MARK: - Apple App Site Association (B7)
     // Serves the AASA with no extension + application/json so iOS opens the app for our
-    // universal-link paths. `/auth/*` is the magic-link sign-in path (B1); `/m/*` is the
-    // contractor magic link. TEAMID 52ZZHYHM62 — confirm with the iOS team before deploy.
+    // universal-link paths. `/auth/*` is the magic-link sign-in path (B1) and is the only
+    // one: a manager tapping their own sign-in link should land in the app.
+    //
+    // `/m/*` is deliberately absent. That is the Contractor link, and a contractor opens
+    // it in a browser with no account and no app. A manager who happens to have Snaglist
+    // installed and taps the same link must reach the same browser page rather than a
+    // screen the app has no session for, so this path must not claim the app.
+    //
+    // `appclips` is deliberately absent too: v2 ships no App Clip, and Apple caches this
+    // file, so naming a target that does not exist outlives the mistake.
+    // TEAMID 52ZZHYHM62 — confirm with the iOS team before deploy.
     app.get(".well-known", "apple-app-site-association") { req -> Response in
         let json = """
         {
@@ -95,13 +104,9 @@ func routes(_ app: Application) throws {
             "details": [{
               "appIDs": ["52ZZHYHM62.com.snaglist.app"],
               "components": [
-                { "/": "/auth/*" },
-                { "/": "/m/*" }
+                { "/": "/auth/*" }
               ]
             }]
-          },
-          "appclips": {
-            "apps": ["52ZZHYHM62.com.snaglist.app.Clip"]
           }
         }
         """
