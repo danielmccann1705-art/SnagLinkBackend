@@ -1,0 +1,41 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "snaglist-api-production",
+  "main": "src/production.ts",
+  "compatibility_date": "2026-09-09",
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {"enabled": false},
+  // Deliberately no route. Attach api.snaglist.dev only after the concrete
+  // production candidate and environment inventory are approved.
+  "vars": {
+    "PRODUCTION_ENABLED": "false",
+    "PRODUCTION_LEGACY_IMPORT_ENABLED": "false",
+    "PLATFORM_ENVIRONMENT": "production",
+    "PRODUCTION_DATABASE_HOST": "",
+    "PRODUCTION_DATABASE_NAME": "",
+    "BASE_URL": "https://api.snaglist.dev",
+    "MAGIC_LINK_BASE_URL": "https://api.snaglist.dev",
+    "PORTAL_ORIGIN": "https://app.usesnaglist.com",
+    "R2_ACCOUNT_ID": "387d49014cd0d45f9e6434196ab513c0",
+    "R2_BUCKET_NAME": "snaglist-production-uploads",
+    "R2_PRIVATE_BUCKET_NAME": "snaglist-production-private",
+    "R2_PUBLIC_URL": "https://api.snaglist.dev",
+    "EMAIL_FROM": "Snaglist <notifications@mail.usesnaglist.com>",
+    "APPLE_BUNDLE_ID": "com.snaglist.app",
+    "APPLE_CLIENT_ID": "com.snaglist.app",
+    "GOOGLE_AUTH_ENVIRONMENT": "production"
+  },
+  "triggers": {"crons": ["0 * * * *"]},
+  "containers": [{
+    "class_name": "SnaglistProductionBackend",
+    "image": "../../Dockerfile",
+    "image_build_context": "../..",
+    "instance_type": "basic",
+    "max_instances": 1,
+    "constraints": {"regions": ["WEUR"]},
+    "observability": {"logs": {"enabled": false}}
+  }],
+  "durable_objects": {"bindings": [{"name": "BACKEND", "class_name": "SnaglistProductionBackend"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["SnaglistProductionBackend"]}]
+}

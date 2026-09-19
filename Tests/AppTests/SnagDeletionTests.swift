@@ -44,6 +44,7 @@ final class SnagDeletionJSONTests: XCTestCase {
 
 /// Uses a disposable DATABASE_URL in development/CI; never supplies production settings.
 final class SnagDeletionEndpointTests: XCTestCase {
+    private enum ForcedRollback: Error { case expectedGuard, unexpectedDelete }
     var app: Application!
     override func setUp() async throws {
         try XCTSkipUnless(Environment.get("DATABASE_URL") != nil, "Requires isolated PostgreSQL DATABASE_URL")
@@ -104,7 +105,7 @@ final class SnagDeletionEndpointTests: XCTestCase {
             try await SyncedReport(magicLinkToken: link.token, reportJSON: reportJSON).save(on: app.db)
             let completion = Completion(snagId: id, magicLinkId: try link.requireID(), contractorName: "Demo")
             try await completion.save(on: app.db)
-            try await CompletionPhoto(completionId: try completion.requireID(), url: "https://example.test/external.jpg").save(on: app.db)
+            try await HistoricalCompletionPhotoFixture.insert(completionID:try completion.requireID(),url:"https://example.test/external.jpg",on:app.db)
         }
         try await remove(id: id, project: projectId, jwt: jwt, expect: .noContent)
         for link in links {
@@ -211,6 +212,71 @@ final class SnagDeletionEndpointTests: XCTestCase {
         try await remove(id: id, project: projectB, jwt: jwtB, expect: .noContent)
         let receipts = try await SnagDeletion.query(on: app.db).filter(\.$snagId == id).all()
         XCTAssertEqual(receipts.count, 2)
+    }
+
+    func testLegacyReceiptGuardUsesExactOwnedLinkWithoutCanonicalParent() async throws {
+        let (ownerId, projectId, _) = try await owner()
+        let link = MagicLink(token: UUID().uuidString, accessLevel: .update,
+            expiresAt: Date().addingTimeInterval(600), snagIds: [], projectId: projectId, createdById: ownerId)
+        try await link.save(on: app.db)
+        try await Project.query(on: app.db).filter(\.$id == projectId).delete()
+
+        let deletedSnag = UUID()
+        try await SnagDeletionService.delete(id: deletedSnag, projectId: projectId, ownerId: ownerId, on: app.db)
+        let loadedReceipt = try await SnagDeletionService.receipt(
+            id: deletedSnag, ownerId: ownerId, projectId: projectId, on: app.db)
+        let receipt = try XCTUnwrap(loadedReceipt)
+
+        try await link.delete(on: app.db)
+        receipt.filePaths = ["/uploads/synced-photos/already-authorised.jpg"]
+        try await receipt.save(on: app.db)
+        let updatedReceipt = try await SnagDeletion.find(receipt.id, on: app.db)
+        XCTAssertEqual(updatedReceipt?.filePaths,
+                       ["/uploads/synced-photos/already-authorised.jpg"])
+
+        let (otherOwner, otherProject, _) = try await owner()
+        let otherLink = MagicLink(token: UUID().uuidString, accessLevel: .update,
+            expiresAt: Date().addingTimeInterval(600), snagIds: [], projectId: otherProject, createdById: otherOwner)
+        try await otherLink.save(on: app.db)
+        try await Project.query(on: app.db).filter(\.$id == otherProject).delete()
+        let forged = SnagDeletion(snagId: UUID(), ownerId: ownerId, projectId: otherProject)
+        do {
+            try await forged.save(on: app.db)
+            XCTFail("Another owner's legacy link must not authorise a deletion receipt")
+        } catch { }
+        let forgedReceipt = try await SnagDeletionService.receipt(
+            id: forged.snagId, ownerId: ownerId, projectId: otherProject, on: app.db)
+        XCTAssertNil(forgedReceipt)
+    }
+
+    func testDirectOrphanCompletionPhotoDeleteIsRejectedOutsideCascade() async throws {
+        let (ownerId, projectId, _) = try await owner()
+        let link = MagicLink(token: UUID().uuidString, accessLevel: .update,
+            expiresAt: Date().addingTimeInterval(600), snagIds: [], projectId: projectId, createdById: ownerId)
+        try await link.save(on: app.db)
+        let completion = Completion(snagId: UUID(), magicLinkId: try link.requireID(), contractorName: "Synthetic")
+        try await completion.save(on: app.db)
+        let completionID = try completion.requireID()
+        try await HistoricalCompletionPhotoFixture.insert(
+            completionID: completionID, url: "https://example.test/historical.jpg", on: app.db)
+        let inserted = try await CompletionPhoto.query(on: app.db)
+            .filter(\.$completion.$id == completionID).first()
+        let exactPhotoID = try XCTUnwrap(inserted?.id)
+
+        do {
+            try await app.db.transaction { db in
+                let sql = try VerifiedIdentityService.sql(db)
+                try await sql.raw("ALTER TABLE completion_photos DROP CONSTRAINT completion_photos_completion_id_fkey").run()
+                try await sql.raw("DELETE FROM completions WHERE id=\(bind:completionID)").run()
+                do {
+                    try await sql.raw("DELETE FROM completion_photos WHERE id=\(bind:exactPhotoID)").run()
+                    throw ForcedRollback.unexpectedDelete
+                } catch is ForcedRollback { throw ForcedRollback.unexpectedDelete }
+                catch { throw ForcedRollback.expectedGuard }
+            }
+            XCTFail("The synthetic transaction must roll back")
+        } catch ForcedRollback.expectedGuard { }
+        catch { XCTFail("Unexpected direct-orphan result: \(error)") }
     }
 
     func testMigrationIsAdditiveAndCanRunTwice() async throws {

@@ -36,7 +36,7 @@ export async function drawingPageID(assetID, index, subtle = globalThis.crypto.s
 /** Factories are explicit for tests; production defaults are documented Workers
  * DigestStream and FixedLengthStream APIs, not buffered whole-PDF hashing.
  */
-export function createDrawingStore({ bucket, processorProfile,
+export function createDrawingStore({ bucket, processorProfile, writeIntents,
   digestStream = () => new globalThis.crypto.DigestStream('SHA-256'),
   fixedLengthStream = size => new globalThis.FixedLengthStream(size),
   subtle = globalThis.crypto.subtle }) {
@@ -155,7 +155,24 @@ export function createDrawingStore({ bucket, processorProfile,
       await body.cancel().catch(()=>{});
       return Object.freeze({ ...existing, reused:true, verification:'object-bytes-only' });
     }
-    const fixed = fixedLengthStream(value.byteCount), writer = fixed.writable.getWriter(), reader = body.getReader();
+    // This adapter is injected by the authenticated server bridge. It must
+    // persist the exact plan under fresh authority before allowing external IO.
+    // There is deliberately no default and no lease-expiry success fallback.
+    if (!writeIntents || ['begin','settle','uncertain'].some(name => typeof writeIntents[name] !== 'function')) {
+      await body.cancel().catch(()=>{});
+      throw new DrawingStoreError('drawing_write_intent_required');
+    }
+    // Complete local stream setup before durable admission. Constructor/lock
+    // failures cannot issue a PUT and must not strand a pending intent.
+    let fixed, writer, reader;
+    try {
+      fixed = fixedLengthStream(value.byteCount);
+      writer = fixed.writable.getWriter(); reader = body.getReader();
+    } catch {
+      await Promise.allSettled([body.cancel(),fixed?.readable.cancel(),writer?.abort()]);
+      writer?.releaseLock();
+      throw new DrawingStoreError('drawing_source_stream_invalid');
+    }
     let written = 0;
     // A conditional R2 PUT may reject an existing key without ever consuming
     // the fixed-length stream. Cancel its readable side as well: otherwise a
@@ -163,6 +180,12 @@ export function createDrawingStore({ bucket, processorProfile,
     const cancel = async () => { await Promise.allSettled([
       reader.cancel(), fixed.readable.cancel(), writer.abort()
     ]); };
+    let writeTicket;
+    try { writeTicket = await writeIntents.begin(value); }
+    catch {
+      await cancel(); reader.releaseLock(); writer.releaseLock();
+      throw new DrawingStoreError('drawing_write_intent_unavailable');
+    }
     const onAbort = () => { void cancel(); };
     signal?.addEventListener('abort',onAbort,{once:true});
     const pump = (async () => {
@@ -191,6 +214,9 @@ export function createDrawingStore({ bucket, processorProfile,
       else await pump;
     } catch (error) {
       await cancel();
+      // An unavailable settlement service leaves its durable active record.
+      // Remote ambiguity remains pending even if this local operation aborts.
+      await writeIntents.uncertain(writeTicket).catch(()=>{});
       if (signal?.aborted) throw new DrawingStoreError('drawing_operation_cancelled');
       if (error instanceof DrawingStoreError) throw error;
       throw new DrawingStoreError('drawing_storage_write_failed');
@@ -199,6 +225,8 @@ export function createDrawingStore({ bucket, processorProfile,
       signal?.removeEventListener('abort',onAbort);
       reader.releaseLock(); writer.releaseLock();
     }
+    try { await writeIntents.settle(writeTicket); }
+    catch { throw new DrawingStoreError('drawing_write_intent_unavailable'); }
     const checked = await readback(value,assertCurrent,'after-write',signal);
     return Object.freeze({ ...checked,reused:result===null,verification:'object-bytes-only' });
   }

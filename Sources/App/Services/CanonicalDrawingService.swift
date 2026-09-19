@@ -92,11 +92,39 @@ struct CanonicalDrawingService {
     /// then supply verified output to finishProcessing. Expired jobs may be reclaimed;
     /// an old lease can never finish after another worker has acquired the asset.
     static func beginProcessing(assetID: UUID, projectID: UUID, actorID: UUID, on database: Database) async throws -> DrawingProcessingLease {
+        try await beginProcessing(assetID: assetID, projectID: projectID, actorID: actorID,
+                                  expectedRevision: nil, requireVerifiedOriginal: false, on: database)
+    }
+    /// Public processing may start only from the exact revision established by
+    /// measured private-original readback. Internal fixtures retain the older
+    /// entry point above and cannot accidentally become HTTP authority.
+    static func beginVerifiedProcessing(assetID: UUID, projectID: UUID, actorID: UUID,
+                                        expectedRevision: Int64, on database: Database) async throws -> DrawingProcessingLease {
+        guard expectedRevision > 0 else { throw invalid("A positive drawing source revision is required") }
+        return try await beginProcessing(assetID: assetID, projectID: projectID, actorID: actorID,
+                                         expectedRevision: expectedRevision, requireVerifiedOriginal: true, on: database)
+    }
+    private static func beginProcessing(assetID: UUID, projectID: UUID, actorID: UUID,
+                                        expectedRevision: Int64?, requireVerifiedOriginal: Bool,
+                                        on database: Database) async throws -> DrawingProcessingLease {
         try await database.transaction { db in
             _ = try await project(projectID, actorID: actorID, on: db)
             let value = try await asset(assetID, projectID: projectID, on: db)
             try owned(value, actorID: actorID)
             let now = Date(), sql = try VerifiedIdentityService.sql(db)
+            if let expectedRevision {
+                guard value.revision == expectedRevision else { throw conflict("Drawing source changed; refresh before processing") }
+            }
+            if requireVerifiedOriginal {
+                // The receipt revision is the exact verified-upload revision.
+                // A failed/expired processing lease advances the asset revision,
+                // but cannot mutate any of the receipt-bound source identity.
+                // Accept that historical receipt when reclaiming such a lease;
+                // the expected revision above still fences this current state.
+                guard try await sql.raw("SELECT 1 FROM drawing_original_receipts WHERE asset_id = \(bind: assetID) AND project_id = \(bind: projectID) AND uploader_id = \(bind: actorID) AND asset_revision <= \(bind: value.revision) AND measured_sha256 = \(bind: value.sha256) AND measured_size = \(bind: value.byteCount) AND measured_mime = \(bind: value.mimeType) AND processor_profile = \(bind: value.processorProfile)").first() != nil else {
+                    throw conflict("Upload and verify the drawing original before processing")
+                }
+            }
             guard value.expiresAt > now, ["allocated", "processing"].contains(value.state) else { throw conflict("This drawing source cannot start processing") }
             if let existing = try await sql.raw("SELECT lease_expires_at FROM drawing_processing_jobs WHERE asset_id = \(bind: assetID)").first(), try existing.decode(column: "lease_expires_at", as: Date.self) > now {
                 throw conflict("Drawing processing is already leased")
@@ -212,6 +240,15 @@ struct CanonicalDrawingService {
                 try await sql.raw("INSERT INTO drawing_version_pages(id,version_id,drawing_id,asset_id,asset_page_id,project_id,page_index) VALUES(\(bind: sheet.versionPageId),\(bind: sheet.versionId),\(bind: sheet.id),\(bind: source.id),\(bind: pageID),\(bind: projectID),0)").run()
             }
             try await sql.raw("UPDATE drawing_assets SET published_at = COALESCE(published_at,\(bind: now)), revision = revision + 1 WHERE id = \(bind: source.id)").run()
+            // Publication and every sheet projection share the transaction's
+            // journal group. A delta reader never sees a source receipt without
+            // the complete set of newly published drawing entities.
+            for sheet in command.sheets {
+                let response = try await LegacyImportReadService.sheet(sheet.id, projectID: projectID, on: db)
+                try await PlatformMutationService.change(workspaceID: project.workspaceId!, projectID: projectID,
+                    type: "drawing", entityID: sheet.id, revision: response.revision, kind: "created",
+                    fields: ["name", "sortOrder", "pages"], payload: response, actorID: actorID, on: db)
+            }
             let result = DrawingPublicationRecord(projectId: projectID, assetId: source.id, sheets: command.sheets)
             try await PlatformMutationService.record(result, actorID: actorID, workspaceID: project.workspaceId!, mutation: command.mutation, hash: hash, on: db)
             return result
@@ -260,6 +297,16 @@ struct CanonicalDrawingService {
                 INSERT INTO drawing_pin_events(id,snag_id,project_id,pin_revision,snag_revision,previous_page_id,previous_x,previous_y,next_page_id,next_x,next_y,action,actor_id,recorded_at)
                 VALUES(\(bind: eventID),\(bind: snagID),\(bind: projectID),\(bind: revision),\(bind: snag.revision),\(bind: previousPage),\(bind: previousX),\(bind: previousY),\(bind: pin?.versionPageId),\(bind: pin?.x),\(bind: pin?.y),\(bind: action),\(bind: actorID),\(bind: now))
                 """).run()
+            let snagResponse = PlatformSnagResponse(snag)
+            try await PlatformMutationService.change(workspaceID: project.workspaceId!, projectID: projectID,
+                type: "snag", entityID: snagID, revision: snag.revision, kind: "updated",
+                fields: ["drawingId", "drawingPinX", "drawingPinY"], payload: snagResponse,
+                actorID: actorID, on: db)
+            let pinResponse = try DrawingPinResponse(await sql.raw("SELECT * FROM snag_drawing_pins WHERE snag_id = \(bind: snagID) AND project_id = \(bind: projectID)").first()!)
+            try await PlatformMutationService.change(workspaceID: project.workspaceId!, projectID: projectID,
+                type: "drawingPin", entityID: snagID, revision: revision,
+                kind: pin == nil ? "removed" : (previousPage == nil ? "created" : "updated"),
+                fields: ["pin"], payload: pinResponse, actorID: actorID, on: db)
             let result = DrawingPinRecord(snagId: snagID, projectId: projectID, revision: revision, snagRevision: snag.revision, pin: pin, eventId: eventID, recordedBy: actorID)
             try await PlatformMutationService.record(result, actorID: actorID, workspaceID: project.workspaceId!, mutation: command.mutation, hash: hash, on: db)
             return result

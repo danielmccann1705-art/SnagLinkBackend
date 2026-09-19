@@ -81,25 +81,21 @@ struct ThumbnailService {
         originalData: Data,
         thumbnailKey: String,
         app: Application,
-        logger: Logger
+        logger: Logger,
+        upload: @escaping @Sendable (Data) async throws -> Void
     ) async -> Bool {
         guard let thumbnailData = generateThumbnail(from: originalData, logger: logger) else {
             return false
         }
 
         do {
-            var buffer = ByteBufferAllocator().buffer(capacity: thumbnailData.count)
-            buffer.writeBytes(thumbnailData)
-            try await StorageService.upload(
-                data: buffer,
-                key: thumbnailKey,
-                contentType: "image/jpeg",
-                app: app
-            )
-            logger.info("ThumbnailService: Uploaded thumbnail to \(thumbnailKey)")
+            // The caller records exact bytes and current authority in a durable
+            // object-write intent before its storage operation.
+            try await upload(thumbnailData)
+            logger.info("ThumbnailService: Uploaded thumbnail")
             return true
         } catch {
-            logger.warning("ThumbnailService: Failed to upload thumbnail: \(error)")
+            logger.warning("ThumbnailService: Thumbnail upload unavailable")
             return false
         }
     }

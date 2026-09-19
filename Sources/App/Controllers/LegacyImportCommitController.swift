@@ -180,7 +180,26 @@ struct ImportedProjectController: RouteCollection {
         return try await bytes(req, target: target, store: store)
     }
     private func page(_ req: Request, thumbnail: Bool) async throws -> Response {
-        let store = try LegacyImportCommitController.store(req), pageID = try id("pageId", req)
+        let pageID = try id("pageId", req)
+        let canonical = try await req.db.transaction { db in
+            let project = try await authorised(req, db)
+            return try await CanonicalDrawingReadService.page(pageID, projectID: project.requireID(), thumbnail: thumbnail, on: db)
+        }
+        if let canonical {
+            let runtime = try CanonicalDrawingRuntimeAccess.require(req.application)
+            let data = try await CanonicalDrawingReadService.verified(canonical, runtime: runtime)
+            let current = try await req.db.transaction { db -> CanonicalDrawingPageReadTarget? in
+                let project = try await authorised(req, db)
+                return try await CanonicalDrawingReadService.page(pageID, projectID: project.requireID(), thumbnail: thumbnail, on: db)
+            }
+            guard current == canonical else { throw Abort(.notFound, reason: "Drawing page unavailable") }
+            return Response(status: .ok, headers: ["Content-Type": canonical.mimeType,
+                "Content-Length": String(data.count), "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff", "Content-Disposition": "inline",
+                "Referrer-Policy": "no-referrer", "Vary": "Cookie, Authorization"],
+                body: .init(data: data))
+        }
+        let store = try LegacyImportCommitController.store(req)
         let target = try await req.db.transaction { db in
             let project = try await authorised(req, db)
             return try await LegacyImportReadService.drawingPageBytes(pageID, projectID: project.requireID(), thumbnail: thumbnail, on: db)

@@ -114,11 +114,12 @@ enum SnagDeletionService {
     }
 
     /// Called after the DB transaction, and by scheduled cleanup for transient storage errors.
-    static func cleanupFiles(app: Application) async throws {
-        for receipt in try await SnagDeletion.query(on: app.db).all() where !receipt.filePaths.isEmpty {
+    static func cleanupFiles(app: Application, on database: Database? = nil) async throws {
+        let db = database ?? app.db
+        for receipt in try await SnagDeletion.query(on: db).all() where !receipt.filePaths.isEmpty {
             var failed: [String] = []
             for path in receipt.filePaths {
-                let referenced = try await SyncedPhoto.query(on: app.db).group(.or) {
+                let referenced = try await SyncedPhoto.query(on: db).group(.or) {
                     $0.filter(\.$filePath == path).filter(\.$thumbnailFilePath == path)
                 }.count() > 0
                 guard !referenced else { continue }
@@ -126,7 +127,7 @@ enum SnagDeletionService {
                 catch { failed.append(path); app.logger.warning("Deleted snag photo cleanup will retry") }
             }
             receipt.filePaths = failed
-            try await receipt.save(on: app.db)
+            try await receipt.save(on: db)
         }
     }
 }

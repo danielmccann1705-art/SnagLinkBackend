@@ -1,6 +1,7 @@
 @testable import App
 import XCTVapor
 import Fluent
+import FluentSQL
 import JWT
 import Foundation
 
@@ -128,10 +129,11 @@ final class PreviewTokenEndpointTests: XCTestCase {
 
     func testSubmitToPreviewLinkIsForbidden() async throws {
         try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
+        let (ownerID, _) = try await makeUser()
         let snagId = UUID()
         let token = "preview-\(UUID().uuidString)"
         let ml = MagicLink(token: token, accessLevel: .update, expiresAt: Date().addingTimeInterval(3600),
-                           snagIds: [snagId], projectId: UUID(), createdById: UUID(),
+                           snagIds: [snagId], projectId: UUID(), createdById: ownerID,
                            previewMode: true, previewExpiresAt: Date().addingTimeInterval(3600))
         try await ml.save(on: app.db)
 
@@ -145,18 +147,21 @@ final class PreviewTokenEndpointTests: XCTestCase {
     func testCleanupRemovesExpiredPreviewLinksAndStagingData() async throws {
         try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
 
-        // Expired preview link + its staging report.
+        let (ownerID, _) = try await makeUser()
+        // Stage data while the link is live, then age the fixture.
         let deadToken = "expired-\(UUID().uuidString)"
-        let dead = MagicLink(token: deadToken, accessLevel: .update, expiresAt: Date().addingTimeInterval(-3600),
-                             snagIds: [UUID()], projectId: UUID(), createdById: UUID(),
+        let dead = MagicLink(token: deadToken, accessLevel: .update, expiresAt: Date().addingTimeInterval(3600),
+                             snagIds: [UUID()], projectId: UUID(), createdById: ownerID,
                              previewMode: true, previewExpiresAt: Date().addingTimeInterval(-3600))
         try await dead.save(on: app.db)
         try await SyncedReport(magicLinkToken: deadToken, reportJSON: "{}").save(on: app.db)
 
+        try await (app.db as! SQLDatabase).raw("UPDATE magic_links SET expires_at=NOW()-INTERVAL '1 hour' WHERE token=\(bind: deadToken)").run()
+
         // Live preview link must survive.
         let liveToken = "live-\(UUID().uuidString)"
         let live = MagicLink(token: liveToken, accessLevel: .update, expiresAt: Date().addingTimeInterval(3600),
-                             snagIds: [UUID()], projectId: UUID(), createdById: UUID(),
+                             snagIds: [UUID()], projectId: UUID(), createdById: ownerID,
                              previewMode: true, previewExpiresAt: Date().addingTimeInterval(3600))
         try await live.save(on: app.db)
 

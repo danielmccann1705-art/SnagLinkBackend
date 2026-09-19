@@ -1085,12 +1085,26 @@ struct MagicLinkController: RouteCollection {
         let filename = "\(metadata.id.uuidString).\(fileExtension)"
         let storageKey = "uploads/synced-photos/\(filename)"
 
-        try await StorageService.upload(
-            data: upload.image.data,
-            key: storageKey,
-            contentType: "image/jpeg",
-            app: req.application
-        )
+        let linkID = try magicLink.requireID()
+        let authorizeWrite: @Sendable (Database) async throws -> ObjectWriteIntentService.Scope = { db in
+            let current = try await JWTAuthMiddleware.authenticate(req, on: db)
+            guard current.userId == userId,
+                  let link = try await MagicLink.query(on: db).filter(\.$id == linkID).filter(\.$createdById == userId)
+                    .filter(LegacyProjectAccess.personalRecords(.magicLinks)).first() else { throw Abort(.notFound) }
+            try await SnagDeletionService.requireActive(metadata.snagId, ownerId: link.createdById, projectId: link.projectId, on: db)
+            let project = try await Project.find(link.projectId, on: db)
+            if let workspaceID = project?.workspaceId { try await WorkspaceAccessService.lock(workspaceID, on: db) }
+            if let existing = try await SyncedPhoto.find(metadata.id, on: db) {
+                guard try await MagicLink.query(on: db).filter(\.$token == existing.magicLinkToken).filter(\.$createdById == userId)
+                    .filter(LegacyProjectAccess.personalRecords(.magicLinks)).first() != nil else { throw Abort(.forbidden) }
+            }
+            return .init(userID: userId, workspaceID: project?.workspaceId, projectID: link.projectId, magicLinkID: linkID)
+        }
+        let source = ObjectWriteIntentService.Source(kind: "legacy_link", id: linkID)
+        let originalData = Data(buffer: upload.image.data)
+        try await ObjectWriteIntentService.write(.init(storageKind: "legacy_photo", key: storageKey, data: originalData, contentType: "image/jpeg"), source: source, on: req.db, authorize: authorizeWrite) {
+            try await StorageService.upload(data: upload.image.data, key: storageKey, contentType: "image/jpeg", app: req.application)
+        }
 
         // Generate thumbnail
         var imageBuffer = upload.image.data
@@ -1101,7 +1115,12 @@ struct MagicLinkController: RouteCollection {
             originalData: imageRawData,
             thumbnailKey: thumbStorageKey,
             app: req.application,
-            logger: req.logger
+            logger: req.logger,
+            upload: { data in
+                try await ObjectWriteIntentService.write(.init(storageKind: "legacy_photo", key: thumbStorageKey, data: data, contentType: "image/jpeg"), source: source, on: req.db, authorize: authorizeWrite) {
+                    try await StorageService.upload(data: ByteBuffer(data: data), key: thumbStorageKey, contentType: "image/jpeg", app: req.application)
+                }
+            }
         )
         let thumbnailFilePath = thumbGenerated ? "/uploads/synced-photos/\(thumbFilename)" : nil
 
@@ -1183,12 +1202,20 @@ struct MagicLinkController: RouteCollection {
         default: contentType = "image/jpeg"
         }
 
-        try await StorageService.upload(
-            data: upload.file.data,
-            key: storageKey,
-            contentType: contentType,
-            app: req.application
-        )
+        let linkID = try magicLink.requireID()
+        let authorizeWrite: @Sendable (Database) async throws -> ObjectWriteIntentService.Scope = { db in
+            let current = try await JWTAuthMiddleware.authenticate(req, on: db)
+            guard current.userId == userId,
+                  let link = try await MagicLink.query(on: db).filter(\.$id == linkID).filter(\.$createdById == userId)
+                    .filter(LegacyProjectAccess.personalRecords(.magicLinks)).first() else { throw Abort(.notFound) }
+            let project = try await Project.find(link.projectId, on: db)
+            if let workspaceID = project?.workspaceId { try await WorkspaceAccessService.lock(workspaceID, on: db) }
+            return .init(userID: userId, workspaceID: project?.workspaceId, projectID: link.projectId, magicLinkID: linkID)
+        }
+        try await ObjectWriteIntentService.write(.init(storageKind: "legacy_drawing", key: storageKey, data: Data(buffer: upload.file.data), contentType: contentType),
+            source: .init(kind: "legacy_link", id: linkID), on: req.db, authorize: authorizeWrite) {
+            try await StorageService.upload(data: upload.file.data, key: storageKey, contentType: contentType, app: req.application)
+        }
 
         // Upsert drawing record
         if let existing = try await SyncedDrawing.query(on: req.db)

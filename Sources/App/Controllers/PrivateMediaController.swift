@@ -93,8 +93,25 @@ struct PrivateMediaController: RouteCollection {
         }.get()
         let renditionSHA = PrivateImageProcessor.digest(processed.jpeg)
         let renditionKey = String(prepared.originalKey.dropLast("original".count)) + "view-\(renditionSHA).jpg"
-        try await StorageService.uploadPrivate(data, key: prepared.originalKey, mime: prepared.response.mimeType, app: req.application)
-        try await StorageService.uploadPrivate(processed.jpeg, key: renditionKey, mime: "image/jpeg", app: req.application)
+        let authorizeWrite: @Sendable (Database) async throws -> ObjectWriteIntentService.Scope = { db in
+            let (project, actions) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            try PlatformMutationService.requireManaged(project)
+            let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: projectID, on: db)
+            try PrivateMediaService.requireUploader(row, actorID: actorID)
+            guard actions.contains(prepared.response.purpose == "completion" ? .submitCompletion : .edit),
+                  try row.decode(column: "original_key", as: String.self) == prepared.originalKey else { throw Abort(.forbidden) }
+            let snag = try await PlatformSnagService.find(snagID, projectID: projectID, on: db)
+            try PrivateMediaService.available(snag)
+            if prepared.response.purpose == "completion" { try PrivateMediaService.submittable(snag) }
+            return .init(userID: actorID, workspaceID: project.workspaceId, projectID: projectID)
+        }
+        let source = ObjectWriteIntentService.Source(kind: "media_asset", id: assetID)
+        try await ObjectWriteIntentService.write(.init(storageKind: "private_media", key: prepared.originalKey, data: data, contentType: prepared.response.mimeType), source: source, on: req.db, authorize: authorizeWrite) {
+            try await StorageService.uploadPrivate(data, key: prepared.originalKey, mime: prepared.response.mimeType, app: req.application)
+        }
+        try await ObjectWriteIntentService.write(.init(storageKind: "private_media", key: renditionKey, data: processed.jpeg, contentType: "image/jpeg"), source: source, on: req.db, authorize: authorizeWrite) {
+            try await StorageService.uploadPrivate(processed.jpeg, key: renditionKey, mime: "image/jpeg", app: req.application)
+        }
         // Processing/storage occur outside membership locks. Revalidate before
         // committing readiness; revocation cannot be bypassed by an in-flight PUT.
         return try await req.db.transaction { db in

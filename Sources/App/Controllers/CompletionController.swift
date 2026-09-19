@@ -89,13 +89,7 @@ struct CompletionController: RouteCollection {
 
             // Save photos if provided
             if let photoUrls = request.photoUrls {
-                for url in photoUrls {
-                    let photo = CompletionPhoto(
-                        completionId: completion.id!,
-                        url: url
-                    )
-                    try await photo.save(on: db)
-                }
+                try await CompletionUploadObjectService.attach(urls:photoUrls,completionID:try completion.requireID(),link:magicLink,on:db)
             }
 
             try await SnagWorkflowService.setStatus("submitted", snagId: snagId, ownerId: magicLink.createdById, projectId: magicLink.projectId, on: db)

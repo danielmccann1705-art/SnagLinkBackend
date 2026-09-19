@@ -42,28 +42,33 @@ enum AppleCredentialService {
         throw AppleCredentialError.misconfigured("The stored Apple credential could not be read")
     }
 
-    /// Replaces any existing credential. Sign-in is the only writer, and the newest
-    /// refresh token is the one revocation should use.
+    /// Replaces only this client's credential. Native and web audiences coexist.
     static func store(refreshToken: String, userID: UUID, clientID: String, app: Application, on db: Database) async throws {
         let sealed = try seal(refreshToken, userID: userID, app: app)
         let now = Date()
         try await VerifiedIdentityService.sql(db).raw("""
             INSERT INTO apple_credentials (user_id, refresh_token_ciphertext, client_id, created_at, updated_at)
             VALUES (\(bind: userID), \(bind: sealed), \(bind: clientID), \(bind: now), \(bind: now))
-            ON CONFLICT (user_id) DO UPDATE SET
+            ON CONFLICT (user_id, client_id) DO UPDATE SET
                 refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
-                client_id = EXCLUDED.client_id,
                 updated_at = EXCLUDED.updated_at
             """).run()
     }
 
+    /// The compatibility overload is valid only for a single client. Never choose
+    /// an arbitrary audience once a user has both native and web credentials.
     static func load(userID: UUID, app: Application, on db: Database) async throws -> (refreshToken: String, clientID: String)? {
+        let rows = try await VerifiedIdentityService.sql(db).raw("SELECT refresh_token_ciphertext,client_id FROM apple_credentials WHERE user_id=\(bind: userID) ORDER BY client_id LIMIT 2").all()
+        guard rows.count <= 1 else { throw AppleCredentialError.misconfigured("Choose an explicit Apple client") }
+        guard let row = rows.first else { return nil }
+        return try (open(row.decode(column: "refresh_token_ciphertext", as: String.self), userID: userID, app: app), row.decode(column: "client_id", as: String.self))
+    }
+
+    static func load(userID: UUID, clientID: String, app: Application, on db: Database) async throws -> (refreshToken: String, clientID: String)? {
         guard let row = try await VerifiedIdentityService.sql(db).raw("""
-            SELECT refresh_token_ciphertext, client_id FROM apple_credentials WHERE user_id = \(bind: userID)
+            SELECT refresh_token_ciphertext FROM apple_credentials WHERE user_id=\(bind: userID) AND client_id=\(bind: clientID)
             """).first() else { return nil }
-        let ciphertext = try row.decode(column: "refresh_token_ciphertext", as: String.self)
-        let clientID = try row.decode(column: "client_id", as: String.self)
-        return (try open(ciphertext, userID: userID, app: app), clientID)
+        return try (open(row.decode(column: "refresh_token_ciphertext", as: String.self), userID: userID, app: app), clientID)
     }
 
     /// Removed only once revocation has reached a terminal successful state. Clearing

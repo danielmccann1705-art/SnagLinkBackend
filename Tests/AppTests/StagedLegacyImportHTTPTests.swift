@@ -167,6 +167,30 @@ final class StagedLegacyImportHTTPTests: XCTestCase {
         let production = try await request(object, workspace: workspace, user: user); XCTAssertEqual(production.status, .serviceUnavailable)
         XCTAssertTrue(production.body.string.contains("staged_import_disabled"))
     }
+
+    func testProductionPreparationUsesItsSeparateGateWithoutWeakeningAuthenticationOrDestinationBinding() async throws {
+        let (user, workspace, original) = try await fixture()
+        app.storage[PlatformConfigurationKey.self] = .init(origin: "https://app.usesnaglist.com", environment: "production")
+        app.storage[ImportServerBindingKey.self] = try ImportServerBinding(environment: "production", apiOrigin: "https://api.snaglist.dev")
+        app.storage[StagedLegacyImportHTTPEnabledKey.self] = false
+        app.storage[ProductionLegacyImportHTTPEnabledKey.self] = true
+        var object = original, command = original["command"] as! [String: Any]
+        command["destination"] = ["environment": "production", "apiOrigin": "https://api.snaglist.dev"]
+        object["command"] = command
+        let anonymous = try await request(object, workspace: workspace)
+        XCTAssertEqual(anonymous.status, .unauthorized)
+        let created = try await request(object, workspace: workspace, user: user)
+        XCTAssertEqual(created.status, .ok, created.body.string)
+        XCTAssertEqual(try receipt(created).destination.environment, "production")
+        XCTAssertEqual(try receipt(created).destination.apiOrigin, "https://api.snaglist.dev")
+        let replay = try await request(object, workspace: workspace, user: user)
+        XCTAssertEqual(replay.body.string, created.body.string)
+        let staleDestination = try await request(original, workspace: workspace, user: user)
+        XCTAssertNotEqual(staleDestination.status, .ok)
+        app.storage[StagedLegacyImportHTTPEnabledKey.self] = true
+        let mixed = try await request(object, workspace: workspace, user: user)
+        XCTAssertEqual(mixed.status, .serviceUnavailable)
+    }
     func testBrowserCookieRequiresCSRFOriginAndUnrevokedSessionForEveryAction() async throws {
         let (user, workspace, object) = try await fixture()
         let session = try await BrowserSessionService.create(for: user, config: PlatformConfiguration.load(on: app), on: app.db)

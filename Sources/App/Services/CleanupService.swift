@@ -22,6 +22,8 @@ struct CleanupService {
         var auditLogs = 0
         var magicLinkAuthTokens = 0
         var expiredPreviewLinks = 0
+        var accountDeletionJobs = AccountDeletionWorker.Counts()
+        var appleWebCredentials = AppleWebCredentialEscrowService.Counts()
     }
 
     /// `schedule` is the external scheduler reaching us through the maintenance route.
@@ -50,8 +52,14 @@ struct CleanupService {
 
     @discardableResult
     static func runCleanup(app: Application, trigger: Trigger = .manual) async throws -> Removed? {
-        let db = app.db
-        let sql = db as! SQLDatabase
+        try await app.db.withConnection { db in
+            try await runCleanup(app: app, trigger: trigger, on: db)
+        }
+    }
+
+    /// The session advisory lock and unlock must use this same pinned connection.
+    private static func runCleanup(app: Application, trigger: Trigger, on db: Database) async throws -> Removed? {
+        let sql = try VerifiedIdentityService.sql(db)
 
         // Refuse to pile up behind a pass already in flight rather than queueing.
         let key = lockKey(app)
@@ -88,7 +96,9 @@ struct CleanupService {
     private static func perform(app: Application, on db: Database) async throws -> Removed {
         var removed = Removed()
 
-        try await SnagDeletionService.cleanupFiles(app: app)
+        removed.appleWebCredentials = try await AppleWebCredentialEscrowService.run(app: app, on: db)
+        removed.accountDeletionJobs = try await AccountDeletionWorker.run(app: app, on: db, transactionMode: .maintenanceConnection)
+        try await SnagDeletionService.cleanupFiles(app: app, on: db)
         try await RateLimitService.cleanup(on: db)
 
         // Audit logs older than 90 days.
@@ -151,7 +161,7 @@ private struct CleanupLifecycleHandler: LifecycleHandler {
                 do {
                     try await CleanupService.runCleanup(app: app, trigger: .fallback)
                 } catch {
-                    app.logger.error("Cleanup task failed: \(error)")
+                    app.logger.error("Cleanup task failed; consult the classified maintenance run record")
                 }
             }
         }

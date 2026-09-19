@@ -143,9 +143,9 @@ final class ContentReportEndpointTests: XCTestCase {
         let owner = try await account(), moderator = try await account()
         let target = try await completion(ownerID: owner.id), unrelated = try await completion(ownerID: owner.id)
         let targetID = try target.requireID(), unrelatedID = try unrelated.requireID(), reportID = UUID()
-        let targetPhoto = CompletionPhoto(completionId: targetID, url: "https://example.test/reported.jpg")
-        try await targetPhoto.save(on: app.db)
-        try await CompletionPhoto(completionId: unrelatedID, url: "https://example.test/unrelated.jpg").save(on: app.db)
+        let targetPhotoURL = "https://example.test/reported.jpg"
+        try await HistoricalCompletionPhotoFixture.insert(completionID:targetID,url:targetPhotoURL,on:app.db)
+        try await HistoricalCompletionPhotoFixture.insert(completionID:unrelatedID,url:"https://example.test/unrelated.jpg",on:app.db)
         try await report(reportID, completionID: targetID, jwt: owner.jwt, status: .ok)
         let path = "api/v1/moderation/reports/\(reportID)"
 
@@ -168,7 +168,7 @@ final class ContentReportEndpointTests: XCTestCase {
             XCTAssertEqual(evidence?.report.id, reportID)
             XCTAssertEqual(evidence?.contractorName, "Test contractor")
             XCTAssertEqual(evidence?.notes, "Test completion evidence")
-            XCTAssertEqual(evidence?.photos.map(\.url), [targetPhoto.url])
+            XCTAssertEqual(evidence?.photos.map(\.url), [targetPhotoURL])
         })
         try await app.test(.POST, "\(path)/resolve", beforeRequest: { req in
             req.headers.bearerAuthorization = .init(token: moderator.jwt)

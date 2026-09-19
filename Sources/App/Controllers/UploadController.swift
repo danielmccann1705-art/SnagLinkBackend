@@ -31,23 +31,20 @@ struct UploadController: RouteCollection {
     @Sendable
     func uploadPhoto(req: Request) async throws -> UploadPhotoResponse {
         // Authentication: require JWT or magic link token
-        var isJWTAuth = false
+        let principal: CompletionUploadObjectService.Principal
+        var linkToken: String?
         if req.headers.bearerAuthorization != nil {
-            _ = try await JWTAuthMiddleware.authenticate(req)
-            isJWTAuth = true
-        }
-        var isTokenAuth = false
-        if !isJWTAuth {
-            if let token = req.query[String.self, at: "token"] {
-                let link = try await TokenValidationService.validateMagicLink(token: token, on: req.db)
-                try PINSessionService.requireVerified(req, link: link)
-                guard !link.previewMode, link.accessLevel != AccessLevel.view.rawValue else {
-                    throw Abort(.forbidden, reason: "This link does not allow photo uploads")
-                }
-                isTokenAuth = true
+            let payload = try await JWTAuthMiddleware.authenticate(req)
+            principal = .user(payload.userId)
+        } else if let token = req.query[String.self, at: "token"] {
+            let link = try await TokenValidationService.validateMagicLink(token: token, on: req.db)
+            try PINSessionService.requireVerified(req, link: link)
+            guard !link.previewMode, link.accessLevel != AccessLevel.view.rawValue else {
+                throw Abort(.forbidden, reason: "This link does not allow photo uploads")
             }
-        }
-        guard isJWTAuth || isTokenAuth else {
+            principal = .link(id: try link.requireID(), projectID: link.projectId, creatorID: link.createdById)
+            linkToken = token
+        } else {
             throw Abort(.unauthorized, reason: "Authentication required. Provide JWT or magic link token.")
         }
 
@@ -90,43 +87,59 @@ struct UploadController: RouteCollection {
             }
         }
 
-        // Generate unique filename
-        let uuid = UUID().uuidString
-        let newFilename = "\(uuid).\(fileExtension)"
-        let storageKey = "uploads/photos/\(newFilename)"
-
-        // Upload via StorageService
         let contentType = file.contentType?.description ?? "image/jpeg"
-        try await StorageService.upload(
-            data: file.data,
-            key: storageKey,
-            contentType: contentType,
-            app: req.application
+        let allocation = try await CompletionUploadObjectService.allocate(
+            principal: principal, fileExtension: fileExtension, contentType: contentType,
+            fileSize: file.data.readableBytes, on: req.db
         )
+        let authenticatedLinkToken = linkToken
+        let authorizeWrite: @Sendable (Database) async throws -> ObjectWriteIntentService.Scope = { db in
+            // Preserve workspace→user/link lock ordering used by account closure.
+            if case .link(_, let projectID, _) = principal,
+               let workspaceID = try await Project.find(projectID, on: db)?.workspaceId {
+                try await WorkspaceAccessService.lock(workspaceID, on: db)
+            }
+            if let token = authenticatedLinkToken {
+                let current = try await TokenValidationService.validateMagicLink(token: token, on: db)
+                try PINSessionService.requireVerified(req, link: current)
+                guard CompletionUploadObjectService.Principal.link(id: try current.requireID(), projectID: current.projectId, creatorID: current.createdById) == principal else {
+                    throw Abort(.forbidden, reason: "This link does not allow photo uploads")
+                }
+            } else {
+                let current = try await JWTAuthMiddleware.authenticate(req, on: db)
+                guard principal == .user(current.userId) else { throw Abort(.unauthorized) }
+            }
+            try await CompletionUploadObjectService.lockForWrite(allocation, on: db)
+            switch principal {
+            case .user(let userID): return .init(userID: userID)
+            case .link(let linkID, let projectID, let creatorID):
+                let project = try await Project.find(projectID, on: db)
+                return .init(userID: creatorID, workspaceID: project?.workspaceId, projectID: projectID, magicLinkID: linkID)
+            }
+        }
+        let source = ObjectWriteIntentService.Source(kind: "completion_upload", id: allocation.id)
+        let rawData = Data(buffer: file.data)
+        try await ObjectWriteIntentService.write(.init(storageKind: "legacy_completion_photo", key: allocation.storageKey, data: rawData, contentType: contentType), source: source, on: req.db, authorize: authorizeWrite) {
+            try await StorageService.upload(data: file.data, key: allocation.storageKey, contentType: contentType, app: req.application)
+        }
+        let thumbnailGenerated = await ThumbnailService.generateAndUpload(originalData: rawData, thumbnailKey: allocation.thumbnailKey,
+            app: req.application, logger: req.logger, upload: { data in
+                try await ObjectWriteIntentService.write(.init(storageKind: "legacy_completion_photo", key: allocation.thumbnailKey, data: data, contentType: "image/jpeg"), source: source, on: req.db, authorize: authorizeWrite) {
+                    try await StorageService.upload(data: ByteBuffer(data: data), key: allocation.thumbnailKey, contentType: "image/jpeg", app: req.application)
+                }
+            })
+        try await req.db.transaction { db in
+            _ = try await authorizeWrite(db)
+            try await CompletionUploadObjectService.markReady(allocation, thumbnailReady: thumbnailGenerated, on: db)
+        }
+        let thumbnailUrl = thumbnailGenerated ? allocation.plannedThumbnailURL : allocation.issuedURL
 
-        // Generate URLs using storage-aware base URL
-        let baseUrl = StorageService.publicBaseURL
-        let url = "\(baseUrl)/\(storageKey)"
-
-        // Generate real thumbnail (300px wide)
-        let thumbnailKey = "uploads/photos/thumb_\(newFilename)"
-        var imageBytes = file.data
-        let rawData = imageBytes.readData(length: imageBytes.readableBytes) ?? Data()
-
-        let thumbnailGenerated = await ThumbnailService.generateAndUpload(
-            originalData: rawData,
-            thumbnailKey: thumbnailKey,
-            app: req.application,
-            logger: req.logger
-        )
-        let thumbnailUrl = thumbnailGenerated ? "\(baseUrl)/\(thumbnailKey)" : url
-
-        req.logger.info("Photo uploaded: \(newFilename), thumbnail: \(thumbnailGenerated ? "yes" : "fallback to original")")
+        req.logger.info("Photo uploaded: \(allocation.filename), thumbnail: \(thumbnailGenerated ? "yes" : "fallback to original")")
 
         return UploadPhotoResponse(
-            url: url,
+            url: allocation.issuedURL,
             thumbnailUrl: thumbnailUrl,
-            filename: newFilename,
+            filename: allocation.filename,
             size: file.data.readableBytes
         )
     }

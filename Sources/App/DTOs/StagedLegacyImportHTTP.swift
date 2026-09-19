@@ -147,16 +147,26 @@ struct StagedLegacyImportHTTP {
     }
 }
 
-/// Explicit opt-in cannot override production prohibition. No provider setting is
-/// installed by adding this type/controller to the application.
+/// Production has its own explicit opt-in and exact service identity. The staging
+/// switch can never enable production, including when both are supplied by mistake.
 struct StagedLegacyImportHTTPEnabledKey: StorageKey { typealias Value = Bool }
+struct ProductionLegacyImportHTTPEnabledKey: StorageKey { typealias Value = Bool }
 struct StagedLegacyImportHTTPGate {
     static func require(on app: Application) throws -> ImportServerBinding {
-        let enabled = app.storage[StagedLegacyImportHTTPEnabledKey.self] ?? (Environment.get("STAGED_LEGACY_IMPORT_ENABLED") == "true")
-        guard enabled else { throw disabled() }
+        let staged = app.storage[StagedLegacyImportHTTPEnabledKey.self] ?? (Environment.get("STAGED_LEGACY_IMPORT_ENABLED") == "true")
+        let production = app.storage[ProductionLegacyImportHTTPEnabledKey.self] ?? (Environment.get("PRODUCTION_LEGACY_IMPORT_ENABLED") == "true")
+        let environment = try PlatformConfiguration.load(on: app).environment
+        guard environment == "production" ? (production && !staged) : staged else { throw disabled() }
         let binding = try ImportServerBinding.load(on: app)
-        guard ["development", "staging"].contains(binding.environment) else { throw disabled() }
+        guard allows(binding: binding, staged: staged, production: production) else { throw disabled() }
         return binding
+    }
+    static func allows(binding: ImportServerBinding, staged: Bool, production: Bool) -> Bool {
+        switch binding.environment {
+        case "production": return production && !staged && binding.apiOrigin == "https://api.snaglist.dev"
+        case "development", "staging": return staged && !production
+        default: return false
+        }
     }
     static func disabled() -> Vapor.Abort { .init(.serviceUnavailable, reason: "Private source preparation is not enabled in this environment", identifier: "staged_import_disabled") }
 }

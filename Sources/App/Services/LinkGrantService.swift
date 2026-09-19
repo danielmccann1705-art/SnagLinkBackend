@@ -122,8 +122,11 @@ enum LinkGrantService {
         }
     }
     static func replay<T: Decodable>(_ type: T.Type, grantID: UUID, mutation: MutationMetadata, hash: String, on db: Database) async throws -> T? {
-        guard let row = try await VerifiedIdentityService.sql(db).raw("SELECT request_hash, result_json FROM link_mutation_receipts WHERE grant_id = \(bind: grantID) AND operation_id = \(bind: mutation.operationId)").first() else { return nil }
+        guard let row = try await VerifiedIdentityService.sql(db).raw("SELECT request_hash, result_json, account_deletion_redacted_at FROM link_mutation_receipts WHERE grant_id = \(bind: grantID) AND operation_id = \(bind: mutation.operationId)").first() else { return nil }
         guard try row.decode(column: "request_hash", as: String.self) == hash else { throw Abort(.conflict, reason: "Keep the original request when retrying this action", identifier: "operation_reused") }
+        guard try row.decode(column: "account_deletion_redacted_at", as: Date?.self) == nil else {
+            throw Abort(.conflict, reason: "This action was already applied. Refresh the current state before continuing", identifier: "already_applied_refresh_required")
+        }
         return try PlatformMutationService.decode(type, row.decode(column: "result_json", as: String.self))
     }
     static func record<T: Encodable>(_ result: T, grantID: UUID, mutation: MutationMetadata, hash: String, on db: Database) async throws {

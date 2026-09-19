@@ -77,7 +77,7 @@ final class PrivateMediaTests: XCTestCase {
         XCTAssertEqual(try retry.content.decode(MediaAssetResponse.self).revision, ready.revision)
         let image = try await call(.GET, path + "/\(allocated.id)/content", owner)
         XCTAssertEqual(image.status, .ok); XCTAssertEqual(image.headers.contentType?.description, "image/jpeg")
-        XCTAssertTrue(image.headers[.cacheControl].contains("no-store")); XCTAssertFalse(image.body.string.contains("PRIVATE_LOCATION_TEST_MARKER"))
+        XCTAssertTrue(image.headers[.cacheControl].flatMap { $0.split(separator: ",") }.contains { $0.trimmingCharacters(in: .whitespaces).lowercased() == "no-store" }); XCTAssertFalse(image.body.string.contains("PRIVATE_LOCATION_TEST_MARKER"))
         let raw = try await PrivateMediaService.row(ready.id, snagID: snag.snag.id, projectID: project.project.id, on: app.db)
         let originalKey = try raw.decode(column: "original_key", as: String.self)
         let storedOriginal = try await StorageService.downloadPrivate(key: originalKey, app: app)
@@ -229,7 +229,7 @@ final class PrivateMediaTests: XCTestCase {
             XCTAssertEqual(PrivateImageProcessor.digest(bytes), descriptor.sha256)
             XCTAssertEqual(bytes.count, descriptor.byteCount)
             XCTAssertEqual(response.headers.contentType?.description, descriptor.mimeType)
-            XCTAssertTrue(response.headers[.cacheControl].contains("no-store"))
+            XCTAssertTrue(response.headers[.cacheControl].flatMap { $0.split(separator: ",") }.contains { $0.trimmingCharacters(in: .whitespaces).lowercased() == "no-store" })
             XCTAssertEqual(response.headers.first(name: "Referrer-Policy"), "no-referrer")
             XCTAssertEqual(response.headers.first(name: "X-Content-Type-Options"), "nosniff")
             if descriptor.mimeType == "image/png" { XCTAssertEqual(bytes, Self.png) }

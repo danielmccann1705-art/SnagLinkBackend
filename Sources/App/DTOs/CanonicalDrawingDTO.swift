@@ -1,9 +1,10 @@
 import Vapor
 import FluentSQL
 
-/// Internal foundation only. No HTTP route or sync coverage exposes these yet.
+/// Server-owned drawing source and mutation contracts. Storage keys, processor
+/// leases and trusted output manifests never enter these client DTOs.
 enum DrawingSourcePurpose: String, Codable, Sendable { case drawingSource = "drawing_source" }
-struct DrawingAllocateCommand: Codable, Sendable {
+struct DrawingAllocateCommand: Content, Sendable {
     let mutation: MutationMetadata
     let id: UUID
     let purpose: DrawingSourcePurpose
@@ -20,7 +21,7 @@ struct DrawingSheetCommand: Codable, Equatable, Sendable {
     let sortOrder: Int
     let sourcePageIndex: Int
 }
-struct DrawingPublishCommand: Codable, Sendable {
+struct DrawingPublishCommand: Content, Sendable {
     let mutation: MutationMetadata
     let assetId: UUID
     let expectedAssetRevision: Int64
@@ -34,13 +35,13 @@ struct DrawingPinTarget: Codable, Equatable, Sendable {
     let x: Double
     let y: Double
 }
-struct DrawingPinCommand: Codable, Sendable {
+struct DrawingPinCommand: Content, Sendable {
     let mutation: MutationMetadata
     let expectedSnagRevision: Int64
     let expectedPinRevision: Int64
     let pin: DrawingPinTarget?
 }
-struct DrawingAssetRecord: Codable, Sendable {
+struct DrawingAssetRecord: Content, Sendable {
     let id: UUID
     let projectId: UUID
     let uploaderId: UUID
@@ -66,12 +67,12 @@ struct DrawingAssetRecord: Codable, Sendable {
         publishedAt = try row.decode(column: "published_at", as: Date?.self)
     }
 }
-struct DrawingPublicationRecord: Codable, Sendable {
+struct DrawingPublicationRecord: Content, Sendable {
     let projectId: UUID
     let assetId: UUID
     let sheets: [DrawingSheetCommand]
 }
-struct DrawingPinRecord: Codable, Sendable {
+struct DrawingPinRecord: Content, Sendable {
     let snagId: UUID
     let projectId: UUID
     let revision: Int64
@@ -79,6 +80,10 @@ struct DrawingPinRecord: Codable, Sendable {
     let pin: DrawingPinTarget?
     let eventId: UUID
     let recordedBy: UUID
+}
+
+struct DrawingProcessCommand: Content, Sendable {
+    let expectedAssetRevision: Int64
 }
 
 /// Trusted processor/storage output, not client-decoded input. This checkpoint

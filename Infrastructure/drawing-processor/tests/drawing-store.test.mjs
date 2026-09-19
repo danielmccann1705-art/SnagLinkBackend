@@ -56,10 +56,16 @@ class Bucket {
     return {size:data.length};
   }
 }
-function fixture() {
+function fixture({tracked=true,makeFixedLengthStream=fixedLengthStream}={}) {
   const bucket=new Bucket();
-  const store=createDrawingStore({bucket,processorProfile:PROFILE,digestStream,fixedLengthStream,subtle:webcrypto.subtle});
-  return {bucket,store,original:store.original(ALLOCATION)};
+  const intents=[];
+  const writeIntents=tracked?{
+    async begin(plan){const ticket={plan,state:'active'};intents.push(ticket);return ticket;},
+    async settle(ticket){assert.equal(ticket.state,'active');ticket.state='settled';},
+    async uncertain(ticket){ticket.state='uncertain';}
+  }:undefined;
+  const store=createDrawingStore({bucket,processorProfile:PROFILE,writeIntents,digestStream,fixedLengthStream:makeFixedLengthStream,subtle:webcrypto.subtle});
+  return {bucket,store,intents,original:store.original(ALLOCATION)};
 }
 const permit=async()=>{};
 const rejectsCode=(promise,code)=>assert.rejects(promise,e=>e instanceof DrawingStoreError&&e.code===code);
@@ -213,4 +219,53 @@ test('page bytes use immutable purpose-specific keys and are read back before ac
     assert.equal(result.verification,'object-bytes-only');assert.equal(result.reused,false);
   }
   assert.equal(bucket.objects.size,2);assert.equal([...bucket.objects.keys()].some(k=>k.startsWith('platform/')),false);
+});
+
+test('missing durable writer adapter rejects before any PUT',async()=>{
+  const {store,bucket}=fixture({tracked:false});
+  const original=store.original(ALLOCATION);
+  await rejectsCode(store.putVerified(original,stream(SOURCE),{assertCurrent:permit}),'drawing_write_intent_required');
+  assert.equal(bucket.writes,0);assert.equal(bucket.objects.size,0);
+});
+
+test('intent records exact pending bytes before PUT and survives remote ambiguity',async()=>{
+  const {store,bucket,intents,original}=fixture();
+  bucket.onPut=async key=>{
+    assert.equal(intents.length,1);assert.equal(intents[0].state,'active');
+    assert.equal(intents[0].plan.key,key);assert.equal(intents[0].plan.sha256,hash(SOURCE));
+    assert.equal(intents[0].plan.byteCount,SOURCE.length);
+    // Remote committed, but its response was lost. No timer can settle this.
+    bucket.seed(key,SOURCE);throw Error('synthetic response loss');
+  };
+  await rejectsCode(store.putVerified(original,stream(SOURCE),{assertCurrent:permit}),'drawing_storage_write_failed');
+  assert.equal(intents[0].state,'uncertain');assert.equal(bucket.objects.has(original.key),true);
+});
+
+test('deletion must wait for active intent even when post-write authority is revoked',async()=>{
+  const {store,bucket,intents,original}=fixture();let revoked=false,cleanupRan=false;
+  bucket.onPut=async key=>{
+    revoked=true;
+    if(intents.every(intent=>intent.state==='settled')){bucket.objects.delete(key);cleanupRan=true;}
+    assert.equal(cleanupRan,false);
+  };
+  await rejectsCode(store.putVerified(original,stream(SOURCE),{assertCurrent:async()=>{if(revoked)throw Error('ended');}}),'drawing_authority_changed');
+  assert.equal(intents[0].state,'settled');assert.equal(bucket.objects.has(original.key),true);
+  // Storage work has definitively ended, so the later erasure pass is safe.
+  bucket.objects.delete(original.key);assert.equal(bucket.objects.size,0);
+});
+
+
+test('local stream construction failure never admits intent or issues PUT',async()=>{
+  const {store,bucket,intents,original}=fixture({makeFixedLengthStream:()=>{throw Error('synthetic setup failure');}});
+  let cancelled=false;
+  await rejectsCode(store.putVerified(original,stream(SOURCE,{onCancel:()=>{cancelled=true;}}),{assertCurrent:permit}),'drawing_source_stream_invalid');
+  assert.equal(cancelled,true);assert.equal(intents.length,0);assert.equal(bucket.writes,0);
+});
+
+test('already locked input never admits intent or issues PUT',async()=>{
+  const {store,bucket,intents,original}=fixture(),body=stream(SOURCE),reader=body.getReader();
+  try {
+    await rejectsCode(store.putVerified(original,body,{assertCurrent:permit}),'drawing_source_stream_invalid');
+    assert.equal(intents.length,0);assert.equal(bucket.writes,0);
+  } finally { await reader.cancel();reader.releaseLock(); }
 });

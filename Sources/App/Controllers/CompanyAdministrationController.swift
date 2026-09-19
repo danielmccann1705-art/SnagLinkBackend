@@ -165,9 +165,12 @@ struct CompanyAdministrationController: RouteCollection {
             // Explicit administration allowlist. Arbitrary detail, snag content,
             // Contractor link actors, credentials and tokens never enter this DTO.
             let rows = try await VerifiedIdentityService.sql(db).raw("""
-                SELECT a.id, a.action, actor.name AS actor_name, p.name AS project_name,
+                SELECT a.id, a.action,
+                    COALESCE(actor.name,CASE WHEN actor.lifecycle_state='deleted' THEN 'Former member' END) AS actor_name,
+                    p.name AS project_name,
                     CASE WHEN a.action LIKE 'invitation_%' THEN i.email
-                         WHEN a.action = 'company_created' THEN t.name ELSE target.name END AS target_name,
+                         WHEN a.action = 'company_created' THEN t.name
+                         ELSE COALESCE(target.name,CASE WHEN target.lifecycle_state='deleted' THEN 'Former member' END) END AS target_name,
                     CASE WHEN a.action = 'member_role_changed' AND a.detail IN ('admin', 'member') THEN a.detail
                          WHEN a.action IN ('project_access_granted', 'project_access_removed') AND split_part(a.detail, ':', 4) IN ('manager', 'member', 'none') THEN split_part(a.detail, ':', 4)
                          ELSE NULL END AS role,

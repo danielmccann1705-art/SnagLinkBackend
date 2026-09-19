@@ -26,14 +26,24 @@ final class MaintenanceCleanupTests: XCTestCase {
 
     override func tearDown() async throws { if let app { try await app.asyncShutdown() } }
 
+    private func owner() async throws -> UUID {
+        let user = try await app.db.transaction { db in
+            try await VerifiedIdentityService.resolveEmail("maintenance-\(UUID())@example.test", name: "Synthetic owner", on: db)
+        }
+        return try user.requireID()
+    }
+
     // MARK: - The pass does the work and leaves a trace
 
     func testAPassRemovesExpiredDataAndRecordsThatItRan() async throws {
+        let ownerID = try await owner()
         let deadToken = "expired-\(UUID().uuidString)"
-        try await MagicLink(token: deadToken, accessLevel: .update, expiresAt: Date().addingTimeInterval(-3600),
-                            snagIds: [UUID()], projectId: UUID(), createdById: UUID(),
+        try await MagicLink(token: deadToken, accessLevel: .update, expiresAt: Date().addingTimeInterval(3600),
+                            snagIds: [UUID()], projectId: UUID(), createdById: ownerID,
                             previewMode: true, previewExpiresAt: Date().addingTimeInterval(-3600)).save(on: app.db)
         try await SyncedReport(magicLinkToken: deadToken, reportJSON: "{}").save(on: app.db)
+
+        try await VerifiedIdentityService.sql(app.db).raw("UPDATE magic_links SET expires_at=NOW()-INTERVAL '1 hour' WHERE token=\(bind: deadToken)").run()
 
         let removed = try await CleanupService.runCleanup(app: app, trigger: .test)
 
@@ -62,13 +72,21 @@ final class MaintenanceCleanupTests: XCTestCase {
     /// A pass already in flight is skipped, not queued behind the first. Cron fires on a
     /// schedule that knows nothing about how long a pass takes.
     func testASecondPassIsSkippedWhileOneIsRunning() async throws {
-        let sql = app.db as! SQLDatabase
-        // Hold the same advisory lock the service uses, on a session of our own.
-        try await sql.raw("SELECT pg_advisory_lock(\(bind: lock))").run()
-
-        let removed = try await CleanupService.runCleanup(app: app, trigger: .test)
-        try await sql.raw("SELECT pg_advisory_unlock(\(bind: lock))").run()
+        let lockDatabase = try IsolatedMigrationDatabase.pool(app: app, schema: "public")
+        let removed = try await lockDatabase.withConnection { connection in
+            let lockSQL = try VerifiedIdentityService.sql(connection)
+            try await lockSQL.raw("SELECT pg_advisory_lock(\(bind: self.lock))").run()
+            do {
+                let result = try await CleanupService.runCleanup(app: self.app, trigger: .test)
+                try await lockSQL.raw("SELECT pg_advisory_unlock(\(bind: self.lock))").run()
+                return result
+            } catch {
+                try? await lockSQL.raw("SELECT pg_advisory_unlock(\(bind: self.lock))").run()
+                throw error
+            }
+        }
         XCTAssertNil(removed, "a concurrent pass must be skipped rather than run twice")
+        let sql = try VerifiedIdentityService.sql(app.db)
 
         let row = try await sql.raw("SELECT state, error_kind FROM cleanup_runs ORDER BY started_at DESC LIMIT 1").first()
         XCTAssertEqual(try row?.decode(column: "state", as: String.self), "skipped")
@@ -111,9 +129,10 @@ final class MaintenanceCleanupTests: XCTestCase {
     }
 
     func testTheSchedulerCanRunAPassAndReadTheResult() async throws {
+        let ownerID = try await owner()
         let deadToken = "expired-\(UUID().uuidString)"
         try await MagicLink(token: deadToken, accessLevel: .update, expiresAt: Date().addingTimeInterval(-3600),
-                            snagIds: [UUID()], projectId: UUID(), createdById: UUID(),
+                            snagIds: [UUID()], projectId: UUID(), createdById: ownerID,
                             previewMode: true, previewExpiresAt: Date().addingTimeInterval(-3600)).save(on: app.db)
 
         try await app.test(.POST, "internal/maintenance/cleanup", beforeRequest: { req in

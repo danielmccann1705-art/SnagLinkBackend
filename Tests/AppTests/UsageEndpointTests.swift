@@ -159,7 +159,10 @@ final class UsageEndpointTests: XCTestCase {
         user.onboardingLinkConsumed = true
         try await user.save(on: app.db)
         // Seed 5 counted sends this month.
-        for _ in 0..<5 { try await MagicLinkSend(userId: user.id!, magicLinkId: UUID()).save(on: app.db) }
+        for _ in 0..<5 {
+            let countedLink = try await makeLink(ownedBy: user.id!)
+            try await MagicLinkSend(userId: user.id!, magicLinkId: countedLink.requireID()).save(on: app.db)
+        }
 
         let link = try await makeLink(ownedBy: user.id!)
         let r = try await send(link.id!, token: token)
@@ -173,7 +176,10 @@ final class UsageEndpointTests: XCTestCase {
         user.subscriptionTier = SubscriptionTier.pro.rawValue
         user.subscriptionVerifiedUntil = Date().addingTimeInterval(240)
         try await user.save(on: app.db)
-        for _ in 0..<5 { try await MagicLinkSend(userId: user.id!, magicLinkId: UUID()).save(on: app.db) }
+        for _ in 0..<5 {
+            let countedLink = try await makeLink(ownedBy: user.id!)
+            try await MagicLinkSend(userId: user.id!, magicLinkId: countedLink.requireID()).save(on: app.db)
+        }
 
         let link = try await makeLink(ownedBy: user.id!)
         let r = try await send(link.id!, token: token)
@@ -215,7 +221,10 @@ final class UsageEndpointTests: XCTestCase {
         user.subscriptionTier = "pro"
         user.onboardingLinkConsumed = true
         try await user.save(on: app.db)
-        for _ in 0..<5 { try await MagicLinkSend(userId: user.id!, magicLinkId: UUID()).save(on: app.db) }
+        for _ in 0..<5 {
+            let countedLink = try await makeLink(ownedBy: user.id!)
+            try await MagicLinkSend(userId: user.id!, magicLinkId: countedLink.requireID()).save(on: app.db)
+        }
         let directUsage = try await UsageService.buildUsage(user: user, on: app.db)
         XCTAssertEqual(directUsage.tier, "free")
         XCTAssertEqual(directUsage.linksRemainingThisMonth, 0)
@@ -269,7 +278,10 @@ final class UsageEndpointTests: XCTestCase {
         user.subscriptionVerifiedUntil = Date().addingTimeInterval(-60)
         user.onboardingLinkConsumed = true
         try await user.save(on: app.db)
-        for _ in 0..<5 { try await MagicLinkSend(userId: user.id!, magicLinkId: UUID()).save(on: app.db) }
+        for _ in 0..<5 {
+            let countedLink = try await makeLink(ownedBy: user.id!)
+            try await MagicLinkSend(userId: user.id!, magicLinkId: countedLink.requireID()).save(on: app.db)
+        }
         let stub = provider(userID: user.id!, json: "{\"subscriber\":{\"entitlements\":{}}}")
         try await app.test(.GET, "api/v1/users/me/usage", beforeRequest: { req in
             req.headers.bearerAuthorization = .init(token: token)

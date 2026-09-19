@@ -18,7 +18,7 @@ final class StagedImportOriginalServiceTests: XCTestCase {
     }
     override func setUp() async throws {
         guard let value = Environment.get("DATABASE_URL"), let url = URLComponents(string: value),
-              url.host == "127.0.0.1", url.port == 55439, url.path == "/snaglist_release_staged_files_0913" else {
+              url.host == "127.0.0.1", url.port == 55439, ["/snaglist_release_staged_files_0913", "/snaglist_astra_account_deletion_0919"].contains(url.path) else {
             throw XCTSkip("Explicit owned local synthetic original-file test database required")
         }
         app = try await Application.make(.testing); try await configure(app)
@@ -237,4 +237,26 @@ final class StagedImportOriginalServiceTests: XCTestCase {
         // This observed pre-commit rollback does not promise rollback for a
         // cancellation that arrives after the last fence/COMMIT is underway.
     }
+    func testMalformedEmptyOriginalIsRejectedBeforeIntentAndBeforeStorage() async throws {
+        let fixture = try await fixture(data: Data())
+        await rejected(.unprocessableEntity) { _ = try await self.retain(fixture, data: Data("unexpected bytes".utf8)) }
+        let transport = await http.snapshot()
+        XCTAssertEqual(transport.puts, 0); XCTAssertEqual(transport.gets, 0)
+        let intents = try await VerifiedIdentityService.sql(app.db).raw("SELECT count(*) AS n FROM object_write_intents WHERE source_session_id=\(bind: fixture.stage.sessionId)").first()
+        XCTAssertEqual(try intents?.decode(column: "n", as: Int.self), 0)
+    }
+    func testExpiredTransferBudgetDoesNotLeaveUnissuedActiveIntent() async throws {
+        let fixture = try await fixture()
+        let budget = try StagedImportIOBudget(duration: .nanoseconds(1))
+        do {
+            _ = try await StagedImportOriginalService.retain(fixture.command, actor: fixture.actor, binding: binding,
+                body: stagedTestBody(fixture.data), store: store, on: app.db, budget: budget)
+            XCTFail("Expired budget must reject before storage")
+        } catch { }
+        let transport = await http.snapshot()
+        XCTAssertEqual(transport.puts, 0); XCTAssertEqual(transport.gets, 0)
+        let intents = try await VerifiedIdentityService.sql(app.db).raw("SELECT count(*) AS n FROM object_write_intents WHERE source_session_id=\(bind: fixture.stage.sessionId)").first()
+        XCTAssertEqual(try intents?.decode(column: "n", as: Int.self), 0)
+    }
+
 }

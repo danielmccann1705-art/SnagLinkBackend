@@ -36,7 +36,12 @@ struct PrivateRequestLoggingMiddleware: AsyncMiddleware {
         response.headers.replaceOrAdd(name: "Referrer-Policy", value: "no-referrer")
         response.headers.replaceOrAdd(name: "X-Content-Type-Options", value: "nosniff")
         if ["/api/", "/m/", "/auth/", "/internal/"].contains(where: request.url.path.hasPrefix) {
-            response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+            // Retain a route's explicit private response contract while enforcing
+            // no-store on every sensitive response, including error responses.
+            let directives = response.headers[.cacheControl].flatMap { $0.split(separator: ",") }
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            response.headers.replaceOrAdd(name: .cacheControl,
+                                          value: directives.contains("private") ? "private, no-store" : "no-store")
         }
         return response
     }

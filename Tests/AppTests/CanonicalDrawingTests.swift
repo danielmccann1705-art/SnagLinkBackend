@@ -152,6 +152,39 @@ final class CanonicalDrawingTests: XCTestCase {
         let refreshed = try await CanonicalDrawingService.readAsset(source.id,projectID:project.requireID(),actorID:owner.requireID(),on:app.db)
         await fails(.conflict) { _ = try await CanonicalDrawingService.publish(self.publication(refreshed,sheets:[self.sheet(id:first.id)]),projectID:project.requireID(),actorID:owner.requireID(),on:self.app.db) }
     }
+    func testPublicationAndPinEmitCompleteAtomicCanonicalDeltaGroups() async throws {
+        let owner = try await user(), project = try await project(owner)
+        let source = try await ready(owner,project:project).0
+        let first = sheet(index:0), second = sheet(index:1)
+        _ = try await CanonicalDrawingService.publish(publication(source,sheets:[first,second]),
+            projectID:project.requireID(),actorID:owner.requireID(),on:app.db)
+        let published = try await VerifiedIdentityService.sql(app.db).raw("""
+            SELECT * FROM platform_changes WHERE project_id = \(bind: project.requireID())
+            ORDER BY sequence
+            """).all()
+        XCTAssertEqual(published.count,2)
+        XCTAssertEqual(try published.map { try $0.decode(column:"entity_type",as:String.self) },["drawing","drawing"])
+        XCTAssertEqual(Set(try published.map { try $0.decode(column:"transaction_group",as:UUID.self) }).count,1)
+        let decoded = try PlatformMutationService.decode(DrawingSheetResponse.self,
+            published[0].decode(column:"payload_json",as:String.self))
+        XCTAssertEqual(decoded.id,first.id); XCTAssertEqual(decoded.pages.first?.id,first.versionPageId)
+
+        let snag = try await snag(owner,project:project)
+        _ = try await CanonicalDrawingService.setPin(.init(mutation:mutation(),expectedSnagRevision:1,
+            expectedPinRevision:0,pin:target(first)),snagID:snag.requireID(),projectID:project.requireID(),
+            actorID:owner.requireID(),on:app.db)
+        let pinGroup = try await VerifiedIdentityService.sql(app.db).raw("""
+            SELECT * FROM platform_changes WHERE project_id = \(bind: project.requireID())
+              AND sequence > \(bind: try published.last!.decode(column:"sequence",as:Int64.self))
+            ORDER BY sequence
+            """).all()
+        XCTAssertEqual(pinGroup.count,2)
+        XCTAssertEqual(try pinGroup.map { try $0.decode(column:"entity_type",as:String.self) },["snag","drawingPin"])
+        XCTAssertEqual(Set(try pinGroup.map { try $0.decode(column:"transaction_group",as:UUID.self) }).count,1)
+        let pin = try PlatformMutationService.decode(DrawingPinResponse.self,
+            pinGroup[1].decode(column:"payload_json",as:String.self))
+        XCTAssertEqual(pin.snagId,snag.id); XCTAssertEqual(pin.drawingId,first.id); XCTAssertEqual(pin.snagRevision,2)
+    }
     func testPendingSourcesAreUploaderOnlyAndReceiptsRecheckCurrentAccess() async throws {
         let owner = try await user(), member = try await user(), stranger = try await user(), project = try await project(owner,company:true)
         try await join(member,owner:owner,project:project)

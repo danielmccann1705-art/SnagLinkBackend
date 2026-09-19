@@ -120,8 +120,22 @@ struct ContractorGrantController: RouteCollection {
         if upload.media.state == "ready" { return .init(upload.media) }
         let processed = try await req.application.threadPool.runIfActive(eventLoop: req.eventLoop) { try PrivateImageProcessor.process(data, mime: upload.media.mimeType) }.get()
         let sha = PrivateImageProcessor.digest(processed.jpeg), key = String(upload.originalKey.dropLast("original".count)) + "view-\(sha).jpg"
-        try await StorageService.uploadPrivate(data, key: upload.originalKey, mime: upload.media.mimeType, app: req.application)
-        try await StorageService.uploadPrivate(processed.jpeg, key: key, mime: "image/jpeg", app: req.application)
+        let authorizeWrite: @Sendable (Database) async throws -> ObjectWriteIntentService.Scope = { db in
+            let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
+            let snag = try await LinkGrantService.item(snagID, grant: grant, project: project, write: true, on: db)
+            let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: project.requireID(), on: db)
+            try PrivateMediaService.requireUploader(row, actorID: nil, grantID: grant.decode(column: "id", as: UUID.self))
+            try PrivateMediaService.submittable(snag)
+            guard try row.decode(column: "original_key", as: String.self) == upload.originalKey else { throw Abort(.forbidden) }
+            return try .init(workspaceID: project.workspaceId, projectID: project.requireID())
+        }
+        let source = ObjectWriteIntentService.Source(kind: "media_asset", id: assetID)
+        try await ObjectWriteIntentService.write(.init(storageKind: "private_media", key: upload.originalKey, data: data, contentType: upload.media.mimeType), source: source, on: req.db, authorize: authorizeWrite) {
+            try await StorageService.uploadPrivate(data, key: upload.originalKey, mime: upload.media.mimeType, app: req.application)
+        }
+        try await ObjectWriteIntentService.write(.init(storageKind: "private_media", key: key, data: processed.jpeg, contentType: "image/jpeg"), source: source, on: req.db, authorize: authorizeWrite) {
+            try await StorageService.uploadPrivate(processed.jpeg, key: key, mime: "image/jpeg", app: req.application)
+        }
         return try await req.db.transaction { db in
             // Recheck grant, PIN, assignment and uploader AFTER processing/storage.
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)

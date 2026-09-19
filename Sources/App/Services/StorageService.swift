@@ -72,7 +72,7 @@ enum StorageService {
                 key: key
             )
             _ = try await _s3Client.putObject(putRequest)
-            app.logger.info("StorageService: uploaded to R2 key=\(key)")
+            app.logger.info("StorageService: uploaded object to R2")
 
         case .local:
             let fullPath = app.directory.publicDirectory + key
@@ -82,7 +82,7 @@ enum StorageService {
                 try fileManager.createDirectory(atPath: directory, withIntermediateDirectories: true)
             }
             try Data(buffer: data).write(to: URL(fileURLWithPath: fullPath))
-            app.logger.info("StorageService: saved locally at \(fullPath)")
+            app.logger.info("StorageService: saved object locally")
         }
     }
 
@@ -193,6 +193,22 @@ enum StorageService {
               (parts[4] == "original" || String(parts[4]).range(of: "^view-[a-f0-9]{64}\\.jpg$", options: .regularExpression) != nil) else { throw Abort(.internalServerError, reason: "Invalid private media key") }
         return URL(fileURLWithPath: app.directory.workingDirectory).appendingPathComponent("PrivateMedia").appendingPathComponent(key)
     }
+    /// Account-erasure manifests can contain the historical rendition placeholder
+    /// produced at allocation time before any bytes were uploaded. It is deletion
+    /// authority only; upload and download continue to use `privatePath`.
+    private static func privateAccountDeletionPath(_ key: String, app: Application) throws -> URL {
+        let parts = key.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 5, parts[0] == "platform",
+              parts[1...3].allSatisfy({ UUID(uuidString: String($0)) != nil }),
+              parts[4] == "original" || parts[4] == "view.jpg" ||
+                String(parts[4]).range(of: "^view-[a-f0-9]{64}\\.jpg$", options: .regularExpression) != nil else {
+            throw Abort(.internalServerError, reason: "Invalid private media deletion key")
+        }
+        return URL(fileURLWithPath: app.directory.workingDirectory)
+            .appendingPathComponent("PrivateMedia")
+            .appendingPathComponent(key)
+    }
+
     static func uploadPrivate(_ data: Data, key: String, mime: String, app: Application) async throws {
         let path = try privatePath(key, app: app)
         if let bucket = try privateBucket(app: app) {
@@ -213,6 +229,80 @@ enum StorageService {
             return Data(buffer: bytes)
         }
         return try await app.threadPool.runIfActive(eventLoop: app.eventLoopGroup.next()) { try Data(contentsOf: path) }.get()
+    }
+
+
+    /// Only called with keys from a committed account-erasure manifest. Each
+    /// namespace is revalidated; storage success never establishes graph erasure.
+    static func deleteAccountObject(kind: String, key: String, app: Application) async throws {
+        if kind == "legacy_photo" {
+            try await deleteOwnedSyncedPhoto(key: key, app: app)
+            return
+        }
+        if kind == "legacy_drawing" {
+            let normalized = key.hasPrefix("/") ? String(key.dropFirst()) : key
+            let parts = normalized.split(separator: "/", omittingEmptySubsequences: false)
+            guard parts.count == 3, parts[0] == "uploads", parts[1] == "synced-drawings",
+                  !parts[2].isEmpty, !parts[2].contains(".."), !parts[2].contains("\\") else {
+                throw Abort(.internalServerError, reason: "Invalid synced-drawing deletion key")
+            }
+            switch backend {
+            case .r2: _ = try await _s3Client.deleteObject(.init(bucket: bucketName, key: normalized))
+            case .local:
+                let path = URL(fileURLWithPath: app.directory.publicDirectory).appendingPathComponent(normalized)
+                try await app.threadPool.runIfActive(eventLoop: app.eventLoopGroup.next()) {
+                    if FileManager.default.fileExists(atPath: path.path) { try FileManager.default.removeItem(at: path) }
+                }.get()
+            }
+            return
+        }
+        if kind == "legacy_completion_photo" {
+            let normalized = key.hasPrefix("/") ? String(key.dropFirst()) : key
+            let parts = normalized.split(separator: "/", omittingEmptySubsequences: false)
+            guard parts.count == 3, parts[0] == "uploads", parts[1] == "photos",
+                  !parts[2].isEmpty, !parts[2].contains(".."), !parts[2].contains("\\"),
+                  !normalized.contains(":"), !normalized.contains("\0") else {
+                throw Abort(.internalServerError, reason: "Invalid completion-photo deletion key")
+            }
+            switch backend {
+            case .r2: _ = try await _s3Client.deleteObject(.init(bucket: bucketName, key: normalized))
+            case .local:
+                let path = URL(fileURLWithPath: app.directory.publicDirectory).appendingPathComponent(normalized)
+                try await app.threadPool.runIfActive(eventLoop: app.eventLoopGroup.next()) {
+                    if FileManager.default.fileExists(atPath: path.path) { try FileManager.default.removeItem(at: path) }
+                }.get()
+            }
+            return
+        }
+        let localPath: URL?
+        switch kind {
+        case "private_media": localPath = try privateAccountDeletionPath(key, app: app)
+        case "private_import":
+            _ = try ImportedObjectKey.stored(key)
+            localPath = nil // Import transport has no real local-disk adapter.
+        case "private_drawing":
+            let parts = key.split(separator: "/", omittingEmptySubsequences: false)
+            guard parts.count == 5 || parts.count == 7, parts[0] == "drawings",
+                  parts[1...3].allSatisfy({ UUID(uuidString: String($0)) != nil }),
+                  (parts.count == 5 && parts[4] == "original") ||
+                  (parts.count == 7 && parts[4] == "pages" && UUID(uuidString: String(parts[5])) != nil &&
+                   String(parts[6]).range(of: "^(thumb-)?[a-f0-9]{64}\\.jpg$", options: .regularExpression) != nil) else {
+                throw Abort(.internalServerError, reason: "Invalid private drawing deletion key")
+            }
+            localPath = nil // No unverified guess at a historical local location.
+        default: throw Abort(.internalServerError, reason: "Unknown deletion storage kind")
+        }
+        if let bucket = try privateBucket(app: app) {
+            _ = try await _s3Client.deleteObject(.init(bucket: bucket, key: key))
+        } else if let localPath {
+            try await app.threadPool.runIfActive(eventLoop: app.eventLoopGroup.next()) {
+                if FileManager.default.fileExists(atPath: localPath.path) {
+                    try FileManager.default.removeItem(at: localPath)
+                }
+            }.get()
+        } else {
+            throw Abort(.serviceUnavailable, reason: "Private deletion storage is not configured")
+        }
     }
 
     /// Cleanly shuts down the AWS HTTP client. Call before app shutdown.

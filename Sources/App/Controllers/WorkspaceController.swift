@@ -17,6 +17,11 @@ struct WorkspaceController: RouteCollection {
         workspaces.patch(":workspaceId", "members", ":userId", use: changeMember)
         workspaces.post(":workspaceId", "owner", use: transferOwner)
         workspaces.post(":workspaceId", "invitations", use: invite)
+        let transfers = routes.grouped("api", "v2", "ownership-transfers").grouped(PlatformAuthMiddleware())
+        transfers.get(use: pendingTransfers)
+        transfers.post(":transferId", "accept", use: acceptTransfer)
+        transfers.post(":transferId", "decline", use: declineTransfer)
+        transfers.post(":transferId", "cancel", use: cancelTransfer)
         let invitations = routes.grouped("api", "v2", "invitations").grouped(PlatformAuthMiddleware())
         invitations.post("accept", use: accept)
         invitations.post("preview", use: previewInvitation)
@@ -52,10 +57,27 @@ struct WorkspaceController: RouteCollection {
         try await req.db.transaction { db in try await WorkspaceAccessService.changeMember(workspaceID: id, targetID: target, newRole: body.role, expectedRevision: body.expectedRevision, actorID: actor, on: db) }
         return .noContent
     }
-    @Sendable func transferOwner(req: Request) async throws -> HTTPStatus {
+    @Sendable func transferOwner(req: Request) async throws -> Response {
         let actor = try req.requireAuthenticatedUserId(), id = try parameter("workspaceId", req), body = try req.content.decode(OwnerBody.self)
-        try await req.db.transaction { db in try await WorkspaceAccessService.transferOwnership(workspaceID: id, targetID: body.userId, expectedRevision: body.expectedRevision, actorID: actor, on: db) }
-        return .noContent
+        let offer = try await req.db.transaction { db in
+            try await OwnershipTransferService.propose(workspaceID: id, targetID: body.userId, expectedRevision: body.expectedRevision, actorID: actor, on: db)
+        }
+        return try await offer.encodeResponse(status: .accepted, for: req)
+    }
+    @Sendable func pendingTransfers(req: Request) async throws -> [OwnershipTransferResponse] {
+        try await OwnershipTransferService.pendingForActor(actorID: req.requireAuthenticatedUserId(), on: req.db)
+    }
+    @Sendable func acceptTransfer(req: Request) async throws -> OwnershipTransferResponse {
+        let actor = try req.requireAuthenticatedUserId(), id = try parameter("transferId", req)
+        return try await req.db.transaction { db in try await OwnershipTransferService.accept(id: id, actorID: actor, on: db) }
+    }
+    @Sendable func declineTransfer(req: Request) async throws -> OwnershipTransferResponse {
+        let actor = try req.requireAuthenticatedUserId(), id = try parameter("transferId", req)
+        return try await req.db.transaction { db in try await OwnershipTransferService.resolve(id: id, actorID: actor, cancel: false, on: db) }
+    }
+    @Sendable func cancelTransfer(req: Request) async throws -> OwnershipTransferResponse {
+        let actor = try req.requireAuthenticatedUserId(), id = try parameter("transferId", req)
+        return try await req.db.transaction { db in try await OwnershipTransferService.resolve(id: id, actorID: actor, cancel: true, on: db) }
     }
     @Sendable func invite(req: Request) async throws -> InviteResult {
         let actor = try req.requireAuthenticatedUserId(), id = try parameter("workspaceId", req), body = try req.content.decode(InviteBody.self)

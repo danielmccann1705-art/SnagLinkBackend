@@ -24,7 +24,22 @@ enum StagedImportOriginalService {
             try await budget.run {
                 if prepared.receipt == nil {
                     let verifiedBody = try await StagedImportOriginalBytes.uploadBody(body, declaration: prepared.declaration, budget: budget)
-                    _ = try await store.putIfAbsent(prepared.address, body: verifiedBody, bytes: prepared.declaration.bytes, budget: budget)
+                    try budget.check()
+                    // Validate transport preflight before creating external-write
+                    // evidence, then re-enter current source/account authority.
+                    let ticket = try await StagedLegacyImportService.withActiveSession(command.scope, actor: actor, binding: binding, on: database) { session, db in
+                        try budget.check()
+                        let current = try await prepare(command, actor: actor, session: session, admission: admission, on: db)
+                        guard current.address == prepared.address, current.declaration == prepared.declaration else { throw conflict() }
+                        return try await ObjectWriteIntentService.begin(
+                            .init(storageKind: "private_import", key: ImportedObjectKey.original(prepared.address).value,
+                                  sha256: prepared.declaration.sha256, byteCount: prepared.declaration.bytes, contentType: "application/octet-stream"),
+                            source: .init(kind: "staged_original", id: command.declarationId, sessionID: session.sessionId),
+                            scope: .init(userID: actor.id, workspaceID: command.scope.workspaceId), on: db)
+                    }
+                    _ = try await ObjectWriteIntentService.execute(ticket, on: database, beforeIssuing: { try budget.check() }) {
+                        try await store.putIfAbsent(prepared.address, body: verifiedBody, bytes: prepared.declaration.bytes, budget: budget)
+                    }
                 }
                 // Both successful PUT and 412/retry require persisted-byte GET.
                 // A missing/corrupt object is a repair failure, never permission to overwrite.

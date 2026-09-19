@@ -68,7 +68,22 @@ enum LegacyImportProcessingService {
             try budget.check()
             let address = StagedImportOriginalAddress(workspaceId: projection.binding.workspaceId, sessionId: projection.binding.sessionId, declarationId: item.declarationId)
             do {
-                let outcome = try await decode(item, address: address, projection: projection, store: store, budget: budget)
+                let writeDerived: @Sendable (ImportedObjectKey, Data, String) async throws -> Void = { key, data, mime in
+                    let ticket = try await StagedLegacyImportService.withActiveSession(scope, actor: actor, binding: binding, on: database) { session, db in
+                        guard session.sessionId == projection.binding.sessionId,
+                              try await VerifiedIdentityService.sql(db).raw("SELECT id FROM legacy_canonical_projections WHERE id=\(bind: projection.projectionId) AND session_id=\(bind: session.sessionId)").first() != nil else {
+                            throw Abort(.conflict, reason: "Import processing source changed")
+                        }
+                        return try await ObjectWriteIntentService.begin(
+                            .init(storageKind: "private_import", key: key.value, data: data, contentType: mime),
+                            source: .init(kind: "import_derived", id: item.declarationId, sessionID: session.sessionId),
+                            scope: .init(userID: actor.id, workspaceID: scope.workspaceId), on: db)
+                    }
+                    try await ObjectWriteIntentService.execute(ticket, on: database) {
+                        try await store.putDerived(key, data: data, mime: mime, budget: budget)
+                    }
+                }
+                let outcome = try await decode(item, address: address, projection: projection, store: store, budget: budget, writeDerived: writeDerived)
                 _ = try await StagedLegacyImportService.withActiveSession(scope, actor: actor, binding: binding, on: database) { session, db in
                     try await record(outcome, projection: projection, on: db)
                     // A processor failure is a failure even though it produced a row:
@@ -130,7 +145,8 @@ enum LegacyImportProcessingService {
     }
 
     private static func decode(_ item: Pending, address: StagedImportOriginalAddress, projection: LegacyCanonicalProjection,
-                               store: any StagedImportOriginalStore, budget: StagedImportIOBudget) async throws -> Outcome {
+                               store: any StagedImportOriginalStore, budget: StagedImportIOBudget,
+                               writeDerived: @escaping @Sendable (ImportedObjectKey, Data, String) async throws -> Void) async throws -> Outcome {
         let opaque = Outcome(pending: item, decoded: nil, rendered: [], unsupportedDrawings: drawingAssets(item, projection),
                              renditionKey: nil, pageKeys: [:], opaqueReason: .notAnImage)
         // Oversized originals stay retained and readable; only bounded images decode.
@@ -156,7 +172,7 @@ enum LegacyImportProcessingService {
         }
         let renditionSHA = PrivateImageProcessor.digest(result.jpeg)
         let renditionKey = try ImportedObjectKey.derived(address, purpose: "rendition", sha256: renditionSHA)
-        try await store.putDerived(renditionKey, data: result.jpeg, mime: "image/jpeg", budget: budget)
+        try await writeDerived(renditionKey, result.jpeg, "image/jpeg")
         let decoded = Decoded(mime: mime, width: result.width, height: result.height, rendition: result.jpeg, renditionSHA256: renditionSHA)
         var rendered: [Rendered] = [], pageKeys: [UUID: (ImportedObjectKey, ImportedObjectKey)] = [:], unsupported: [(UUID, UUID)] = []
         for (drawingID, assetID) in drawingAssets(item, projection) {
@@ -173,8 +189,8 @@ enum LegacyImportProcessingService {
             do { try DrawingGeometryValidation.validate(geometry, mime: mime) } catch { unsupported.append((drawingID, assetID)); continue }
             let pageKey = try ImportedObjectKey.derived(address, purpose: "drawing-page", sha256: renditionSHA)
             let thumbKey = try ImportedObjectKey.derived(address, purpose: "drawing-thumb", sha256: thumbSHA)
-            try await store.putDerived(pageKey, data: result.jpeg, mime: "image/jpeg", budget: budget)
-            try await store.putDerived(thumbKey, data: thumb.jpeg, mime: "image/jpeg", budget: budget)
+            try await writeDerived(pageKey, result.jpeg, "image/jpeg")
+            try await writeDerived(thumbKey, thumb.jpeg, "image/jpeg")
             pageKeys[drawingID] = (pageKey, thumbKey)
             rendered.append(.init(drawingSourceId: drawingID, assetId: assetID, geometry: geometry, page: result.jpeg, pageSHA256: renditionSHA,
                 thumbnail: thumb.jpeg, thumbnailSHA256: thumbSHA, resultHash: try CanonicalDrawingService.manifestHash(manifest)))

@@ -87,6 +87,18 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateImportProcessingAttempts())
         app.migrations.add(AllowReprocessingOpaqueImports())
         app.migrations.add(AllowFallbackCleanupTrigger())
+        app.migrations.add(CreateAccountDeletionJobs())
+        app.migrations.add(CreateAppleMultiClientCredentials())
+        app.migrations.add(CreateAppleWebChallenges())
+        app.migrations.add(CreateAppleWebCredentialEscrow())
+        app.migrations.add(CreateAccountDeletionGraphErasure())
+        app.migrations.add(CreateCompletionUploadObjects())
+        app.migrations.add(CreateOwnershipTransferOffers())
+        app.migrations.add(CreateEmptyCompanyClosure())
+        app.migrations.add(CreateCountedCompanyClosure())
+        app.migrations.add(CreateCompanyClosureGraphErasure())
+        app.migrations.add(CreateObjectWriteIntents())
+        app.migrations.add(CreateObjectErasureFences())
 
         try await app.autoMigrate()
     } else {

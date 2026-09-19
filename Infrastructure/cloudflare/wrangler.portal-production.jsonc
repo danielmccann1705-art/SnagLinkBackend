@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "snaglist-portal-production",
+  "main": "src/portal-production.ts",
+  "compatibility_date": "2026-09-09",
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {"enabled": false},
+  // Copy the reviewed portal bundle to this ignored directory before validation.
+  // The Worker must run first so disabled/host guards also cover static assets.
+  "assets": {"directory": "./portal-dist", "binding": "ASSETS", "run_worker_first": true, "not_found_handling": "single-page-application"},
+  "vars": {
+    "PRODUCTION_PORTAL_ENABLED": "false",
+    "PORTAL_ORIGIN": "https://app.usesnaglist.com"
+  },
+  "services": [{"binding": "BACKEND", "service": "snaglist-api-production"}]
+}

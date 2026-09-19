@@ -30,7 +30,8 @@ struct ImportServerBinding: Sendable {
         let value: Self
         if let injected = app.storage[ImportServerBindingKey.self] { value = injected }
         else {
-            guard let origin = Environment.get("IMPORT_PREVIEW_API_ORIGIN") else { throw unconfigured() }
+            let key = expected == "production" ? "PRODUCTION_IMPORT_API_ORIGIN" : "IMPORT_PREVIEW_API_ORIGIN"
+            guard let origin = Environment.get(key) else { throw unconfigured() }
             value = try Self(environment: expected, apiOrigin: origin)
         }
         guard value.environment == expected, !(app.environment == .production && expected == "development") else { throw unconfigured() }
