@@ -171,9 +171,11 @@ struct PrivateMediaController: RouteCollection {
             return try (row.decode(column: prefix + "_key", as: String.self), sha, size,
                         original ? row.decode(column: "original_mime", as: String.self) : "image/jpeg")
         }
-        let data: Data
-        do { data = try await StorageService.downloadPrivate(key: target.key, app: req.application) }
-        catch { throw Abort(.serviceUnavailable, reason: "This photo is temporarily unavailable. Try again", identifier: "media_unavailable") }
+        // One reader for both private routes. It decides from the key alone which
+        // transport owns the address, and refuses a fenced object as gone rather
+        // than handing back the fence's own bytes. Authorization is not its
+        // business: the row and the ACL above are the authority, never the key.
+        let data = try await PrivateMediaReadService.read(key: target.key, app: req.application, logger: req.logger)
         guard data.count == target.size, PrivateImageProcessor.digest(data) == target.sha256 else { throw Abort(.serviceUnavailable, reason: "Photo integrity check failed", identifier: "media_unavailable") }
         // No long-lived signed URL. Check again after fetching bytes so a removed
         // member cannot complete a slow download after its access has been revoked.

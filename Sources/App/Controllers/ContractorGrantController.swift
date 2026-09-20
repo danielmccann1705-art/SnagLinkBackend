@@ -174,15 +174,28 @@ struct ContractorGrantController: RouteCollection {
             return Response(status: .ok, headers: ["Content-Type": value.mime, "Content-Length": String(value.data.count), "Cache-Control": "private, no-store", "Vary": "Cookie", "Content-Disposition": "inline; filename=snag-photo.jpg", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"], body: .init(data: value.data))
         }
 
-        let target: (String, String) = try await req.db.transaction { db in
+        // Size as well as digest, which is what the manager route has always
+        // checked. A ready row carries both by database CHECK (`state <> 'ready'
+        // OR (rendition_sha256 IS NOT NULL AND rendition_size > 0 ...)`), and
+        // `visibleMedia` admits only a ready row, so neither is an optional fact
+        // here. Checking one and not the other left a size disagreement to be
+        // caught by the digest alone.
+        let target: (key: String, sha256: String, size: Int) = try await req.db.transaction { db in
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
             let media = try await LinkGrantService.visibleMedia(assetID, snagID: snagID, grant: grant, project: project, on: db)
-            return try (media.decode(column: "rendition_key", as: String.self), media.decode(column: "rendition_sha256", as: String.self))
+            return try (media.decode(column: "rendition_key", as: String.self),
+                        media.decode(column: "rendition_sha256", as: String.self),
+                        media.decode(column: "rendition_size", as: Int.self))
         }
-        let bytes: Data
-        do { bytes = try await StorageService.downloadPrivate(key: target.0, app: req.application) }
-        catch { throw Abort(.serviceUnavailable, reason: "This photo is temporarily unavailable. Try again", identifier: "media_unavailable") }
-        guard PrivateImageProcessor.digest(bytes) == target.1 else { throw Abort(.serviceUnavailable, reason: "This photo could not be verified") }
+        // The same reader the manager route uses. A Contractor link discloses only
+        // the processed rendition, and it meets the same two addresses: a
+        // historical one that is physically deleted, and a namespaced one that a
+        // deletion replaces with a fence. A fence is refused as gone here too,
+        // rather than being verified into a 503 that invites a hopeless retry.
+        let bytes = try await PrivateMediaReadService.read(key: target.key, app: req.application, logger: req.logger)
+        guard bytes.count == target.size, PrivateImageProcessor.digest(bytes) == target.sha256 else {
+            throw Abort(.serviceUnavailable, reason: "This photo could not be verified", identifier: "media_unavailable")
+        }
         try await req.db.transaction { db in
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
             _ = try await LinkGrantService.visibleMedia(assetID, snagID: snagID, grant: grant, project: project, on: db)

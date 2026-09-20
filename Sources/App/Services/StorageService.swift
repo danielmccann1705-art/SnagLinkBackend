@@ -54,6 +54,49 @@ enum StorageService {
         Environment.get("R2_BUCKET_NAME") ?? "snaglist-uploads"
     }
 
+    // MARK: - The private namespace is never mutated from here
+
+    /// Refuses, before any shape logic at all, a key inside the installed private
+    /// namespace.
+    ///
+    /// Every entry in this file either writes unconditionally or physically
+    /// deletes, and the private namespace is built on neither being possible. An
+    /// object there is created once and never overwritten, and a deletion replaces
+    /// its bytes with an erasure fence that must stay at that address for good. A
+    /// single unconditional PUT through here would overwrite a fence back into
+    /// content, and a single DELETE would remove one — turning "permanently
+    /// unreadable" into "readable again" or into "deleted, and so re-creatable".
+    ///
+    /// Until now nothing but a coincidence of shapes kept them apart: `privatePath`
+    /// happens to demand `platform/`, `deleteAccountObject` happens to demand each
+    /// legacy family's prefix. A coincidence that four validators have to keep
+    /// agreeing on is not a rule, and it is not what should stand between a
+    /// customer's erased photograph and a writer that does not know about fences.
+    /// This is the rule, and it is checked first so that no shape logic below can
+    /// be the thing that decides.
+    ///
+    /// There is nothing to refuse where no namespace is installed: without one
+    /// there is no address that could be inside it. The check is against the
+    /// installation this process resolved at boot, never against a caller's idea of
+    /// what a namespace is.
+    ///
+    /// The refusal is internal. No route can reach it with a caller-supplied key,
+    /// so a client meeting it has met a server fault, and the identifier is for the
+    /// operator rather than for the client.
+    private static func refuseNamespaceMutation(_ key: String, app: Application) throws {
+        guard case .installed(let configuration) = PrivateObjectAllocationPolicy.installation(app: app) else { return }
+        let namespace = configuration.target.namespace
+        // Both spellings. A namespace cannot itself contain a leading slash, but a
+        // caller's key can carry one, and the two legacy entries below strip it
+        // before they act — so a slashed namespaced key would otherwise reach
+        // storage as its unslashed self.
+        let normalized = key.hasPrefix("/") ? String(key.dropFirst()) : key
+        guard !key.hasPrefix(namespace), !normalized.hasPrefix(namespace) else {
+            throw Abort(.internalServerError, reason: "Private namespace objects are never written or deleted here",
+                        identifier: "private_namespace_mutation_refused")
+        }
+    }
+
     // MARK: - Upload
 
     /// Uploads data to storage.
@@ -63,6 +106,7 @@ enum StorageService {
     ///   - contentType: MIME type of the file.
     ///   - app: The Vapor Application (used for local disk path).
     static func upload(data: ByteBuffer, key: String, contentType: String, app: Application) async throws {
+        try refuseNamespaceMutation(key, app: app)
         switch backend {
         case .r2:
             let putRequest = S3.PutObjectRequest(
@@ -141,6 +185,7 @@ enum StorageService {
 
     /// Only app-owned synced-photo keys may be removed by snag deletion.
     static func deleteOwnedSyncedPhoto(key: String, app: Application) async throws {
+        try refuseNamespaceMutation(key, app: app)
         let key = key.hasPrefix("/") ? String(key.dropFirst()) : key
         guard key.hasPrefix("uploads/synced-photos/"), !key.contains(".."), !key.contains("\\") else {
             throw Abort(.badRequest, reason: "Invalid synced-photo storage key")
@@ -209,7 +254,11 @@ enum StorageService {
             .appendingPathComponent(key)
     }
 
+    /// The unconditional private writer, and the reason B2 deletes it. Until then
+    /// it refuses the namespace outright: a create-only address must never be
+    /// reachable from a writer that cannot express "create only".
     static func uploadPrivate(_ data: Data, key: String, mime: String, app: Application) async throws {
+        try refuseNamespaceMutation(key, app: app)
         let path = try privatePath(key, app: app)
         if let bucket = try privateBucket(app: app) {
             _ = try await _s3Client.putObject(.init(body: .init(buffer: ByteBuffer(data: data)), bucket: bucket, cacheControl: "private, no-store", contentType: mime, key: key))
@@ -235,6 +284,9 @@ enum StorageService {
     /// Only called with keys from a committed account-erasure manifest. Each
     /// namespace is revalidated; storage success never establishes graph erasure.
     static func deleteAccountObject(kind: String, key: String, app: Application) async throws {
+        // A namespaced key is fenced or it is blocked; it is never physically
+        // deleted, and the delete branch is never where that is decided.
+        try refuseNamespaceMutation(key, app: app)
         if kind == "legacy_photo" {
             try await deleteOwnedSyncedPhoto(key: key, app: app)
             return
@@ -276,7 +328,15 @@ enum StorageService {
         }
         let localPath: URL?
         switch kind {
-        case "private_media": localPath = try privateAccountDeletionPath(key, app: app)
+        case "private_media":
+            // Stated rather than left to the shape check inside the path helper: a
+            // private-media deletion key is a historical `platform/` address and
+            // nothing else. The namespace is fenced, and a key that is neither is
+            // not an address this branch has ever been entitled to delete.
+            guard key.hasPrefix(PrivateObjectAllocationPolicy.legacyMediaPrefix) else {
+                throw Abort(.internalServerError, reason: "Invalid private media deletion key")
+            }
+            localPath = try privateAccountDeletionPath(key, app: app)
         case "private_import":
             _ = try ImportedObjectKey.stored(key)
             localPath = nil // Import transport has no real local-disk adapter.
