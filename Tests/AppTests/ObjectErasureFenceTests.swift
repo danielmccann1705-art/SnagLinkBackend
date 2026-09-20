@@ -48,10 +48,13 @@ final class ObjectErasureFenceTests: XCTestCase {
     private func target(identity: String = "synthetic-r2-account", bucket: String = "synthetic-private", namespace: String = "fences-v1/") -> ObjectStorageWriteTarget {
         .init(backend: "r2", backendIdentity: identity, bucket: bucket, namespace: namespace, writeProtocol: .createOnlyV1)
     }
+    /// Same reason as the fence-pass suite: these cases describe intent rows the
+    /// fence must refuse, and `begin` no longer admits a target the allocation
+    /// policy did not produce. The rows are written with `begin`'s own columns, and
+    /// the triggers still run on the insert.
     private func intent(userID: UUID, key: String, kind: String = "private_media", target: ObjectStorageWriteTarget?) async throws -> UUID {
         try await app.db.transaction { db in
-            try await ObjectWriteIntentService.begin(.init(storageKind: kind, key: key, data: Data("synthetic".utf8), contentType: "image/jpeg"),
-                source: .init(kind: "media_asset", id: UUID()), scope: .init(userID: userID), target: target, on: db).id
+            try await ObjectWriteIntentRows.insert(userID: userID, key: key, kind: kind, target: target, on: db)
         }
     }
     private func endAndLease(_ id: UUID) async throws -> AccountDeletionWorker.Lease {

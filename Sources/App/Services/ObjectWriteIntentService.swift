@@ -37,12 +37,13 @@ enum ObjectWriteIntentService {
     /// Authorization runs again immediately before the intent is committed. It
     /// must prove the route-specific capability, assignment and exact source row.
     /// Database locks then serialize intent admission with account/company freeze.
-    static func write<T: Sendable>(_ object: Object, source: Source, target: ObjectStorageWriteTarget? = nil, on database: Database,
+    static func write<T: Sendable>(_ object: Object, source: Source,
+                                  allocation: PrivateObjectAllocationPolicy.Allocation? = nil, on database: Database,
                                   authorize: @escaping @Sendable (Database) async throws -> Scope,
                                   operation: @escaping @Sendable () async throws -> T) async throws -> T {
         let ticket = try await database.transaction { db in
             let scope = try await authorize(db)
-            return try await begin(object, source: source, scope: scope, target: target, on: db)
+            return try await begin(object, source: source, scope: scope, allocation: allocation, on: db)
         }
         return try await execute(ticket, on: database, operation: operation)
     }
@@ -75,14 +76,62 @@ enum ObjectWriteIntentService {
     }
     /// Caller supplies a real transaction after current route authorization.
     /// This is also the boundary an injected drawing bridge must use before PUT.
-    static func begin(_ object: Object, source: Source, scope: Scope, target: ObjectStorageWriteTarget? = nil, on db: Database) async throws -> Ticket {
+    static func begin(_ object: Object, source: Source, scope: Scope,
+                      allocation: PrivateObjectAllocationPolicy.Allocation? = nil, on db: Database) async throws -> Ticket {
         guard db.inTransaction, object.byteCount >= 0,
               object.sha256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
               !object.key.isEmpty, !object.contentType.isEmpty,
               ["media_asset","staged_original","import_derived","completion_upload","legacy_link","drawing_asset"].contains(source.kind),
-              ["private_media","private_import","private_drawing","legacy_photo","legacy_drawing","legacy_completion_photo"].contains(object.storageKind),
+              PrivateObjectAllocationPolicy.storageKinds.contains(object.storageKind),
               scope.userID != nil || scope.workspaceID != nil || scope.magicLinkID != nil else {
             throw Abort(.internalServerError, reason: "Object write scope is incomplete")
+        }
+        // Where an intent's target comes from, and what may be said about it.
+        //
+        // A target is not a parameter of its own any more. It is read off an
+        // allocation the policy produced, so nothing can hand-roll a target for a
+        // key the policy never allocated, and the three values that have to agree
+        // forever - the store's target, the recorded intent's target and the
+        // fence's target - are one value rather than three that happen to match.
+        // The checks kept here rather than only in the policy are the ones the two
+        // services that must declare an intent inside their own authority
+        // transaction would otherwise bypass, since they reach this entry point
+        // directly.
+        //
+        // They are deliberately configuration-free. Whether a particular namespace
+        // is installed is a property of the process, and this function is handed a
+        // database and nothing else; a rule that consulted process configuration
+        // here would hold in production and not in a test that injects one. The
+        // rule that does depend on configuration - that a key inside the installed
+        // namespace may only be recorded with the target that owns it - belongs to
+        // PrivateObjectAllocationPolicy, which is the only thing that can produce
+        // such a key in the first place.
+        let target = allocation?.target
+        if let allocation {
+            // Unreachable now that the type carries the target: an Allocation is
+            // built only from a loaded configuration, and that loader produces
+            // create-only targets and nothing else. Kept as a one-line assertion
+            // because a fully populated target under any other protocol satisfies
+            // the object_write_target_complete CHECK, which constrains the columns
+            // and not the protocol; such a row would look recorded and would be
+            // dropped silently by the fence's candidate query, so the object it
+            // describes could never be made permanently unreadable and nothing
+            // about the row would say so.
+            guard allocation.target.writeProtocol == .createOnlyV1 else {
+                throw Abort(.internalServerError, reason: "Object write target protocol is unsupported",
+                            identifier: "object_write_target_protocol")
+            }
+            // The object recorded must be the object allocated. An allocation's key
+            // is inside its own namespace by construction - and the database
+            // enforces that too, as a CHECK that surfaces as a 23514 - so what a
+            // typed refusal here actually names is a caller that allocated one
+            // address and then recorded another.
+            guard allocation.key == object.key, allocation.storageKind == object.storageKind,
+                  object.key.hasPrefix(allocation.target.namespace),
+                  object.key.count > allocation.target.namespace.count else {
+                throw Abort(.internalServerError, reason: "Object write key is outside its target namespace",
+                            identifier: "object_write_key_outside_target")
+            }
         }
         let sql = try VerifiedIdentityService.sql(db)
         if let projectID = scope.projectID, let project = try await Project.find(projectID, on: db) {

@@ -48,13 +48,19 @@ final class AccountDeletionObjectFenceTests: XCTestCase {
                         namespace: String = "fences-v1/") -> ObjectStorageWriteTarget {
         .init(backend: "r2", backendIdentity: identity, bucket: bucket, namespace: namespace, writeProtocol: .createOnlyV1)
     }
+    /// What these cases are about is table contents the candidate query exists to
+    /// refuse: two buckets on one physical key, a historical writer with no target
+    /// beside a create-only one. `ObjectWriteIntentService.begin` takes an
+    /// allocation now, and the policy will never produce one that says any of those
+    /// things — which is exactly the protection — so the rows are written with
+    /// `begin`'s own columns instead. The triggers still run on that insert; that
+    /// is the point. The signature is unchanged, so every case below reads as it
+    /// did.
     @discardableResult
     private func intent(userID: UUID, key: String, kind: String = "private_media",
                         target: ObjectStorageWriteTarget?) async throws -> UUID {
         try await app.db.transaction { db in
-            try await ObjectWriteIntentService.begin(
-                .init(storageKind: kind, key: key, data: Data("synthetic".utf8), contentType: "image/jpeg"),
-                source: .init(kind: "media_asset", id: UUID()), scope: .init(userID: userID), target: target, on: db).id
+            try await ObjectWriteIntentRows.insert(userID: userID, key: key, kind: kind, target: target, on: db)
         }
     }
     private func endAndLease(_ id: UUID) async throws -> AccountDeletionWorker.Lease {

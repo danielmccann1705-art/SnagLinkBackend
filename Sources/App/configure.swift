@@ -142,6 +142,23 @@ public func configure(_ app: Application) async throws {
         app.middleware.use(FileMiddleware(publicDirectory: app.directory.publicDirectory))
     }
 
+    // MARK: - Private object allocation
+    // Resolve the private-namespace switch once, here, so a half-configured switch
+    // is visible at boot rather than as a surprise inside an upload, and so the
+    // first request does not pay to parse configuration. Only which of the three
+    // states this is gets logged: no bucket, no account, no credential.
+    switch PrivateObjectAllocationPolicy.install(app: app) {
+    case .installed:
+        app.logger.info("Private object namespace is installed")
+    case .absent:
+        app.logger.info("Private object namespace is not installed")
+    case .unusable:
+        // Fail closed. Private allocation refuses; it never falls back to the
+        // legacy address, which would put an object somewhere a deletion does not
+        // know to look.
+        app.logger.critical("Private object namespace is configured but unusable; private allocation is refused")
+    }
+
     // MARK: - Routes
     try routes(app)
 
