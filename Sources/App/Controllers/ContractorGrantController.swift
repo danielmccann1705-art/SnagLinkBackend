@@ -146,6 +146,22 @@ struct ContractorGrantController: RouteCollection {
             // Recheck grant, PIN, assignment and uploader AFTER processing/storage.
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
             let snag = try await LinkGrantService.item(snagID, grant: grant, project: project, write: true, on: db)
+            // (b) The asset's entity lock, before the row is read.
+            //
+            // Two writers of one asset both reach this transaction. Reading
+            // `state` without a lock lets both see "not ready" and both run the
+            // UPDATE below: with equal keys that is a double `revision + 1` and a
+            // rewritten `ready_at`, and with unequal keys it is a 23514 for the
+            // second after the first has already made the asset ready. The lock is
+            // the one `allocate` and the intent transaction take, so the loser
+            // reads the row the winner committed and short-circuits on `ready`.
+            //
+            // It is taken here rather than as the transaction's first statement so
+            // that the order is the one the intent transaction now fixes —
+            // workspace, then media entity, then row. Re-authorization above has
+            // already taken `workspace:<W>`; taking the entity lock before it
+            // would invert the two and make a cycle out of closing one.
+            try await VerifiedIdentityService.lock("entity:media:\(assetID)", on: db)
             let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: project.requireID(), on: db)
             try PrivateMediaService.requireUploader(row, actorID: nil, grantID: grant.decode(column: "id", as: UUID.self))
             if try row.decode(column: "state", as: String.self) == "ready" { return try .init(MediaAssetResponse(row)) }

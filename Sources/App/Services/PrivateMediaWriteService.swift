@@ -54,12 +54,85 @@ enum PrivateMediaWriteService {
 
     // MARK: - What the operator is told
 
-    /// The fixed operator vocabulary for a private write: one line per key, one
-    /// `kind`, and nothing else. It is the shared private-media vocabulary, not a
-    /// second one — the write kinds and B3's read kinds are one closed set,
-    /// because two of them describe the same physical observation read from two
-    /// sides. See `PrivateMediaLogKind`.
+    /// The fixed operator vocabulary for the rows where a photograph's bytes could
+    /// not be had: one line per key, one `kind`, and nothing else. It is the
+    /// shared private-media vocabulary, not a second one — these write kinds and
+    /// B3's read kinds are one closed set, because two of them describe the same
+    /// physical observation read from two sides. See `PrivateMediaLogKind`.
+    ///
+    /// It is one of the two vocabularies a private-write line may carry; the other
+    /// is `Outcome` below, which says which row a key took rather than why it took
+    /// none. They share the `kind` metadata key and never a spelling.
     typealias LogKind = PrivateMediaLogKind
+
+    /// The second fixed operator vocabulary for a private write: which row a key
+    /// took, once the row is one nothing else in a log would show.
+    ///
+    /// **Why this is its own enum and not five more cases of `PrivateMediaLogKind`.**
+    /// That enum is a closed answer to one question — *why could this photograph
+    /// not be had* — and it is shared between the reader and the writer precisely
+    /// because `absent` and `not_landed` are the same physical observation read
+    /// from two sides. Every one of its cases sits behind a single 503
+    /// `media_unavailable`, which is what makes it safe to say of the whole set
+    /// that none of it reaches a client and that the split exists only so an
+    /// operator knows whether to retry or to look at storage.
+    ///
+    /// These five answer a different question — *which row did this key take* —
+    /// and three of them are successes. `erased` and `key_conflict` are not
+    /// unavailability either: they are terminal, they carry their own statuses
+    /// (410 and 409), and `key_conflict` is a storage-integrity alarm rather than
+    /// a user state. Folding them in would make every sentence in
+    /// `PrivateMediaLogKind`'s contract false, and would widen
+    /// `Refusal.unavailable`'s payload to admit `created`, which is not a thing a
+    /// refusal can be. It would also reach across two packet boundaries: the enum
+    /// and the test that pins its spellings are A6's.
+    ///
+    /// The two vocabularies share one metadata key and never one spelling; the
+    /// tests hold them disjoint, so `kind` stays greppable as one column.
+    ///
+    /// Nothing else is in the line: no key, bucket, ETag, namespace or token.
+    enum Outcome: String, Sendable, Equatable, CaseIterable {
+        /// Row 1. The PUT created the object at an address nobody else had taken.
+        case created
+        /// Row 5. The address already held this intent's own bytes, and the
+        /// readback proved it. A first upload that meets this met its own earlier
+        /// attempt.
+        case existingVerified = "existing_verified"
+        /// Row 11. The acknowledgement was lost and the bytes were there anyway.
+        /// A run of these says acknowledgements are being dropped and the readback
+        /// is the only reason uploads are succeeding.
+        case unknownVerified = "unknown_verified"
+        /// Rows 6 and 12. The address is held by an erasure fence, so it belongs
+        /// to an account that asked to be erased and no content will ever land on
+        /// it. Expected where a deletion has run; never otherwise.
+        case erased
+        /// Rows 7 and 13. Something that is not ours occupies an address only we
+        /// could have been allocated. This is a storage-integrity alarm, not a
+        /// user state: it means storage returned bytes that are not the bytes
+        /// written to that key, or that two server nonces collided.
+        case keyConflict = "key_conflict"
+
+        init(_ settled: PrivateObjectAllocationPolicy.Settled) {
+            switch settled {
+            case .created: self = .created
+            case .existingVerified: self = .existingVerified
+            case .unknownVerified: self = .unknownVerified
+            }
+        }
+    }
+
+    /// Which of an asset's two addresses a line is about.
+    private enum Role: String { case original, rendition }
+
+    /// The one shape a private-write line has. A settling row knows which of the
+    /// asset's two addresses it wrote; a refusal reaches `abort` as an error and
+    /// does not, so those two lines carry the kind alone rather than a role
+    /// guessed from nothing.
+    private static func log(_ outcome: Outcome, role: Role? = nil, to logger: Logger) {
+        var metadata: Logger.Metadata = ["kind": .string(outcome.rawValue)]
+        if let role { metadata["role"] = .string(role.rawValue) }
+        logger.info("Private media write", metadata: metadata)
+    }
 
     // MARK: - What the client is told
 
@@ -100,8 +173,16 @@ enum PrivateMediaWriteService {
     static func abort(_ error: any Error, logger: Logger) -> any Error {
         switch refusal(for: error) {
         case .erased:
+            // The address belongs to a deleted account. Worth a line of its own:
+            // it is the one refusal that proves the fence held against a live
+            // writer, and B5 has to see it happen rather than infer it.
+            log(.erased, to: logger)
             return Abort(.gone, reason: "This photo is no longer available", identifier: "media_erased")
         case .keyConflict:
+            // An alarm, not a user state. Unreachable absent a fault: every
+            // attempt's bytes are checked against the row before any PUT, and a
+            // rendition's address is its own digest.
+            log(.keyConflict, to: logger)
             return Abort(.conflict, reason: "This photo could not be saved at its address. Allocate it again",
                          identifier: "media_key_conflict")
         case .mismatch:
@@ -199,9 +280,10 @@ enum PrivateMediaWriteService {
             var rebound = false
             while true {
                 do {
-                    try await PrivateObjectAllocationPolicy.write(
+                    let settled = try await PrivateObjectAllocationPolicy.write(
                         allocation, data: original, contentType: mimeType, source: source, app: app, on: database,
-                        authorize: binding(assetID, to: allocation, authorize))
+                        authorize: binding(assetID, in: workspaceID, to: allocation, authorize))
+                    log(.init(settled), role: .original, to: logger)
                     break
                 } catch let elsewhere as BoundElsewhere {
                     // Once, and once only. `preserve_media_asset_keys` makes a
@@ -218,9 +300,10 @@ enum PrivateMediaWriteService {
             // a rendition key is its own digest, so a repeat of the same
             // processing meets its own earlier object instead of creating a second.
             let renditionAllocation = try PrivateObjectAllocationPolicy.rendition(of: allocation, sha256: renditionSHA, app: app)
-            try await PrivateObjectAllocationPolicy.write(
+            let renditionSettled = try await PrivateObjectAllocationPolicy.write(
                 renditionAllocation, data: rendition, contentType: "image/jpeg", source: source, app: app, on: database,
-                authorize: confirmation(assetID, boundTo: allocation, authorize))
+                authorize: confirmation(assetID, in: workspaceID, boundTo: allocation, authorize))
+            log(.init(renditionSettled), role: .rendition, to: logger)
             return .init(originalKey: allocation.key, renditionKey: renditionAllocation.key, renditionSHA256: renditionSHA)
         } catch {
             throw abort(error, logger: logger)
@@ -250,10 +333,31 @@ enum PrivateMediaWriteService {
     /// The row's address is written here, inside the transaction that records the
     /// intent, or it is confirmed to be the one we are writing. Nothing else in
     /// the codebase may set `original_key`.
-    private static func binding(_ assetID: UUID, to allocation: PrivateObjectAllocationPolicy.Allocation,
+    ///
+    /// **The intent transaction locks workspace, then media entity, then row, in
+    /// that order, and `begin` re-enters the first.** The order is the whole point
+    /// of taking the workspace lock here rather than leaving it to `begin`: this
+    /// closure takes the `media_assets` row — `FOR UPDATE` below, the `UPDATE`
+    /// after it, `FOR SHARE` in `confirmation` — and `begin` then waits for
+    /// `workspace:<W>`. An account-deletion request takes `workspace:<W>` first
+    /// and later deletes that same row, so the two orders together are a cycle
+    /// Postgres would detect and break with 40P01 after `deadlock_timeout`: the
+    /// upload gets a 500 whose retry gets 404, or the whole deletion request rolls
+    /// back. Taking the workspace first means the upload simply waits at the
+    /// workspace and then finds no row. Advisory transaction locks are re-entrant,
+    /// so `begin`'s own call on the same workspace is a no-op.
+    ///
+    /// It is taken before `authorize` and not left to it. Both routes' authorize
+    /// closures do take the workspace lock first today — through
+    /// `ProjectAccessService.require` and `LinkGrantService.load` — but the
+    /// closure is a parameter, and an ordering that holds only because every
+    /// caller happens to lock in the right order is not an ordering.
+    private static func binding(_ assetID: UUID, in workspaceID: UUID,
+                                to allocation: PrivateObjectAllocationPolicy.Allocation,
                                 _ authorize: @escaping @Sendable (Database) async throws -> ObjectWriteIntentService.Scope)
         -> @Sendable (Database) async throws -> ObjectWriteIntentService.Scope {
         { db in
+            try await WorkspaceAccessService.lock(workspaceID, on: db)
             let scope = try await authorize(db)
             // The same lock allocation takes, so two first uploads of one asset
             // are serialized and converge on one address rather than racing to
@@ -274,10 +378,15 @@ enum PrivateMediaWriteService {
 
     /// The rendition's intent is recorded against the same row, so the row must
     /// still carry the original address this rendition was derived from.
-    private static func confirmation(_ assetID: UUID, boundTo allocation: PrivateObjectAllocationPolicy.Allocation,
+    ///
+    /// Same lock order as `binding`, for the same reason: this closure takes the
+    /// row `FOR SHARE` and `begin` then waits for `workspace:<W>`.
+    private static func confirmation(_ assetID: UUID, in workspaceID: UUID,
+                                     boundTo allocation: PrivateObjectAllocationPolicy.Allocation,
                                      _ authorize: @escaping @Sendable (Database) async throws -> ObjectWriteIntentService.Scope)
         -> @Sendable (Database) async throws -> ObjectWriteIntentService.Scope {
         { db in
+            try await WorkspaceAccessService.lock(workspaceID, on: db)
             let scope = try await authorize(db)
             let sql = try VerifiedIdentityService.sql(db)
             guard let row = try await sql.raw("SELECT original_key FROM media_assets WHERE id = \(bind: assetID) FOR SHARE").first(),

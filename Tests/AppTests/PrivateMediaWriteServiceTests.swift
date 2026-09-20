@@ -159,6 +159,26 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
         try await call(.PUT, target.contentPath, target.actor, bytes: bytes, mime: mime)
     }
 
+    /// The same PUT, with a signal when it returns. The signal is an actor rather
+    /// than a row, because the case that needs it holds a database connection
+    /// hostage on purpose and must not ask for a second one to observe itself.
+    private func put(_ target: Target, signalling finished: InvocationCounter) async throws -> XCTHTTPResponse {
+        let response = try await put(target)
+        await finished.next()
+        return response
+    }
+
+    /// Reads what an operator would read. The in-memory responder builds
+    /// `req.logger` from `app.logger` (`VaporTestUtils/TestingApplication.swift`),
+    /// so replacing the application's handler is how a line logged deep inside a
+    /// request is observed from outside one.
+    @discardableResult
+    private func capturingLogs() -> LogKindBox {
+        let box = LogKindBox()
+        app.logger = Logger(label: "private-media-write-test") { _ in CapturingLogHandler(box: box) }
+        return box
+    }
+
 
     // MARK: - Assertions on values that had to be awaited
 
@@ -307,9 +327,11 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
     /// the bytes are ours by construction. So there is no readback, and no 10 MB
     /// GET per upload to pay for one.
     func testACreatedPutSettlesWithoutAReadbackAndBecomesReadyOnBothRoutes() async throws {
+        let box = capturingLogs()
         for route in Route.allCases {
             let target = try await allocated(route)
             let mark = await mark()
+            box.drain()
             let response = try await put(target)
             XCTAssertEqual(response.status, .ok, route.rawValue + " → " + response.body.string)
             assertEqual(try await state(target), "ready", route.rawValue)
@@ -317,6 +339,11 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
             XCTAssertEqual(calls.count, 2, route.rawValue + ": two puts and no readback — \(calls)")
             XCTAssertTrue(calls.allSatisfy({ if case .put = $0 { return true } else { return false } }), route.rawValue)
             assertEqual(try await intents(target).map(\.state), ["settled", "settled"], route.rawValue)
+            // (g) Which row each key took, which is the only place it is visible:
+            // all three settling rows answer 200.
+            XCTAssertEqual(box.drain(), [.init(kind: "created", role: "original", keys: ["kind", "role"]),
+                                         .init(kind: "created", role: "rendition", keys: ["kind", "role"])],
+                           route.rawValue)
         }
     }
 
@@ -325,11 +352,13 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
     /// is "these bytes, this digest, at this key", not "this request wrote them",
     /// so the readback verifies it and the intent settles.
     func testAnAddressAlreadyHoldingOurOwnBytesSettlesOnBothRoutes() async throws {
+        let box = capturingLogs()
         for route in Route.allCases {
             let target = try await allocated(route)
             let key = try await boundButEmpty(target)
             try await store.seedContent(key: key, data: Self.png, contentType: "image/png")
             let mark = await mark()
+            box.drain()
             let response = try await put(target)
             XCTAssertEqual(response.status, .ok, route.rawValue + " → " + response.body.string)
             assertEqual(try await state(target), "ready", route.rawValue)
@@ -338,6 +367,9 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
             XCTAssertEqual(calls.dropFirst().first, .read(key: key, maximumBytes: PrivateContent.maximumBytes),
                            route.rawValue + ": an outcome that does not say the bytes landed is always read back")
             assertEqual(try await intents(target).map(\.state), ["uncertain", "settled", "settled"], route.rawValue)
+            XCTAssertEqual(box.drain(), [.init(kind: "existing_verified", role: "original", keys: ["kind", "role"]),
+                                         .init(kind: "created", role: "rendition", keys: ["kind", "role"])],
+                           route.rawValue)
         }
     }
 
@@ -346,10 +378,12 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
     /// they did. Without the readback this is indistinguishable from row 14a and
     /// every unlucky upload would be thrown away.
     func testAPutWhoseAcknowledgementWasLostButWhoseBytesLandedSettlesOnBothRoutes() async throws {
+        let box = capturingLogs()
         for route in Route.allCases {
             let target = try await allocated(route)
             await store.dropNextPutResponse()
             let mark = await mark()
+            box.drain()
             let response = try await put(target)
             XCTAssertEqual(response.status, .ok, route.rawValue + " → " + response.body.string)
             assertEqual(try await state(target), "ready", route.rawValue)
@@ -358,6 +392,11 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
             XCTAssertEqual(calls.count, 3, route.rawValue + ": put, readback, then the rendition — \(calls)")
             XCTAssertEqual(calls[1], .read(key: key, maximumBytes: PrivateContent.maximumBytes), route.rawValue)
             assertEqual(try await intents(target).map(\.state), ["settled", "settled"], route.rawValue)
+            // Row 11 and row 1 answer a client identically. Only this line says
+            // that an acknowledgement was lost and the readback carried the write.
+            XCTAssertEqual(box.drain(), [.init(kind: "unknown_verified", role: "original", keys: ["kind", "role"]),
+                                         .init(kind: "created", role: "rendition", keys: ["kind", "role"])],
+                           route.rawValue)
         }
     }
 
@@ -369,18 +408,21 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
     /// the photograph is gone rather than invited to retry something that can
     /// never succeed, and the fence's own bytes are never disclosed.
     func testAFencedAddressNeverAcceptsContentAndNeverReportsSuccessOnBothRoutes() async throws {
+        let box = capturingLogs()
         for route in Route.allCases {
             for lostAcknowledgement in [false, true] {
                 let target = try await allocated(route)
                 let key = try await boundButEmpty(target)
                 try await store.seedErasureFence(key: key)
                 if lostAcknowledgement { await store.failNextPut() }
+                box.drain()
                 let response = try await put(target)
                 XCTAssertEqual(response.status, .gone, route.rawValue + " → " + response.body.string)
                 XCTAssertTrue(response.body.string.contains("media_erased"), response.body.string)
                 XCTAssertTrue(response.body.string.contains("This photo is no longer available"), response.body.string)
                 XCTAssertFalse(response.body.string.contains(ObjectErasureFenceService.marker), response.body.string)
                 assertDiscloses(response, nothingAbout: target, key: key)
+                XCTAssertEqual(box.drain(), [.init(kind: "erased", role: nil, keys: ["kind"])], route.rawValue)
                 assertEqual(try await state(target), "allocated", route.rawValue)
                 assertTrue(await store.isFenced(key), route.rawValue + ": the fence still holds the address")
                 assertFalse(try await intents(target).contains(where: { $0.state == "settled" }),
@@ -394,17 +436,22 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
     /// Rows 7 and 13. The address is occupied by something that is not ours, and
     /// create-only will keep refusing, so the answer is terminal and says so.
     func testAnAddressHoldingSomebodyElsesObjectIsATerminalConflictOnBothRoutes() async throws {
+        let box = capturingLogs()
         for route in Route.allCases {
             for lostAcknowledgement in [false, true] {
                 let target = try await allocated(route)
                 let key = try await boundButEmpty(target)
                 try await store.seedContent(key: key, data: Self.foreign, contentType: "image/png")
                 if lostAcknowledgement { await store.failNextPut() }
+                box.drain()
                 let response = try await put(target)
                 XCTAssertEqual(response.status, .conflict, route.rawValue + " → " + response.body.string)
                 XCTAssertTrue(response.body.string.contains("media_key_conflict"), response.body.string)
                 XCTAssertFalse(response.body.string.contains("a different photograph"), response.body.string)
                 assertDiscloses(response, nothingAbout: target, key: key)
+                // The storage-integrity alarm. It is an operator's line, never a
+                // client's: the client is told only to allocate the photo again.
+                XCTAssertEqual(box.drain(), [.init(kind: "key_conflict", role: nil, keys: ["kind"])], route.rawValue)
                 assertEqual(try await state(target), "allocated", route.rawValue)
                 assertEqual(await store.object(at: key)?.data, Self.foreign, route.rawValue + ": nothing overwrote it")
                 assertFalse(try await intents(target).contains(where: { $0.state == "settled" }), route.rawValue)
@@ -419,11 +466,28 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
     /// business. The operator is told which of the four it was, because "the write
     /// never landed" and "R2 is down" need different answers, and before B0.1
     /// split `absent` from a transport failure they were the same line.
+    ///
+    /// **(d) The binding from row to kind is asserted here, through the route.**
+    /// It used to be asserted only through the mapper — `LogKind` to string — and
+    /// nothing anywhere proved which kind each row chooses. Swapping
+    /// `.existsThenAbsent` and `.notLanded` at the two call sites in
+    /// `PrivateObjectAllocationPolicy.issue` left the suite green, and that
+    /// mapping is the entire point of Q1 and of B0.1's `absent`: it is what a B5
+    /// operator reads to decide whether to retry the upload or to go and look at
+    /// storage.
+    ///
+    /// The four measurements are drained one at a time because the fixture that
+    /// binds an address is itself row 14a, and three of these four rows need one.
     func testTheFourUnavailableRowsAreOneAnswerToTheClientOnBothRoutes() async throws {
+        let box = capturingLogs()
         for route in Route.allCases {
+            var observed: [LogKindBox.Line] = []
+
             // 14a: the PUT's outcome was unknown and nothing is at the address.
             let notLanded = try await allocated(route)
+            box.drain()
             let notLandedKey = try await boundButEmpty(notLanded)
+            observed += box.drain()
             assertEqual(try await state(notLanded), "allocated", route.rawValue)
             assertEqual(try await intents(notLanded).map(\.state), ["uncertain"], route.rawValue)
 
@@ -431,7 +495,9 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
             let unreachable = try await allocated(route)
             _ = try await boundButEmpty(unreachable)
             await store.failNextPut(); await store.failNextRead()
+            box.drain()
             let unreachableResponse = try await put(unreachable)
+            observed += box.drain()
             XCTAssertEqual(unreachableResponse.status, .serviceUnavailable, route.rawValue + " → " + unreachableResponse.body.string)
             XCTAssertTrue(unreachableResponse.body.string.contains("media_unavailable"), unreachableResponse.body.string)
 
@@ -440,7 +506,9 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
             let existsKey = try await boundButEmpty(existsThenAbsent)
             try await store.seedContent(key: existsKey, data: Self.png, contentType: "image/png")
             await store.failNextRead(with: PrivateContentStoreError.absent)
+            box.drain()
             let absentResponse = try await put(existsThenAbsent)
+            observed += box.drain()
             XCTAssertEqual(absentResponse.status, .serviceUnavailable, route.rawValue + " → " + absentResponse.body.string)
 
             // 8b: the address was taken and the readback did not answer.
@@ -448,8 +516,15 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
             let takenKey = try await boundButEmpty(readbackUnavailable)
             try await store.seedContent(key: takenKey, data: Self.png, contentType: "image/png")
             await store.failNextRead()
+            box.drain()
             let readbackResponse = try await put(readbackUnavailable)
+            observed += box.drain()
             XCTAssertEqual(readbackResponse.status, .serviceUnavailable, route.rawValue + " → " + readbackResponse.body.string)
+
+            XCTAssertEqual(observed.map(\.kind), ["not_landed", "storage_unreachable", "exists_then_absent", "readback_unavailable"],
+                           route.rawValue + ": each row logs its own kind, in the order the four were driven")
+            XCTAssertTrue(observed.allSatisfy { $0.keys == ["kind"] && $0.role == nil },
+                          route.rawValue + ": a refusal's line carries its kind and nothing else — \(observed)")
 
             for (response, key) in [(unreachableResponse, notLandedKey), (absentResponse, existsKey), (readbackResponse, takenKey)] {
                 XCTAssertTrue(response.body.string.contains("media_unavailable"), response.body.string)
@@ -611,6 +686,15 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
     /// own intent, takes the row's address as the answer and re-runs the write
     /// against it — before any PUT has been issued for the address that lost, so
     /// no object and no intent exist for it.
+    ///
+    /// What this case can and cannot show. It is a race, so which request loses
+    /// is not something it decides: if the second request's own transaction runs
+    /// after the first's `begin` committed, it reads the bound key and never
+    /// raises `BoundElsewhere` at all, and every assertion below holds either
+    /// way. The re-run itself is proved deterministically in
+    /// `testTheLosingWriterTakesTheBoundAddressAndReRunsAgainstIt`; what is
+    /// asserted here is the property two concurrent requests must have whatever
+    /// order they happen to take — one address, one rendition, and one readiness.
     func testTwoConcurrentFirstUploadsOfOneAssetConvergeOnOneAddress() async throws {
         let target = try await allocated(.manager)
         async let first = put(target)
@@ -627,6 +711,129 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
             if case .put(let key, _, _) = call { return key } else { return nil }
         }
         XCTAssertEqual(Set(stored).count, 2, "two addresses were written to in total: \(Set(stored))")
+        // (b) Readiness runs once for one asset. Both answers are the same row,
+        // so they carry the same revision: the loser's readiness transaction
+        // waited at the asset's entity lock, read the row the winner committed and
+        // short-circuited on `ready` rather than running a second `revision + 1`.
+        let revisions = try responses.map { try $0.content.decode(MediaAssetResponse.self).revision }
+        XCTAssertEqual(revisions[0], revisions[1], "two readiness commits for one asset: \(revisions)")
+    }
+
+    /// (a) The `BoundElsewhere` re-run, made to happen rather than hoped for.
+    ///
+    /// The race above cannot prove it: the second request either meets a bound row
+    /// inside its intent transaction, or reads the bound key before it ever starts
+    /// one, and both produce two 200s, two addresses and two settled intents. The
+    /// subtlest thing in the packet had no test that failed when it was broken.
+    ///
+    /// So the race is replaced by the state the race produces. The writer is
+    /// called directly for a row with no address, and the `authorize` closure it
+    /// is handed binds the row to `K` on a connection of its own the first time it
+    /// runs — exactly the state the losing writer meets, produced on purpose, in
+    /// one thread of control. The closure's invocation count is the evidence: two
+    /// would mean the re-run never happened.
+    ///
+    /// The two databases are pinned to event loops of their own because each
+    /// event loop pools one connection: the binding transaction must not be asked
+    /// for the connection the writer's own transaction is holding.
+    ///
+    /// The second disagreement — `guard !rebound` — is deliberately untested.
+    /// Reaching it needs the row's `original_key` to change from one non-NULL
+    /// value to another, or to return to NULL, and `preserve_media_asset_keys`
+    /// refuses both (`IS DISTINCT FROM`). It is an assertion about a rule the
+    /// database keeps, not a branch a test can drive without disabling that rule,
+    /// which nothing in this tree may do.
+    func testTheLosingWriterTakesTheBoundAddressAndReRunsAgainstIt() async throws {
+        let target = try await allocated(.manager)
+        let assetID = target.assetID, projectID = target.project.project.id
+        let workspaceID = target.project.workspaceId, ownerID = try target.owner.requireID()
+        var loops = app.eventLoopGroup.makeIterator()
+        let writerDB = app.databases.database(logger: app.logger, on: loops.next()!)!
+        let binderDB = UnsafeWriteTestBox(value: app.databases.database(logger: app.logger, on: loops.next()!)!)
+
+        // K, drawn before anything is written, exactly as the winning request
+        // would have drawn it.
+        let bound = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: workspaceID, projectID: projectID, app: app)
+        let processed = try PrivateImageProcessor.process(Self.png, mime: "image/png")
+        let invocations = InvocationCounter()
+        let authorize: @Sendable (Database) async throws -> ObjectWriteIntentService.Scope = { _ in
+            if await invocations.next() == 1 {
+                try await binderDB.value.transaction { db in
+                    try await VerifiedIdentityService.sql(db).raw("""
+                        UPDATE media_assets SET original_key = \(bind: bound.key)
+                        WHERE id = \(bind: assetID) AND original_key IS NULL
+                        """).run()
+                }
+            }
+            return .init(userID: ownerID, workspaceID: workspaceID, projectID: projectID)
+        }
+
+        let mark = await mark()
+        let written = try await PrivateMediaWriteService.write(
+            assetID: assetID, workspaceID: workspaceID, projectID: projectID, boundOriginalKey: nil,
+            original: Self.png, mimeType: "image/png", rendition: processed.jpeg,
+            app: app, on: writerDB, logger: app.logger, authorize: authorize)
+
+        XCTAssertEqual(written.originalKey, bound.key, "the address the row was bound to is the address that was written")
+        assertEqual(await invocations.count, 3,
+                    "authorize runs for the attempt that lost, for the re-run, and for the rendition")
+        assertEqual(try await originalKey(target), bound.key)
+        let rendition = try PrivateObjectAllocationPolicy.rendition(of: bound, sha256: written.renditionSHA256, app: app)
+        XCTAssertEqual(written.renditionKey, rendition.key, "the rendition is derived from the row's address, not from the one that lost")
+        let recorded = try await intents(target)
+        XCTAssertEqual(recorded.map(\.key), [bound.key, rendition.key],
+                       "no intent exists for the address that lost: it was refused before `begin` inserted anything")
+        XCTAssertEqual(recorded.map(\.state), ["settled", "settled"])
+        let puts = await calls(since: mark).compactMap { call -> String? in
+            if case .put(let key, _, _) = call { return key } else { return nil }
+        }
+        XCTAssertEqual(puts, [bound.key, rendition.key], "nothing was ever put at the address that lost")
+    }
+
+    /// (b) Readiness takes the asset's entity lock before it reads the row.
+    ///
+    /// The hazard is not whether processing is deterministic. On this runtime the
+    /// rendition is ImageMagick with `-strip`, so two writers of identical bytes
+    /// derive one key and the second's `UPDATE` passes the trigger. It is one step
+    /// earlier: the readiness transaction used to read `state` with a plain
+    /// `SELECT`, so two writers could both see "not ready" and both run the
+    /// `UPDATE` below it. With equal keys that is a double `revision + 1` and a
+    /// rewritten `ready_at`; with unequal keys it is a 23514 for the second, after
+    /// the first has already made the asset ready.
+    ///
+    /// Two concurrent requests cannot show that: whether they interleave inside
+    /// readiness is not something a test decides. So the competing writer is
+    /// replaced by the only thing about it that matters — the lock, held by a
+    /// connection of its own — and what is asserted is that readiness waits for
+    /// it. Without the lock the request is finished while the hold is still on,
+    /// which is precisely the interleaving the lock removes.
+    ///
+    /// Nothing asks the database during the hold. The hold owns one event loop's
+    /// only pooled connection, so an observation made through a row could be
+    /// waiting on the pool rather than reading the answer; the request signals an
+    /// actor instead.
+    func testReadinessWaitsForTheAssetsEntityLockBeforeItReadsTheRow() async throws {
+        let target = try await allocated(.manager)
+        let assetID = target.assetID
+        var loops = app.eventLoopGroup.makeIterator()
+        let holderDB = UnsafeWriteTestBox(value: app.databases.database(logger: app.logger, on: loops.next()!)!)
+        let held = HeldEntityLock()
+        // After the second put both of this upload's writes have returned and both
+        // intents are settled. Readiness is the only thing left for the hold to be
+        // in front of.
+        installNamespace(PutInterceptingStore(inner: store, afterPut: 2) {
+            await held.take("entity:media:\(assetID)", on: holderDB)
+        })
+        let finished = InvocationCounter()
+        async let pending = put(target, signalling: finished)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        assertEqual(await finished.count, 0,
+                    "readiness committed while another writer held the asset's entity lock")
+        await held.release()
+        let response = try await pending
+        XCTAssertEqual(response.status, .ok, response.body.string)
+        assertEqual(try await state(target), "ready")
+        assertEqual(try await intents(target).map(\.state), ["settled", "settled"])
     }
 
     // MARK: - Readiness
@@ -730,12 +937,52 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
             }
         }
         XCTAssertEqual(Set(expected.map(\.2)).count, expected.count, "one identifier per meaning")
-        XCTAssertTrue(box.kinds.isEmpty, "a refusal with no operator fact to report logs nothing")
+        // The two terminal rows are the only refusals with an operator fact of
+        // their own: a fence that held against a live writer, and an address
+        // occupied by something that is not ours. The rest say nothing here.
+        XCTAssertEqual(box.drainKinds(), ["erased", "key_conflict"])
 
         for kind in [PrivateMediaWriteService.LogKind.existsThenAbsent, .readbackUnavailable, .notLanded, .storageUnreachable] {
             _ = PrivateMediaWriteService.abort(PrivateMediaWriteService.Refusal.unavailable(kind), logger: logger)
         }
-        XCTAssertEqual(box.kinds, ["exists_then_absent", "readback_unavailable", "not_landed", "storage_unreachable"])
+        XCTAssertEqual(box.drainKinds(), ["exists_then_absent", "readback_unavailable", "not_landed", "storage_unreachable"])
+    }
+
+    /// (g) The second vocabulary, and the rule that keeps it apart from the first.
+    ///
+    /// `PrivateMediaLogKind` answers one question — why could this photograph not
+    /// be had — and every one of its cases sits behind a single 503. These five
+    /// answer a different one: which row did this key take. Three are successes,
+    /// and the two that are not carry their own statuses, so folding them in would
+    /// make `PrivateMediaLogKind`'s own contract false and would let
+    /// `Refusal.unavailable` be constructed with `created`.
+    ///
+    /// They share one metadata key and must never share a spelling, or `kind`
+    /// stops being one greppable column. Written out by hand: a test that derived
+    /// the strings from the enum would pass whatever the enum said, which is the
+    /// one thing a durable vocabulary test must not do.
+    func testTheWriteOutcomeVocabularyIsFixedAndDisjointFromTheOthers() {
+        let spellings: [PrivateMediaWriteService.Outcome: String] = [
+            .created: "created",
+            .existingVerified: "existing_verified",
+            .unknownVerified: "unknown_verified",
+            .erased: "erased",
+            .keyConflict: "key_conflict",
+        ]
+        for (outcome, spelling) in spellings { XCTAssertEqual(outcome.rawValue, spelling) }
+        XCTAssertEqual(spellings.count, PrivateMediaWriteService.Outcome.allCases.count,
+                       "an outcome was added or removed without being written down here")
+        let outcomes = Set(PrivateMediaWriteService.Outcome.allCases.map(\.rawValue))
+        XCTAssertEqual(outcomes.count, PrivateMediaWriteService.Outcome.allCases.count, "one spelling per outcome")
+        XCTAssertTrue(outcomes.isDisjoint(with: Set(PrivateMediaLogKind.allCases.map(\.rawValue))),
+                      "one metadata key, two vocabularies, never one spelling")
+        XCTAssertTrue(outcomes.isDisjoint(with: Set(DeletionReasonKind.allCases.map(\.rawValue))))
+
+        // The three settling rows, mapped from the policy's own return type: the
+        // word an operator reads is chosen here and nowhere else.
+        XCTAssertEqual(PrivateMediaWriteService.Outcome(.created), .created)
+        XCTAssertEqual(PrivateMediaWriteService.Outcome(.existingVerified), .existingVerified)
+        XCTAssertEqual(PrivateMediaWriteService.Outcome(.unknownVerified), .unknownVerified)
     }
 
     // MARK: - Helpers that need the fixtures above
@@ -792,8 +1039,31 @@ private actor PutInterceptingStore: PrivateContentStorage {
     }
 }
 
-/// Collects the `kind` of each line a refusal logged. Test-local.
-private final class LogKindBox: @unchecked Sendable { var kinds: [String] = [] }
+/// Every private-media line a test produced, as an operator would read it.
+///
+/// Lines are drained rather than accumulated. A fixture logs exactly as a
+/// measured case does — the interrupted attempt that binds an address is itself a
+/// `not_landed` — so a test that read a running total would be asserting on its
+/// own scaffolding as much as on the row under test.
+private final class LogKindBox: @unchecked Sendable {
+    struct Line: Equatable {
+        let kind: String
+        let role: String?
+        /// Every metadata key the line carried. A private-media line may carry
+        /// `kind` and `role` and nothing else: no key, bucket, ETag, namespace or
+        /// grant token has any business in a log, which is read by more people and
+        /// kept in more places than the bucket it describes.
+        let keys: [String]
+    }
+    private let mutex = NSLock()
+    private var lines: [Line] = []
+    func append(_ line: Line) { mutex.lock(); lines.append(line); mutex.unlock() }
+    /// Everything logged since the last drain, and resets.
+    @discardableResult
+    func drain() -> [Line] { mutex.lock(); defer { lines = []; mutex.unlock() }; return lines }
+    @discardableResult
+    func drainKinds() -> [String] { drain().map(\.kind) }
+}
 
 private struct CapturingLogHandler: LogHandler {
     let box: LogKindBox
@@ -805,6 +1075,55 @@ private struct CapturingLogHandler: LogHandler {
     }
     func log(level: Logger.Level, message: Logger.Message, metadata: Logger.Metadata?,
              source: String, file: String, function: String, line: UInt) {
-        if let kind = metadata?["kind"] { box.kinds.append("\(kind)") }
+        guard let metadata, let kind = metadata["kind"] else { return }
+        box.append(.init(kind: "\(kind)", role: metadata["role"].map { "\($0)" }, keys: metadata.keys.sorted()))
     }
+}
+
+/// Counts how many times a closure the writer owns was invoked. The count is the
+/// evidence a re-run happened: two invocations where three were expected means
+/// the losing writer never re-ran.
+private actor InvocationCounter {
+    private(set) var count = 0
+    @discardableResult
+    func next() -> Int { count += 1; return count }
+}
+
+/// Holds one advisory transaction lock on a connection of its own, for as long as
+/// a test needs it.
+///
+/// `pg_advisory_xact_lock` lives and dies with its transaction, so holding one
+/// across an `await` means keeping a transaction open: a task of its own, one
+/// signal when the lock is taken and one to let it go. The hold is bounded, so a
+/// test that fails before releasing cannot wedge a suite.
+private actor HeldEntityLock {
+    private var taken = false
+    private var releasing = false
+    private var holder: Task<Void, Never>?
+
+    /// `database` must be bound to an event loop of its own. The transaction that
+    /// holds the lock holds that loop's single pooled connection for the whole
+    /// hold, so anything else asking the same loop for a connection would wait on
+    /// the pool rather than on the lock — which is not what is being tested.
+    func take(_ key: String, on database: UnsafeWriteTestBox<any Database>) async {
+        holder = Task.detached { [self] in
+            try? await database.value.transaction { db in
+                try await VerifiedIdentityService.lock(key, on: db)
+                await self.markTaken()
+                var waited = 0
+                while await self.isReleasing() == false, waited < 1_200 {
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                    waited += 1
+                }
+            }
+        }
+        var waited = 0
+        while !taken, waited < 1_200 {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+            waited += 1
+        }
+    }
+    private func markTaken() { taken = true }
+    private func isReleasing() -> Bool { releasing }
+    func release() async { releasing = true; _ = await holder?.value }
 }

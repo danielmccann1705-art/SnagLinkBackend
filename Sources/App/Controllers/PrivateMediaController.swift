@@ -123,6 +123,22 @@ struct PrivateMediaController: RouteCollection {
         return try await req.db.transaction { db in
             let (project, actions) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
             try PlatformMutationService.requireManaged(project)
+            // (b) The asset's entity lock, before the row is read.
+            //
+            // Two writers of one asset both reach this transaction. Reading
+            // `state` without a lock lets both see "not ready" and both run the
+            // UPDATE below: with equal keys that is a double `revision + 1` and a
+            // rewritten `ready_at`, and with unequal keys it is a 23514 for the
+            // second after the first has already made the asset ready. The lock is
+            // the one `allocate` and the intent transaction take, so the loser
+            // reads the row the winner committed and short-circuits on `ready`.
+            //
+            // It is taken here rather than as the transaction's first statement so
+            // that the order is the one the intent transaction now fixes —
+            // workspace, then media entity, then row. Re-authorization above has
+            // already taken `workspace:<W>`; taking the entity lock before it
+            // would invert the two and make a cycle out of closing one.
+            try await VerifiedIdentityService.lock("entity:media:\(assetID)", on: db)
             let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: projectID, on: db)
             try PrivateMediaService.requireUploader(row, actorID: actorID)
             guard actions.contains(prepared.response.purpose == "completion" ? .submitCompletion : .edit) else { throw Abort(.forbidden) }

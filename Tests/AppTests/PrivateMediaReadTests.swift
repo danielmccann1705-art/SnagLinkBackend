@@ -41,7 +41,6 @@ final class PrivateMediaReadTests: XCTestCase {
         app.storage[PrivateObjectAllocationPolicy.InjectionKey.self] = configuration
         app.storage[PrivateContentStoreProvider.InjectionKey.self] = storage ?? store
     }
-    private func lower(_ id: UUID) -> String { id.uuidString.lowercased() }
 
     private func user() async throws -> User {
         try await app.db.transaction { db in try await VerifiedIdentityService.resolveEmail("read-\(UUID())@example.test", name: "Synthetic photo reader", on: db) }
@@ -83,16 +82,25 @@ final class PrivateMediaReadTests: XCTestCase {
          "sha256": PrivateImageProcessor.digest(Self.png), "byteCount": Self.png.count, "mimeType": "image/png"]
     }
 
-    /// One ready asset at a historical `platform/` address: an object written
-    /// before the namespace existed, which is the only way such a row can exist.
+    /// One ready asset, at the two addresses it is given.
     ///
     /// It used to be produced by driving the upload route. B2 made that
     /// impossible in both directions, deliberately: allocation now draws a
     /// namespaced key or refuses, and `StorageService.uploadPrivate` — the
     /// unconditional writer that put bytes at the historical location — is gone.
-    /// A historical row is therefore written the way a historical row got there,
-    /// directly, and the store is never touched, so a call log means what these
-    /// tests read it to mean.
+    /// A ready row is therefore written the way a ready row got there, directly,
+    /// and the store is never touched, so a call log means what these tests read
+    /// it to mean.
+    ///
+    /// **Both addresses are parameters of the `INSERT`, and nothing moves
+    /// afterwards.** The earlier shape inserted a `platform/` row and then
+    /// repointed it, which meant lifting `preserve_media_asset_keys` for the
+    /// statement that did the repointing — a trigger whose entire job is to make
+    /// an address final, switched off so that a fixture could do the one thing it
+    /// exists to forbid. A fixture that needs a shape production can produce
+    /// inserts it: NULL → value is the transition the trigger permits, and a
+    /// fresh row is born at whichever pair of addresses the test needs. No test
+    /// in this tree disables a trigger or a constraint.
     private struct Ready {
         let actor: User
         let project: PlatformProjectResponse
@@ -101,8 +109,12 @@ final class PrivateMediaReadTests: XCTestCase {
         let assetID: UUID
         let renditionBytes: Data
         let renditionSHA: String
+        /// The two addresses the row carries, whatever shape they were given.
+        let originalKey: String
+        let renditionKey: String
     }
-    private func ready(_ existingActor: User? = nil, project existingProject: PlatformProjectResponse? = nil) async throws -> Ready {
+    private func ready(_ existingActor: User? = nil, project existingProject: PlatformProjectResponse? = nil,
+                       original originalKey: String? = nil, rendition renditionKey: String? = nil) async throws -> Ready {
         let actor: User
         if let existingActor { actor = existingActor } else { actor = try await user() }
         let project: PlatformProjectResponse
@@ -113,7 +125,8 @@ final class PrivateMediaReadTests: XCTestCase {
         let processed = try PrivateImageProcessor.process(Self.png, mime: "image/png")
         let renditionSHA = PrivateImageProcessor.digest(processed.jpeg)
         let prefix = "platform/\(project.workspaceId)/\(project.project.id)/\(assetID)"
-        let original = prefix + "/original", rendition = prefix + "/view-\(renditionSHA).jpg"
+        let original = originalKey ?? (prefix + "/original")
+        let rendition = renditionKey ?? (prefix + "/view-\(renditionSHA).jpg")
         try await VerifiedIdentityService.sql(app.db).raw("""
             INSERT INTO media_assets (id, workspace_id, project_id, snag_id, creator_id, purpose, state,
                 original_sha256, original_size, original_mime, original_key, rendition_key,
@@ -124,50 +137,40 @@ final class PrivateMediaReadTests: XCTestCase {
                 \(bind: renditionSHA), \(bind: processed.jpeg.count), \(bind: processed.width), \(bind: processed.height),
                 \(bind: snag.revision), NOW(), NOW() + INTERVAL '1 day', NOW())
             """).run()
-        for (key, bytes) in [(original, Self.png), (rendition, processed.jpeg)] {
+        // Only a historical address has a historical reader. A namespaced key is
+        // served from the content store, and an object of its own on the disk path
+        // would make the routing assertions meaningless.
+        for (key, bytes) in [(original, Self.png), (rendition, processed.jpeg)]
+        where key.hasPrefix(PrivateObjectAllocationPolicy.legacyMediaPrefix) {
             let url = URL(fileURLWithPath: app.directory.workingDirectory)
                 .appendingPathComponent("PrivateMedia").appendingPathComponent(key)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try bytes.write(to: url)
         }
         return .init(actor: actor, project: project, snag: snag, path: route, assetID: assetID,
-                     renditionBytes: processed.jpeg, renditionSHA: renditionSHA)
+                     renditionBytes: processed.jpeg, renditionSHA: renditionSHA,
+                     originalKey: original, renditionKey: rendition)
     }
 
-    /// Repoints a ready row at two namespaced addresses and puts the same bytes
-    /// there. B2 makes this the ordinary case; until then it is the only way to
-    /// hold a namespaced row against the reader that has to serve it.
-    @discardableResult
-    private func moveIntoNamespace(_ ready: Ready, seed: Bool = true,
-                                   rendition renditionBytes: Data? = nil) async throws -> (original: String, rendition: String) {
-        let original = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: ready.project.workspaceId, projectID: ready.project.project.id, app: app)
-        let rendition = try PrivateObjectAllocationPolicy.rendition(of: original, sha256: ready.renditionSHA, app: app)
+    /// One ready asset born inside the namespace: the two addresses are drawn
+    /// from the policy, the bytes are seeded at them, and the row is inserted
+    /// carrying them. This is the ordinary shape of a ready row after B2, and it
+    /// is now also the shape these fixtures use.
+    private func readyInNamespace(_ existingActor: User? = nil, project existingProject: PlatformProjectResponse? = nil,
+                                  seed: Bool = true, rendition renditionBytes: Data? = nil) async throws -> Ready {
+        let actor: User
+        if let existingActor { actor = existingActor } else { actor = try await user() }
+        let project: PlatformProjectResponse
+        if let existingProject { project = existingProject } else { project = try await self.project(actor) }
+        let processed = try PrivateImageProcessor.process(Self.png, mime: "image/png")
+        let renditionSHA = PrivateImageProcessor.digest(processed.jpeg)
+        let original = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: project.workspaceId, projectID: project.project.id, app: app)
+        let rendition = try PrivateObjectAllocationPolicy.rendition(of: original, sha256: renditionSHA, app: app)
         if seed {
             try await store.seedContent(key: original.key, data: Self.png, contentType: "image/png")
-            try await store.seedContent(key: rendition.key, data: renditionBytes ?? ready.renditionBytes)
+            try await store.seedContent(key: rendition.key, data: renditionBytes ?? processed.jpeg)
         }
-        try await rebind(ready, original: original.key, rendition: rendition.key)
-        return (original.key, rendition.key)
-    }
-    /// Moving a ready row onto two other addresses is something production must
-    /// never do — B2's `preserve_media_asset_keys` makes an address final, because
-    /// under create-only the first one is spent and a row that forgot it would
-    /// abandon the object it named. These tests still need a namespaced row to
-    /// hold against the reader, and the grant, workflow and attachment rows
-    /// already point at this asset, so the row is moved rather than replaced and
-    /// the guard is lifted for exactly that statement.
-    private func rebind(_ ready: Ready, original: String, rendition: String) async throws {
-        let sql = try VerifiedIdentityService.sql(app.db)
-        try await sql.raw("ALTER TABLE media_assets DISABLE TRIGGER preserve_media_asset_keys").run()
-        do {
-            try await sql.raw("""
-                UPDATE media_assets SET original_key = \(bind: original), rendition_key = \(bind: rendition) WHERE id = \(bind: ready.assetID)
-                """).run()
-        } catch {
-            try await sql.raw("ALTER TABLE media_assets ENABLE TRIGGER preserve_media_asset_keys").run()
-            throw error
-        }
-        try await sql.raw("ALTER TABLE media_assets ENABLE TRIGGER preserve_media_asset_keys").run()
+        return try await ready(actor, project: project, original: original.key, rendition: rendition.key)
     }
 
     // MARK: the Contractor link route
@@ -203,8 +206,7 @@ final class PrivateMediaReadTests: XCTestCase {
     /// nothing was written to or read from the historical location.
     func testANamespacedPhotographIsServedThroughTheContentStoreOnBothRoutes() async throws {
         installNamespace()
-        let fixture = try await ready()
-        let keys = try await moveIntoNamespace(fixture)
+        let fixture = try await readyInNamespace()
         let contractorRoute = try await contractorLink(fixture)
 
         let processed = try await call(.GET, fixture.path + "/\(fixture.assetID)/content", fixture.actor)
@@ -225,11 +227,11 @@ final class PrivateMediaReadTests: XCTestCase {
         // the ceiling rather than a declared size — so a size disagreement is a
         // verification failure and never a truncated photograph.
         let calls = await store.recordedCalls()
-        XCTAssertEqual(calls, [.read(key: keys.rendition, maximumBytes: PrivateContent.maximumBytes),
-                               .read(key: keys.original, maximumBytes: PrivateContent.maximumBytes),
-                               .read(key: keys.rendition, maximumBytes: PrivateContent.maximumBytes)])
+        XCTAssertEqual(calls, [.read(key: fixture.renditionKey, maximumBytes: PrivateContent.maximumBytes),
+                               .read(key: fixture.originalKey, maximumBytes: PrivateContent.maximumBytes),
+                               .read(key: fixture.renditionKey, maximumBytes: PrivateContent.maximumBytes)])
         // And nothing put a namespaced object on the historical local path.
-        XCTAssertFalse(FileManager.default.fileExists(atPath: app.directory.workingDirectory + "PrivateMedia/" + keys.original))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: app.directory.workingDirectory + "PrivateMedia/" + fixture.originalKey))
     }
 
     /// The other half of the same rule. `.legacy` is a positive statement about an
@@ -259,12 +261,11 @@ final class PrivateMediaReadTests: XCTestCase {
     /// "temporarily unavailable" about something that can never come back.
     func testAFencedNamespacedKeyIsGoneOnBothRoutesAndItsOwnBytesAreNeverServed() async throws {
         installNamespace()
-        let fixture = try await ready()
-        let keys = try await moveIntoNamespace(fixture)
+        let fixture = try await readyInNamespace()
         let contractorRoute = try await contractorLink(fixture)
-        try await store.seedErasureFence(key: keys.rendition)
-        try await store.seedErasureFence(key: keys.original)
-        let fenced = await store.isFenced(keys.rendition)
+        try await store.seedErasureFence(key: fixture.renditionKey)
+        try await store.seedErasureFence(key: fixture.originalKey)
+        let fenced = await store.isFenced(fixture.renditionKey)
         XCTAssertTrue(fenced)
 
         for route in [fixture.path + "/\(fixture.assetID)/content", fixture.path + "/\(fixture.assetID)/original", contractorRoute] {
@@ -283,8 +284,7 @@ final class PrivateMediaReadTests: XCTestCase {
     /// unavailable; the operator is told which of the two facts it was.
     func testAnAbsentNamespacedObjectIsTemporarilyUnavailableRatherThanFoundEmpty() async throws {
         installNamespace()
-        let fixture = try await ready()
-        try await moveIntoNamespace(fixture, seed: false)
+        let fixture = try await readyInNamespace(seed: false)
 
         // Nothing was seeded, so both addresses answer `absent`.
         for route in [fixture.path + "/\(fixture.assetID)/content", fixture.path + "/\(fixture.assetID)/original"] {
@@ -300,13 +300,12 @@ final class PrivateMediaReadTests: XCTestCase {
     /// kind for the operator, which is the whole reason B0.1 split the two.
     func testStorageThatDoesNotAnswerIsTemporarilyUnavailableAndSaysNothingElse() async throws {
         installNamespace()
-        let fixture = try await ready()
-        let keys = try await moveIntoNamespace(fixture)
+        let fixture = try await readyInNamespace()
         await store.failNextRead()
         let response = try await call(.GET, fixture.path + "/\(fixture.assetID)/content", fixture.actor)
         XCTAssertEqual(response.status, .serviceUnavailable, response.body.string)
         XCTAssertTrue(response.body.string.contains("media_unavailable"), response.body.string)
-        XCTAssertFalse(response.body.string.contains(keys.rendition), "a storage refusal never carries an address to the client")
+        XCTAssertFalse(response.body.string.contains(fixture.renditionKey), "a storage refusal never carries an address to the client")
         XCTAssertFalse(response.body.string.contains(configuration.target.bucket))
         XCTAssertFalse(response.body.string.contains(configuration.target.namespace))
     }
@@ -323,8 +322,7 @@ final class PrivateMediaReadTests: XCTestCase {
         let invite = try await app.db.transaction { db in try await WorkspaceInvitationService.issue(workspaceID: project.workspaceId, email: member.email!, role: "member", projects: [.init(projectId: project.project.id, role: "member")], actorID: owner.requireID(), on: db) }
         _ = try await app.db.transaction { db in try await WorkspaceInvitationService.accept(token: invite.1, actorID: member.requireID(), on: db) }
         installNamespace()
-        let fixture = try await ready(member, project: project)
-        let keys = try await moveIntoNamespace(fixture)
+        let fixture = try await readyInNamespace(member, project: project)
 
         let box = UnsafeTestBox(value: (app!, project.workspaceId, try member.requireID(), try owner.requireID()))
         installNamespace(ReadInterceptingStore(inner: store) {
@@ -338,7 +336,7 @@ final class PrivateMediaReadTests: XCTestCase {
         XCTAssertEqual(response.status, .notFound, response.body.string)
         XCTAssertNotEqual(Data(buffer: response.body), fixture.renditionBytes)
         let calls = await store.recordedCalls()
-        XCTAssertEqual(calls, [.read(key: keys.rendition, maximumBytes: PrivateContent.maximumBytes)],
+        XCTAssertEqual(calls, [.read(key: fixture.renditionKey, maximumBytes: PrivateContent.maximumBytes)],
                        "the bytes were fetched and then refused, which is what makes this the post-fetch check")
     }
 
@@ -350,8 +348,7 @@ final class PrivateMediaReadTests: XCTestCase {
     /// legacy reader, whose validator would report a correct row as a server fault.
     func testANamespacedRowIsRefusedAsStorageUnavailableWhenTheNamespaceIsOffOrWrong() async throws {
         installNamespace()
-        let fixture = try await ready()
-        let keys = try await moveIntoNamespace(fixture)
+        let fixture = try await readyInNamespace()
 
         // The switch off. Nothing injected, and `configure` resolved `.absent`.
         app.storage[PrivateObjectAllocationPolicy.InjectionKey.self] = nil
@@ -367,7 +364,7 @@ final class PrivateMediaReadTests: XCTestCase {
         let wrong = try await call(.GET, fixture.path + "/\(fixture.assetID)/content", fixture.actor)
         XCTAssertEqual(wrong.status, .serviceUnavailable, wrong.body.string)
         XCTAssertTrue(wrong.body.string.contains("media_storage_unavailable"), wrong.body.string)
-        XCTAssertFalse(wrong.body.string.contains(keys.rendition))
+        XCTAssertFalse(wrong.body.string.contains(fixture.renditionKey))
 
         let calls = await store.recordedCalls()
         XCTAssertTrue(calls.isEmpty, "without an installed namespace there is no store to ask")
@@ -382,9 +379,8 @@ final class PrivateMediaReadTests: XCTestCase {
     /// digest happens to catch.
     func testNamespacedBytesThatAreNotTheRowsBytesAreRefusedByTheIntegrityCheckOnBothRoutes() async throws {
         installNamespace()
-        let fixture = try await ready()
+        let fixture = try await readyInNamespace(rendition: Data([255, 216, 255]) + Data("a different photograph".utf8))
         let contractorRoute = try await contractorLink(fixture)
-        try await moveIntoNamespace(fixture, rendition: Data([255, 216, 255]) + Data("a different photograph".utf8))
         for route in [fixture.path + "/\(fixture.assetID)/content", contractorRoute] {
             let response = try await call(.GET, route, route == contractorRoute ? nil : fixture.actor)
             XCTAssertEqual(response.status, .serviceUnavailable, route + " → " + response.body.string)
@@ -399,13 +395,16 @@ final class PrivateMediaReadTests: XCTestCase {
     /// row is a server fault rather than something a client should retry.
     func testAReadyRowCarryingAnUnreadableNamespacedAddressIsAServerFaultNotARetry() async throws {
         installNamespace()
-        let fixture = try await ready()
-        let keys = try await moveIntoNamespace(fixture)
-        let namespace = configuration.target.namespace
+        let actor = try await user(), project = try await self.project(actor)
 
-        for corrupt in [String(keys.original.dropLast("original".count)) + "view.jpg",
-                        namespace + "media/\(lower(UUID()))/\(lower(UUID()))/\(lower(UUID()))/thumbnail.jpg"] {
-            try await rebind(fixture, original: keys.original, rendition: corrupt)
+        // One row per corrupt address, each born carrying it. The two are the two
+        // distinct ways a namespaced rendition key can be unreadable: the
+        // allocation placeholder, which names an object that never existed, and a
+        // shape this policy never allocates at all.
+        for suffix in ["view.jpg", "thumbnail.jpg"] {
+            let drawn = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: project.workspaceId, projectID: project.project.id, app: app)
+            let corrupt = String(drawn.key.dropLast("original".count)) + suffix
+            let fixture = try await ready(actor, project: project, original: drawn.key, rendition: corrupt)
             let response = try await call(.GET, fixture.path + "/\(fixture.assetID)/content", fixture.actor)
             XCTAssertEqual(response.status, .internalServerError, corrupt + " → " + response.body.string)
             XCTAssertTrue(response.body.string.contains("request_failed"), response.body.string)

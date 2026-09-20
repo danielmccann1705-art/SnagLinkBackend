@@ -160,6 +160,36 @@ enum PrivateObjectAllocationPolicy {
     /// and an original is not, so they are not interchangeable.
     enum Role: String, Sendable, Equatable { case original, rendition }
 
+    /// Which of the three settling rows a write took, returned rather than
+    /// discarded.
+    ///
+    /// The three are the whole of the table that ends with an intent `settled`:
+    /// row 1 created the object, row 5 found the intent's own bytes already at the
+    /// address, row 11 lost the acknowledgement and found them there anyway. Every
+    /// other row throws, so a value of this type is itself the statement that the
+    /// bytes at the key are provably this intent's bytes.
+    ///
+    /// It is returned because the difference is invisible from outside and matters
+    /// to exactly one reader: an operator watching the first real R2 uploads. A
+    /// run of `unknown_verified` says acknowledgements are being lost and the
+    /// readback is carrying the path; a single `existing_verified` on a first
+    /// upload says a client retried something it was told had failed. Neither is
+    /// visible in a status code, because all three are 200.
+    ///
+    /// It carries no spelling of its own: the word an operator reads is
+    /// `PrivateMediaWriteService.Outcome`, which is the only place a log line's
+    /// vocabulary is fixed.
+    enum Settled: Sendable, Equatable {
+        /// Row 1. A create-only acknowledgement for an object this PUT made.
+        case created
+        /// Row 5. The address was already taken, and the readback proved that what
+        /// is at it is this intent's own bytes.
+        case existingVerified
+        /// Row 11. The PUT's outcome was unknown and the readback found this
+        /// intent's own bytes at the address.
+        case unknownVerified
+    }
+
     /// One object: the kind it belongs to, the target that owns it, and the single
     /// address it will ever have.
     ///
@@ -359,9 +389,10 @@ enum PrivateObjectAllocationPolicy {
     /// The store is resolved **before** the intent exists, so a target with no
     /// store leaves no row behind — the same reason A3 moved the content checks
     /// ahead of `begin`.
+    @discardableResult
     static func write(_ allocation: Allocation, data: Data, contentType: String,
                       source: ObjectWriteIntentService.Source, app: Application, on database: Database,
-                      authorize: @escaping @Sendable (Database) async throws -> ObjectWriteIntentService.Scope) async throws {
+                      authorize: @escaping @Sendable (Database) async throws -> ObjectWriteIntentService.Scope) async throws -> Settled {
         try requireContent(allocation, data: data, contentType: contentType)
         let store: any PrivateContentStorage
         do { store = try PrivateContentStoreProvider.store(for: allocation.target, app: app) }
@@ -369,8 +400,8 @@ enum PrivateObjectAllocationPolicy {
         let object = ObjectWriteIntentService.Object(storageKind: allocation.storageKind, key: allocation.key,
                                                      data: data, contentType: contentType)
         let key = allocation.key, sha256 = object.sha256
-        try await ObjectWriteIntentService.write(object, source: source, allocation: allocation,
-                                                 on: database, authorize: authorize) {
+        return try await ObjectWriteIntentService.write(object, source: source, allocation: allocation,
+                                                        on: database, authorize: authorize) {
             try await issue(store: store, key: key, data: data, contentType: contentType, sha256: sha256)
         }
     }
@@ -391,7 +422,7 @@ enum PrivateObjectAllocationPolicy {
     /// is classified by its digest — a terminal conflict — instead of looking like
     /// a transport failure that a retry might clear.
     private static func issue(store: any PrivateContentStorage, key: String, data: Data,
-                              contentType: String, sha256: String) async throws {
+                              contentType: String, sha256: String) async throws -> Settled {
         var outcome: PutOutcome?
         do {
             outcome = try await store.put(key: key, data: data, contentType: contentType)
@@ -411,7 +442,7 @@ enum PrivateObjectAllocationPolicy {
             // meaning, and it is the load-bearing one: the outcome is unknown.
             outcome = nil
         }
-        if case .created = outcome { return }                                   // row 1
+        if case .created = outcome { return .created }                          // row 1
         let existed = outcome != nil                                            // `alreadyExists`
         let readback: Readback
         do {
@@ -437,6 +468,10 @@ enum PrivateObjectAllocationPolicy {
         // this digest, at this key"; the readback either verifies it or finds
         // somebody else's object at an address create-only will keep refusing.
         guard readback.sha256 == sha256 else { throw PrivateMediaWriteService.Refusal.keyConflict }
+        // Rows 5 and 11. Both settle, and they are not the same fact: one is an
+        // address that was already taken, the other an acknowledgement this
+        // process never received. Only the caller's log tells them apart.
+        return existed ? .existingVerified : .unknownVerified
     }
 
     private static func isDigest(_ value: String) -> Bool {
