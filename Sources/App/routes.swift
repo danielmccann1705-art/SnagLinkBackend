@@ -134,16 +134,18 @@ func routes(_ app: Application) throws {
         )
     }
 
-    // MARK: - Legal Pages
-    app.get("privacy") { req async -> Response in
-        let html = LegalPageRenderer.privacyPolicy()
-        return Response(status: .ok, headers: ["Content-Type": "text/html; charset=utf-8"], body: .init(string: html))
-    }
-
-    app.get("terms") { req async -> Response in
-        let html = LegalPageRenderer.termsOfService()
-        return Response(status: .ok, headers: ["Content-Type": "text/html; charset=utf-8"], body: .init(string: html))
-    }
+    // MARK: - Legal pages
+    //
+    // There is one privacy policy and one set of terms, and they are published on
+    // the customer website. This host used to render a second copy of both, which
+    // nothing linked to and which drifted: it named a hosting provider we do not
+    // use, an unmonitored address, and analytics nobody collects, while the page
+    // Apple is given said something else. Two policies that have to be kept in step
+    // is a promise nobody can keep, so these redirect to the one that is published
+    // rather than restating it. Permanent, and straight to the destination: adding
+    // a hop through snaglist.dev would leave a second redirector to maintain.
+    app.get("privacy") { _ async -> Response in LegalPageRedirect.privacy }
+    app.get("terms") { _ async -> Response in LegalPageRedirect.terms }
 
     // MARK: - Controllers
     try app.register(collection: WebReportController())

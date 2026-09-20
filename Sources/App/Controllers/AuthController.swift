@@ -39,7 +39,16 @@ struct AuthController: RouteCollection {
         let email = appleToken.email
 
         let user = try await req.db.transaction { db in
-            try await VerifiedIdentityService.resolveApple(subject: appleUserId, email: email, name: input.firstName, on: db)
+            let user = try await VerifiedIdentityService.resolveApple(subject: appleUserId, email: email, name: input.firstName, on: db)
+            // The same adoption the web Apple path performs. Without it a person who
+            // signs in with Apple on their phone has only an `apple` identity, so a
+            // sign-in link sent to that address in a browser cannot resolve to this
+            // account and Google would make a second one. Relay addresses from Hide
+            // My Email adopt exactly like any other verified address.
+            if appleToken.emailVerified?.value == true, let email, !email.isEmpty {
+                _ = try await VerifiedIdentityService.adoptProviderVerifiedEmail(email, to: user.requireID(), on: db)
+            }
+            return user
         }
 
         // The app has always sent the authorization code; until now the server dropped

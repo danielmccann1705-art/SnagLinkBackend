@@ -29,7 +29,7 @@ struct VerifiedIdentityService {
         }
         let legacy = try await sql(db).raw("SELECT id FROM users WHERE lower(btrim(email)) = \(bind: email) LIMIT 1").first()
         guard legacy == nil else {
-            throw Abort(.conflict, reason: "Open Snaglist with your existing account and verify this email in Account settings. An existing profile cannot be linked by email alone", identifier: "identity_proof_required")
+            throw Abort(.conflict, reason: "This email already belongs to a Snaglist account. Sign in the way you first did — with Apple, with Google, or with a link to the address shown in the app's Settings. An existing account cannot be claimed by email alone", identifier: "identity_proof_required")
         }
         let user = User(appleUserId: nil, email: email, name: name, authProvider: .magicLink)
         try await user.save(on: db)
