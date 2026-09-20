@@ -312,4 +312,272 @@ final class AccountDeletionObjectFenceTests: XCTestCase {
         app.storage[AccountDeletionFenceProvider.InjectionKey.self] = Storage(target: target())
         XCTAssertThrowsError(try AccountDeletionFenceProvider.store(for: legacy, app: app))
     }
+
+    // MARK: - fixtures for the namespaced cases
+
+    /// The private namespace as the real loader produces it, installed for this
+    /// process only. `allocateMedia` is the one thing that decides a namespaced
+    /// address, so a test that needs one asks the policy rather than writing a
+    /// string that happens to look right.
+    @discardableResult
+    private func installedNamespace() throws -> PrivateStorageTargetConfiguration {
+        let configuration = try TestPrivateContentStore.syntheticConfiguration(namespace: "fences-v1/")
+        app.storage[PrivateObjectAllocationPolicy.InjectionKey.self] = configuration
+        return configuration
+    }
+
+    private struct PersonalGraph { let userID: UUID; let workspaceID: UUID; let projectID: UUID; let snagID: UUID }
+
+    private func personalGraph() async throws -> PersonalGraph {
+        let userID = try await user()
+        let workspace = try await app.db.transaction { try await WorkspaceAccessService.personal(for: userID, on: $0) }
+        let project = Project(id: UUID(), name: "Private project", reference: UUID().uuidString.prefix(8).description, ownerId: userID)
+        project.workspaceId = try workspace.requireID(); project.platformManaged = true
+        try await project.save(on: app.db)
+        let snag = Snag(id: UUID(), reference: "S-1", title: "Synthetic snag", projectId: try project.requireID(), ownerId: userID)
+        snag.workspaceId = project.workspaceId; snag.displayNumber = 1; snag.publishedAt = Date()
+        try await snag.save(on: app.db)
+        return .init(userID: userID, workspaceID: try workspace.requireID(),
+                     projectID: try project.requireID(), snagID: try snag.requireID())
+    }
+
+    /// One media row at exactly the two addresses the caller names. `ready` decides
+    /// whether the rendition column holds the real address or the allocation-time
+    /// placeholder's worth of nothing.
+    private func mediaRow(_ graph: PersonalGraph, original: String, rendition: String, ready: Bool) async throws {
+        let digest: String? = ready ? String(repeating: "b", count: 64) : nil
+        let size: Int? = ready ? 90 : nil
+        let edge: Int? = ready ? 10 : nil
+        let moment: Date? = ready ? Date() : nil
+        try await VerifiedIdentityService.sql(app.db).raw("""
+            INSERT INTO media_assets(id,workspace_id,project_id,snag_id,creator_id,purpose,state,original_sha256,original_size,
+                original_mime,original_key,rendition_key,rendition_sha256,rendition_size,width,height,revision,base_snag_revision,
+                created_at,expires_at,ready_at,attached_at)
+            VALUES(\(bind: UUID()),\(bind: graph.workspaceID),\(bind: graph.projectID),\(bind: graph.snagID),\(bind: graph.userID),
+                'capture',\(bind: ready ? "ready" : "allocated"),\(bind: String(repeating: "a", count: 64)),100,'image/jpeg',
+                \(bind: original),\(bind: rendition),\(bind: digest),\(bind: size),\(bind: edge),\(bind: edge),
+                1,1,NOW(),NOW()+INTERVAL '1 day',\(bind: moment),\(bind: moment))
+            """).run()
+    }
+
+    private func manifestKeys(_ lease: AccountDeletionWorker.Lease, kind: String = "private_media") async throws -> Set<String> {
+        let rows = try await VerifiedIdentityService.sql(app.db).raw("""
+            SELECT object_key FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND storage_kind=\(bind: kind)
+            """).all()
+        return try Set(rows.map { try $0.decode(column: "object_key", as: String.self) })
+    }
+
+    // MARK: - a key that can be neither fenced nor deleted
+
+    /// Matrix #21 and #22. A key nothing will ever act on again has to say so.
+    ///
+    /// Two captured writers that disagree about where the object lives, or one
+    /// create-only writer beside a historical unknown, leave a key the fence pass
+    /// will not offer and the delete branch will not touch. Before this packet the
+    /// job reported `object_cleanup_state='pending'`, went back to `ready` and
+    /// climbed the backoff curve to hourly, for ever — indistinguishable from work
+    /// that was merely slow. `pending` now means "will finish on its own", and this
+    /// is `blocked`, with a reason an operator can act on.
+    func testAKeyThatCanBeNeitherFencedNorDeletedBlocksTheJobWithItsOwnReason() async throws {
+        for disagreement in ["two targets", "a historical writer"] {
+            let id = try await user(), key = "fences-v1/\(UUID())"
+            try await intent(userID: id, key: key, target: target())
+            try await intent(userID: id, key: key,
+                             target: disagreement == "two targets" ? target(bucket: "synthetic-private-other") : nil)
+            let lease = try await endAndLease(id)
+            try await manifest(lease, key: key)
+            let sql = try VerifiedIdentityService.sql(app.db)
+            try await sql.raw("UPDATE account_deletion_jobs SET database_cleanup_state='completed' WHERE id=\(bind: lease.id)").run()
+            // Every writer has finished. Nothing is in flight, and still nothing can
+            // act on the key: this is the state the reason exists to name.
+            try await sql.raw("UPDATE object_write_intents SET state='settled',settled_at=NOW() WHERE object_key=\(bind: key)").run()
+            let storage = Storage(target: target())
+            app.storage[AccountDeletionFenceProvider.InjectionKey.self] = storage
+            app.storage[AccountDeletionWorkerDependenciesKey.self] = .init(
+                revokeApple: { _, _, _ in .revoked },
+                deleteObject: { _, _ in XCTFail("A create-only address is never physically deleted, however its writers disagree") })
+
+            try await AccountDeletionWorker.perform(lease, app: app, on: app.db)
+            let state = try await AccountDeletionWorker.finish(lease, on: app.db)
+            let puts = await storage.putCount()
+            XCTAssertEqual(puts, 0, "\(disagreement): refused by the candidate query, with no storage IO at all")
+            XCTAssertEqual(state, "blocked", disagreement)
+            let row = try await sql.raw("SELECT object_cleanup_state,last_error_kind FROM account_deletion_jobs WHERE id=\(bind: lease.id)").first()!
+            XCTAssertEqual(try row.decode(column: "object_cleanup_state", as: String.self), "blocked", disagreement)
+            XCTAssertEqual(try row.decode(column: "last_error_kind", as: String.self), "object_target_ambiguous", disagreement)
+        }
+    }
+
+    /// Matrix #42. A create-only address is fenced or it is nothing. If one reaches
+    /// the delete branch the capture was incomplete — another job's writer, or the
+    /// same physical key recorded under another storage kind — and the answer to an
+    /// incomplete capture is the blocked state, never a DELETE of an address some
+    /// writer may still be creating. So the exclusion reads the physical key, not
+    /// this job's captured rows and not this row's storage kind.
+    func testACreateOnlyIntentFromAnotherJobOrKindKeepsTheKeyOutOfTheDeleteBranch() async throws {
+        let owner = try await user(), stranger = try await user(), key = "fences-v1/\(UUID())"
+        try await intent(userID: stranger, key: key, kind: "private_drawing", target: target())
+        let lease = try await endAndLease(owner)
+        try await manifest(lease, key: key)
+        let sql = try VerifiedIdentityService.sql(app.db)
+        try await sql.raw("UPDATE account_deletion_jobs SET database_cleanup_state='completed' WHERE id=\(bind: lease.id)").run()
+        app.storage[AccountDeletionFenceProvider.InjectionKey.self] = Storage(target: target())
+        app.storage[AccountDeletionWorkerDependenciesKey.self] = .init(
+            revokeApple: { _, _, _ in .revoked },
+            deleteObject: { _, _ in XCTFail("A create-only address is never deleted, whoever recorded the write") })
+
+        try await AccountDeletionWorker.perform(lease, app: app, on: app.db)
+        let state = try await AccountDeletionWorker.finish(lease, on: app.db)
+        XCTAssertEqual(state, "blocked")
+        let job = try await sql.raw("SELECT last_error_kind FROM account_deletion_jobs WHERE id=\(bind: lease.id)").first()!
+        XCTAssertEqual(try job.decode(column: "last_error_kind", as: String.self), "object_target_ambiguous",
+                       "an uncaptured create-only writer is an incomplete capture, and it is visible rather than silent")
+        let row = try await sql.raw("SELECT completed_at FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND object_key=\(bind: key)").first()
+        XCTAssertNil(try row?.decode(column: "completed_at", as: Date?.self) ?? nil)
+        let survivingWrite = try await sql.raw("SELECT 1 FROM object_write_intents i WHERE i.object_key=\(bind: key) AND i.storage_kind='private_drawing'").first()
+        XCTAssertNotNil(survivingWrite, "the other account's evidence is untouched")
+    }
+
+    // MARK: - the namespace, as the policy allocates it
+
+    /// Matrix #29. Why E7 exists at all.
+    ///
+    /// An asset that never became ready still carries the allocation-time rendition
+    /// placeholder in its row, so that is the only rendition address the graph can
+    /// name. If the real rendition was written before readiness failed, no surviving
+    /// row names it — and without the captured write intent it would be an object no
+    /// deletion could ever reach, at an address only the bytes themselves know.
+    func testTheRealRenditionOfAnAssetThatNeverBecameReadyIsNamedOnlyByItsIntent() async throws {
+        let configuration = try installedNamespace()
+        let graph = try await personalGraph()
+        let allocation = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: graph.workspaceID, projectID: graph.projectID, app: app)
+        let real = try PrivateObjectAllocationPolicy.rendition(of: allocation, sha256: String(repeating: "7", count: 64), app: app)
+        let placeholder = String(allocation.key.dropLast("original".count)) + "view.jpg"
+        try await mediaRow(graph, original: allocation.key, rendition: placeholder, ready: false)
+        try await intent(userID: graph.userID, key: allocation.key, target: configuration.target)
+        try await intent(userID: graph.userID, key: real.key, target: configuration.target)
+        let namedByAnyRow = try await VerifiedIdentityService.sql(app.db).raw("""
+            SELECT 1 FROM media_assets WHERE original_key=\(bind: real.key) OR rendition_key=\(bind: real.key)
+            """).first()
+        XCTAssertNil(namedByAnyRow, "no row names the real rendition; the recorded write is the only evidence it exists")
+
+        let lease = try await endAndLease(graph.userID)
+        let manifested = try await manifestKeys(lease)
+        XCTAssertEqual(manifested, Set([allocation.key, placeholder, real.key]),
+                       "the original and the placeholder come from the row; the real rendition comes from E7 alone")
+        let candidates = try await AccountDeletionObjectFenceService.candidates(lease, on: app.db, limit: 16)
+        XCTAssertEqual(Set(candidates.map(\.key)), Set([allocation.key, real.key]),
+                       "both recorded writes are fenceable; the placeholder names an object that was never written")
+        XCTAssertTrue(candidates.allSatisfy { $0.target == configuration.target })
+    }
+
+    /// Matrix #41. The whole point of the wave, end to end on one asset: a ready
+    /// photograph's two namespaced addresses are one manifest row each, one fence
+    /// candidate each, and both are made permanently unreadable rather than deleted.
+    ///
+    /// The manifest's spelling of each address is byte-identical to its intent's
+    /// because both came from one allocation, which is what lets M1 hold by
+    /// construction here instead of by normalisation.
+    func testANamespacedOriginalAndRenditionAreOneManifestRowEachAndBothAreFenced() async throws {
+        let configuration = try installedNamespace()
+        let graph = try await personalGraph()
+        let allocation = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: graph.workspaceID, projectID: graph.projectID, app: app)
+        let rendition = try PrivateObjectAllocationPolicy.rendition(of: allocation, sha256: String(repeating: "3", count: 64), app: app)
+        try await mediaRow(graph, original: allocation.key, rendition: rendition.key, ready: true)
+        try await intent(userID: graph.userID, key: allocation.key, target: configuration.target)
+        try await intent(userID: graph.userID, key: rendition.key, target: configuration.target)
+
+        let lease = try await endAndLease(graph.userID)
+        let storage = Storage(target: configuration.target)
+        app.storage[AccountDeletionFenceProvider.InjectionKey.self] = storage
+        app.storage[AccountDeletionWorkerDependenciesKey.self] = .init(
+            revokeApple: { _, _, _ in .revoked },
+            deleteObject: { _, _ in XCTFail("A fenced photograph is never physically deleted") })
+
+        let manifested = try await manifestKeys(lease)
+        XCTAssertEqual(manifested, Set([allocation.key, rendition.key]),
+                       "one asset, two addresses, two rows — the row and the intent agree on both strings")
+        let candidates = try await AccountDeletionObjectFenceService.candidates(lease, on: app.db, limit: 16)
+        XCTAssertEqual(Set(candidates.map(\.key)), Set([allocation.key, rendition.key]))
+        XCTAssertTrue(candidates.allSatisfy { $0.target == configuration.target })
+
+        try await AccountDeletionWorker.perform(lease, app: app, on: app.db)
+        let state = try await AccountDeletionWorker.finish(lease, on: app.db)
+        let puts = await storage.putCount()
+        XCTAssertEqual(puts, 2, "one fence per address, and nothing else reached storage")
+        XCTAssertEqual(state, "completed")
+        let sql = try VerifiedIdentityService.sql(app.db)
+        let pending = try await sql.raw("SELECT count(*) AS n FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND completed_at IS NULL").first()!
+        XCTAssertEqual(try pending.decode(column: "n", as: Int.self), 0)
+        let attested = try await sql.raw("""
+            SELECT count(*) AS n FROM object_erasure_fence_attestations a
+            JOIN object_erasure_fences f ON f.id=a.fence_id WHERE f.job_id=\(bind: lease.id)
+            """).first()!
+        XCTAssertEqual(try attested.decode(column: "n", as: Int.self), 2, "both addresses carry durable, verified evidence")
+    }
+
+    /// Matrix #39. A namespaced address is fenced or it is blocked; it is never
+    /// physically deleted, and the physical-delete path is deliberately not taught
+    /// its shape. The rule is the create-only exclusion in the delete branch. This
+    /// is the backstop underneath the rule: if a namespaced key ever reached the
+    /// branch with no recorded write at all, storage still refuses it by shape.
+    func testANamespacedKeyIsRefusedByShapeAndIsNeverPhysicallyDeleted() async throws {
+        try installedNamespace()
+        let graph = try await personalGraph()
+        let allocation = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: graph.workspaceID, projectID: graph.projectID, app: app)
+        for kind in ["private_media", "private_drawing", "private_import", "legacy_photo", "legacy_drawing", "legacy_completion_photo"] {
+            do {
+                try await StorageService.deleteAccountObject(kind: kind, key: allocation.key, app: app)
+                XCTFail("The physical-delete path must not accept a namespaced address under \(kind)")
+            } catch { }
+        }
+        let lease = try await endAndLease(graph.userID)
+        try await manifest(lease, key: allocation.key)
+        let sql = try VerifiedIdentityService.sql(app.db)
+        try await sql.raw("UPDATE account_deletion_jobs SET database_cleanup_state='completed' WHERE id=\(bind: lease.id)").run()
+        // No injected double: the real path decides, which is the point of the case.
+        app.storage[AccountDeletionWorkerDependenciesKey.self] = nil
+
+        try await AccountDeletionWorker.perform(lease, app: app, on: app.db)
+        let row = try await sql.raw("""
+            SELECT completed_at,last_error_kind FROM account_deletion_objects
+            WHERE job_id=\(bind: lease.id) AND object_key=\(bind: allocation.key)
+            """).first()!
+        XCTAssertNil(try row.decode(column: "completed_at", as: Date?.self) ?? nil)
+        XCTAssertEqual(try row.decode(column: "last_error_kind", as: String?.self) ?? nil, "storage_unavailable",
+                       "refused before any object could be removed, and recorded as a storage refusal")
+    }
+
+    /// Matrix #40, as amended. No writer outside the two private-media routes
+    /// produces a fenceable key, and that is a property of what is recorded rather
+    /// than of what the fence does.
+    ///
+    /// Every production call site that is not those two routes records an intent
+    /// with no allocation, which is `legacy_unknown` with four null target columns,
+    /// and the candidate query refuses such a key for every storage kind without
+    /// touching storage. The other half of the same statement is that no other kind
+    /// is placed in the namespace at all, so no other writer has a target it could
+    /// record even if it wanted one.
+    func testNoWriterOutsideThePrivateMediaRoutesProducesAFenceableKey() async throws {
+        for kind in ["private_media", "private_drawing", "private_import", "legacy_photo", "legacy_drawing", "legacy_completion_photo"] {
+            let id = try await user(), key = "uploads/\(kind)/\(UUID()).jpg"
+            let write = try await intent(userID: id, key: key, kind: kind, target: nil)
+            let lease = try await endAndLease(id)
+            try await manifest(lease, kind: kind, key: key)
+            let row = try await VerifiedIdentityService.sql(app.db).raw("""
+                SELECT write_protocol,storage_backend,storage_backend_identity,storage_bucket,storage_namespace
+                FROM object_write_intents WHERE id=\(bind: write)
+                """).first()!
+            XCTAssertEqual(try row.decode(column: "write_protocol", as: String.self), "legacy_unknown", kind)
+            for column in ["storage_backend", "storage_backend_identity", "storage_bucket", "storage_namespace"] {
+                XCTAssertNil(try row.decode(column: column, as: String?.self) ?? nil, "\(kind).\(column)")
+            }
+            let found = try await AccountDeletionObjectFenceService.candidates(lease, on: app.db, limit: 16)
+            XCTAssertTrue(found.isEmpty, "\(kind): a writer with no recorded target produces nothing fenceable")
+            if kind != "private_media" {
+                XCTAssertEqual(try PrivateObjectAllocationPolicy.placement(ofKind: kind), .legacy,
+                               "\(kind): nothing but private media is written into the namespace")
+            }
+        }
+    }
 }

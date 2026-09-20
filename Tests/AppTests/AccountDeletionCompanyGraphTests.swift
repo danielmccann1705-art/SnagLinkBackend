@@ -189,4 +189,76 @@ final class AccountDeletionCompanyGraphTests: XCTestCase {
         let second=try await app.db.transaction { try await AccountDeletionGraphService.companyInventory(workspaceID:workspaceID,on:$0) }
         XCTAssertEqual(first.projectCount,second.projectCount); XCTAssertNotEqual(first.fingerprint,second.fingerprint)
     }
+
+    // MARK: - a write that belongs to two accounts, reached by the worker
+
+    /// Makes every job that already existed undue, so the pass below can only claim
+    /// this test's own. `run` claims by a global predicate.
+    private func parkExistingJobs() async throws {
+        try await VerifiedIdentityService.sql(app.db).raw("""
+            UPDATE account_deletion_jobs SET available_at=clock_timestamp()+INTERVAL '1 day',
+                lease_expires_at=CASE WHEN state='leased' THEN clock_timestamp()+INTERVAL '1 day' ELSE lease_expires_at END
+            WHERE state IN ('ready','blocked','leased')
+            """).run()
+    }
+
+    /// Matrix #19, worker path.
+    ///
+    /// The same refusal as the request path, reached where nobody is present. A
+    /// confirmed company closure defers the personal graph to the worker, and the
+    /// worker's erase meets an intent it would have to capture whose import session
+    /// belongs to a workspace this deletion does not touch. The transaction aborts,
+    /// which is right — but it will abort again on every pass, and the generic
+    /// handler used to record it as `worker_unavailable` on a five-minute retry, so
+    /// the one condition that means "two accounts' writes are entangled" looked
+    /// exactly like a flaky provider, for ever. It is now a durable block carrying
+    /// its own reason, and the job stops climbing the backoff curve pretending to
+    /// make progress.
+    func testACrossScopeWriteBlocksTheWorkerWithItsOwnReasonRatherThanLookingUnavailable() async throws {
+        try await parkExistingJobs()
+        let graph = try await makeGraph(), elsewhere = try await makeGraph(name: "Unrelated company")
+        let ownerID = try graph.owner.requireID()
+        let parentID = try await parent(owner: ownerID)
+        _ = try await child(graph: graph, parentID: parentID)
+        let sql = try VerifiedIdentityService.sql(app.db)
+        // An import session this account started inside a workspace this deletion
+        // does not close. The write is the account's own; the session is not, so the
+        // capture cannot be completed and must not be completed partially.
+        let session = UUID(), hash = String(repeating: "a", count: 64)
+        try await sql.raw("""
+            INSERT INTO staged_legacy_imports(id,actor_id,workspace_id,workspace_kind,environment,api_origin,device_id,operation_id,
+                auth_version,authority_fingerprint,source_project_id,source_fingerprint,export_sha256,export_byte_count,request_hash,
+                state,revision,acknowledgement_version,acknowledgement_wording,acknowledged_at,created_at,updated_at,summary_json)
+            VALUES(\(bind:session),\(bind:ownerID),\(bind:elsewhere.workspace.requireID()),'company','development','https://example.test',
+                \(bind:UUID()),\(bind:UUID()),1,\(bind:hash),\(bind:UUID()),\(bind:hash),\(bind:hash),2,\(bind:hash),
+                'staged_incomplete',1,'test-v1','Synthetic acknowledgement',NOW(),NOW(),NOW(),'{}')
+            """).run()
+        _ = try await app.db.transaction { db in
+            try await ObjectWriteIntentRows.insert(
+                .init(storageKind: "private_import", key: "staged-import/\(UUID())/original",
+                      data: Data("synthetic".utf8), contentType: "application/pdf"),
+                source: .init(kind: "staged_original", id: UUID(), sessionID: session),
+                scope: .init(userID: ownerID), target: nil, on: db)
+        }
+        try await sql.raw("""
+            UPDATE account_deletion_jobs SET state='ready',lease_token=NULL,lease_expires_at=NULL,
+                available_at=clock_timestamp()-INTERVAL '1 minute' WHERE id=\(bind:parentID)
+            """).run()
+        app.storage[AccountDeletionWorkerDependenciesKey.self] = .init(
+            revokeApple: { _, _, _ in .revoked },
+            deleteObject: { _, _ in XCTFail("Nothing is deleted while the capture cannot be completed") })
+
+        let counts = try await AccountDeletionWorker.run(app: app, limit: 1)
+        XCTAssertEqual(counts.processed, 1, "the parked rows leave exactly this job claimable")
+        XCTAssertEqual(counts.blocked, 1, "an entanglement that cannot resolve itself is not a retry")
+        XCTAssertEqual(counts.retrying, 0)
+        let row = try await sql.raw("SELECT state,last_error_kind,database_cleanup_state FROM account_deletion_jobs WHERE id=\(bind:parentID)").first()!
+        XCTAssertEqual(try row.decode(column: "state", as: String.self), "blocked")
+        XCTAssertEqual(try row.decode(column: "last_error_kind", as: String.self), "object_write_scope_ambiguous")
+        XCTAssertEqual(try row.decode(column: "database_cleanup_state", as: String.self), "blocked",
+                       "the personal graph is not erased while a write it must capture also belongs to somewhere else")
+        let retainedUser = try await VerifiedIdentityService.sql(app.db).raw("SELECT lifecycle_state FROM users WHERE id=\(bind:ownerID)").first()!
+        XCTAssertEqual(try retainedUser.decode(column: "lifecycle_state", as: String.self), "active",
+                       "the request path never ran, so the account was never marked deleted")
+    }
 }

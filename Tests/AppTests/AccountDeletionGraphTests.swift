@@ -52,14 +52,14 @@ final class AccountDeletionGraphTests: XCTestCase {
         return (id, token)
     }
     private func reference() -> String { (UUID().uuidString + UUID().uuidString).replacingOccurrences(of: "-", with: "") }
-    private func stagedImport(actor: User, workspace: Team) async throws -> UUID {
+    private func stagedImport(actor: User, workspace: Team, kind: String = "personal") async throws -> UUID {
         let id=UUID(), sourceProjectID=UUID(), hash=String(repeating:"a",count:64)
         let sql=try VerifiedIdentityService.sql(app.db)
         try await sql.raw("""
             INSERT INTO staged_legacy_imports(id,actor_id,workspace_id,workspace_kind,environment,api_origin,device_id,operation_id,
                 auth_version,authority_fingerprint,source_project_id,source_fingerprint,export_sha256,export_byte_count,request_hash,
                 state,revision,acknowledgement_version,acknowledgement_wording,acknowledged_at,created_at,updated_at,summary_json)
-            VALUES(\(bind:id),\(bind:actor.requireID()),\(bind:workspace.requireID()),'personal','development','https://example.test',
+            VALUES(\(bind:id),\(bind:actor.requireID()),\(bind:workspace.requireID()),\(bind:kind),'development','https://example.test',
                 \(bind:UUID()),\(bind:UUID()),1,\(bind:hash),\(bind:sourceProjectID),\(bind:hash),\(bind:hash),2,\(bind:hash),
                 'staged_incomplete',1,'test-v1','Synthetic acknowledgement',NOW(),NOW(),NOW(),'{}')
             """).run()
@@ -328,5 +328,237 @@ final class AccountDeletionGraphTests: XCTestCase {
             try await VerifiedIdentityService.sql(app.db).raw("INSERT INTO synced_drawings(id,magic_link_token,drawing_id,file_path,file_name,created_at) VALUES(\(bind:UUID()),'missing',\(bind:UUID()),'/uploads/synced-drawings/late.pdf','late.pdf',NOW())").run()
             XCTFail("Unbound legacy copy must be rejected")
         } catch { }
+    }
+
+    // MARK: - what the enumeration edges do and do not take
+
+    /// Matrix #9. The `p.id IN account_deletion_projects` conjunct, exercised with
+    /// a company project.
+    ///
+    /// A Contractor link is owned by the account that created it, because a link has
+    /// no account behind it and `created_by_id` is the only party with an identity.
+    /// That ownership is still bounded by the project: a link this account created
+    /// on somebody else's company project names photographs that belong to the
+    /// company, and they are not this deletion's to destroy.
+    func testAContractorLinkOnACompanyProjectIsNeverEnumerated() async throws {
+        let target = try await user("Departing member"), owner = try await user("Company owner")
+        let companyWorkspace = try await app.db.transaction { db -> Team in
+            let team = try await WorkspaceAccessService.createCompany(id: UUID(), name: "Retained company", actorID: owner.requireID(), on: db)
+            try await WorkspaceAccessService.putMembership(workspaceID: team.requireID(), userID: target.requireID(), role: "member", on: db)
+            return team
+        }
+        let companyProject = try await project(owner: owner, workspace: companyWorkspace, name: "Company project")
+        let companySnag = try await snag(owner: owner, project: companyProject)
+        let companyLink = try await link(project: companyProject, creator: target)
+        let photo = "/uploads/synced-photos/\(UUID()).jpg", thumbnail = "/uploads/synced-photos/\(UUID())-thumb.jpg"
+        let drawing = "/uploads/synced-drawings/\(UUID()).pdf"
+        let sql = try VerifiedIdentityService.sql(app.db)
+        try await sql.raw("INSERT INTO synced_photos(id,magic_link_token,snag_id,label,file_path,thumbnail_file_path,created_at) VALUES(\(bind:UUID()),\(bind:companyLink.1),\(bind:companySnag.requireID()),'before',\(bind:photo),\(bind:thumbnail),NOW())").run()
+        try await sql.raw("INSERT INTO synced_drawings(id,magic_link_token,drawing_id,file_path,file_name,created_at) VALUES(\(bind:UUID()),\(bind:companyLink.1),\(bind:UUID()),\(bind:drawing),'plan.pdf',NOW())").run()
+
+        _ = try await AccountDeletionService.request(userID: target.requireID(), body: .init(confirmation: "DELETE", receiptReference: reference()), app: app)
+
+        let jobID = try await sql.raw("SELECT id FROM account_deletion_jobs WHERE user_id=\(bind:target.requireID())").first()!.decode(column: "id", as: UUID.self)
+        let rows = try await sql.raw("SELECT object_key FROM account_deletion_objects WHERE job_id=\(bind:jobID)").all()
+        let manifested = try Set(rows.map { try $0.decode(column: "object_key", as: String.self) })
+        XCTAssertTrue(Set([photo, thumbnail, drawing]).isDisjoint(with: manifested),
+                      "a Contractor link on a company project follows the project, never the account that made the link")
+        let photoCount = try await count("synced_photos", where: "magic_link_token=\(bind:companyLink.1)")
+        let drawingCount = try await count("synced_drawings", where: "magic_link_token=\(bind:companyLink.1)")
+        let linkCount = try await count("magic_links", where: "id=\(bind:companyLink.0)")
+        XCTAssertEqual(photoCount, 1, "the company's evidence survives its member's deletion")
+        XCTAssertEqual(drawingCount, 1)
+        XCTAssertEqual(linkCount, 1, "the link is revoked, not erased, because the project it serves is retained")
+    }
+
+    /// Matrix #13 and #14. The only uploader-rooted rule in the manifest, and both
+    /// halves of what makes it safe.
+    ///
+    /// An upload the account allocated and nothing shows is the account's own to
+    /// destroy. The same upload, once a completion this deletion is *not* erasing
+    /// still displays it, is not — and the difference is a negative existence test
+    /// over retained completions, not a second ownership edge.
+    func testTheUploaderBranchTakesAnUnshownUploadAndNeverOneARetainedCompletionDisplays() async throws {
+        let target = try await user("Upload owner"), retainedOwner = try await user("Retained owner")
+        _ = try await app.db.transaction { try await WorkspaceAccessService.personal(for: target.requireID(), on: $0) }
+        let retainedWorkspace = try await app.db.transaction { try await WorkspaceAccessService.personal(for: retainedOwner.requireID(), on: $0) }
+        let retainedProject = try await project(owner: retainedOwner, workspace: retainedWorkspace, name: "Retained project")
+        let retainedSnag = try await snag(owner: retainedOwner, project: retainedProject)
+        let retainedLink = try await link(project: retainedProject, creator: retainedOwner)
+        let retainedCompletion = UUID(), sql = try VerifiedIdentityService.sql(app.db)
+        try await sql.raw("INSERT INTO completions(id,snag_id,magic_link_id,contractor_name,status,submitted_at) VALUES(\(bind:retainedCompletion),\(bind:retainedSnag.requireID()),\(bind:retainedLink.0),'Synthetic contractor','pending',NOW())").run()
+
+        let unshown = try await CompletionUploadObjectService.allocate(
+            principal: .user(try target.requireID()), fileExtension: "jpg", contentType: "image/jpeg", fileSize: 128, on: app.db)
+        let displayed = try await CompletionUploadObjectService.allocate(
+            principal: .user(try target.requireID()), fileExtension: "jpg", contentType: "image/jpeg", fileSize: 128, on: app.db)
+        // The live route cannot produce this row: `require_trusted_completion_photo`
+        // insists an attached upload and its completion share a Contractor link, and
+        // a signed-in upload has none. That guard is the first layer. The fixture
+        // synthesises the row it exists to prevent, so that the manifest's own
+        // negative test is proved to hold on its own rather than by relying on it.
+        try await app.db.transaction { db in
+            let scoped = try VerifiedIdentityService.sql(db)
+            try await scoped.raw("LOCK TABLE completion_photos IN ACCESS EXCLUSIVE MODE").run()
+            try await scoped.raw("ALTER TABLE completion_photos DISABLE TRIGGER completion_photo_trusted_insert").run()
+            try await scoped.raw("""
+                INSERT INTO completion_photos(id,completion_id,url,uploaded_at,upload_object_id)
+                VALUES(\(bind:displayed.id),\(bind:retainedCompletion),\(bind:displayed.issuedURL),NOW(),\(bind:displayed.id))
+                """).run()
+            try await scoped.raw("ALTER TABLE completion_photos ENABLE TRIGGER completion_photo_trusted_insert").run()
+        }
+
+        _ = try await AccountDeletionService.request(userID: target.requireID(), body: .init(confirmation: "DELETE", receiptReference: reference()), app: app)
+
+        let jobID = try await sql.raw("SELECT id FROM account_deletion_jobs WHERE user_id=\(bind:target.requireID())").first()!.decode(column: "id", as: UUID.self)
+        let rows = try await sql.raw("SELECT object_key FROM account_deletion_objects WHERE job_id=\(bind:jobID) AND storage_kind='legacy_completion_photo'").all()
+        let manifested = try Set(rows.map { try $0.decode(column: "object_key", as: String.self) })
+        XCTAssertEqual(manifested, Set([unshown.storageKey, unshown.thumbnailKey]),
+                       "the allocation nothing shows is enumerated; the one a retained completion displays is absent")
+        let survived = try await count("completion_upload_objects", where: "id=\(bind:displayed.id)")
+        let released = try await count("completion_upload_objects", where: "id=\(bind:unshown.id)")
+        XCTAssertEqual(survived, 1, "an object a retained completion still displays is not even removed from the registry")
+        XCTAssertEqual(released, 0)
+    }
+
+    // MARK: - one physical object, two spellings
+
+    /// Matrix #30. The historical writer stores a synced photo's path with a
+    /// leading slash and records the write intent for the very same bytes without
+    /// one, so one object reaches the manifest as two rows.
+    ///
+    /// Before this packet only one of them was protected: the fence exclusion
+    /// compared physical keys but the unresolved-write exclusion compared exact
+    /// strings, so the slashed row found no intent, passed every check, and was
+    /// deleted while a write to that address was still in flight — and
+    /// `deleteOwnedSyncedPhoto` strips the slash before deleting, so it was the
+    /// same object.
+    func testOneLegacyObjectUnderBothSpellingsIsProtectedTogetherAndDeletedOnce() async throws {
+        let target = try await user("Sync owner")
+        let workspace = try await app.db.transaction { try await WorkspaceAccessService.personal(for: target.requireID(), on: $0) }
+        let personal = try await project(owner: target, workspace: workspace, name: "Private project")
+        let personalSnag = try await snag(owner: target, project: personal)
+        let personalLink = try await link(project: personal, creator: target)
+        let filename = "\(UUID()).jpg"
+        let slashed = "/uploads/synced-photos/\(filename)", unslashed = "uploads/synced-photos/\(filename)"
+        let sql = try VerifiedIdentityService.sql(app.db)
+        try await sql.raw("INSERT INTO synced_photos(id,magic_link_token,snag_id,label,file_path,created_at) VALUES(\(bind:UUID()),\(bind:personalLink.1),\(bind:personalSnag.requireID()),'before',\(bind:slashed),NOW())").run()
+        let writeID = try await app.db.transaction { db in
+            try await ObjectWriteIntentRows.insert(
+                .init(storageKind: "legacy_photo", key: unslashed, data: Data("synthetic".utf8), contentType: "image/jpeg"),
+                source: .init(kind: "legacy_link", id: personalLink.0),
+                scope: .init(userID: try target.requireID(), projectID: try personal.requireID(), magicLinkID: personalLink.0),
+                target: nil, on: db)
+        }
+        let deleted = DeletedKeys()
+        app.storage[AccountDeletionWorkerDependenciesKey.self] = .init(
+            revokeApple: { _, _, _ in .revoked }, deleteObject: { _, key in await deleted.record(key) })
+
+        _ = try await AccountDeletionService.request(userID: target.requireID(), body: .init(confirmation: "DELETE", receiptReference: reference()), app: app)
+        let jobID = try await sql.raw("SELECT id FROM account_deletion_jobs WHERE user_id=\(bind:target.requireID())").first()!.decode(column: "id", as: UUID.self)
+        let manifestRows = try await sql.raw("SELECT object_key FROM account_deletion_objects WHERE job_id=\(bind:jobID) AND storage_kind='legacy_photo'").all()
+        let manifested = try Set(manifestRows.map { try $0.decode(column: "object_key", as: String.self) })
+        XCTAssertEqual(manifested, Set([slashed, unslashed]), "the graph and the intent spell the same object two ways")
+
+        // While the write is unresolved, neither spelling may be touched.
+        let blockedState = try await pass(jobID: jobID, userID: try target.requireID())
+        let untouched = await deleted.all()
+        XCTAssertTrue(untouched.isEmpty, "a write that may still create these bytes blocks both rows, not just its own spelling")
+        XCTAssertEqual(blockedState, "blocked")
+
+        try await sql.raw("UPDATE object_write_intents SET state='settled',settled_at=NOW() WHERE id=\(bind:writeID)").run()
+        let finalState = try await pass(jobID: jobID, userID: try target.requireID())
+        XCTAssertEqual(finalState, "completed")
+        let attempted = await deleted.all()
+        let physical = Set(attempted.map { $0.hasPrefix("/") ? String($0.dropFirst()) : $0 })
+        XCTAssertEqual(physical, Set([unslashed]), "two manifest rows, one physical object, and the repeat is idempotent")
+        let pending = try await count("account_deletion_objects", where: "job_id=\(bind:jobID) AND completed_at IS NULL")
+        XCTAssertEqual(pending, 0)
+    }
+
+    // MARK: - a write that belongs to two accounts
+
+    /// Matrix #19, request path. An intent this deletion would have to capture also
+    /// names an import session outside its scope, so the graph refuses to capture a
+    /// partial set and the whole request fails. Nothing has been destroyed, the
+    /// person is present, and they can retry once the entanglement is gone.
+    func testACrossScopeWriteAbortsTheDeletionRequestAndErasesNothing() async throws {
+        let target = try await user("Entangled writer"), companyOwner = try await user("Unrelated owner")
+        let personalWorkspace = try await app.db.transaction { try await WorkspaceAccessService.personal(for: target.requireID(), on: $0) }
+        let personal = try await project(owner: target, workspace: personalWorkspace, name: "Private project")
+        let foreignWorkspace = try await app.db.transaction { db in
+            try await WorkspaceAccessService.createCompany(id: UUID(), name: "Unrelated company", actorID: companyOwner.requireID(), on: db)
+        }
+        let foreignSession = try await stagedImport(actor: target, workspace: foreignWorkspace, kind: "company")
+        _ = try await app.db.transaction { db in
+            try await ObjectWriteIntentRows.insert(
+                .init(storageKind: "private_import", key: "staged-import/\(UUID())/original",
+                      data: Data("synthetic".utf8), contentType: "application/pdf"),
+                source: .init(kind: "staged_original", id: UUID(), sessionID: foreignSession),
+                scope: .init(userID: try target.requireID()), target: nil, on: db)
+        }
+        do {
+            _ = try await AccountDeletionService.request(userID: target.requireID(), body: .init(confirmation: "DELETE", receiptReference: reference()), app: app)
+            XCTFail("A write that crosses the deletion boundary must refuse the whole request")
+        } catch let abort as Abort {
+            XCTAssertEqual(abort.status, .conflict)
+            XCTAssertEqual(abort.identifier, "object_write_scope_ambiguous")
+        }
+        let account = try await VerifiedIdentityService.activeUser(target.requireID(), on: app.db)
+        let retained = try await Project.find(personal.requireID(), on: app.db)
+        let jobCount = try await count("account_deletion_jobs", where: "user_id=\(bind:target.requireID())")
+        XCTAssertNotNil(account.email, "the account is untouched")
+        XCTAssertNotNil(retained)
+        XCTAssertEqual(jobCount, 0, "and no job is left behind to retry something that cannot succeed")
+    }
+
+    // MARK: - the re-proof made immediately before a destructive act
+
+    /// Matrix #43. Layer 2 is the check made immediately before a physical delete;
+    /// layer 3 is the check made before a fence, which destroys nothing. The
+    /// destructive one must not be the weaker of the two, so it now asks the fence's
+    /// own question — `object_erasure_has_graph_reference` over all six kinds —
+    /// rather than keeping a second copy of it for the row's own kind alone.
+    func testLayerTwoRefusesAKeyAnyOfTheSixKindsStillReferences() async throws {
+        let owner = try await user("Reference owner")
+        let workspace = try await app.db.transaction { try await WorkspaceAccessService.personal(for: owner.requireID(), on: $0) }
+        let live = try await project(owner: owner, workspace: workspace, name: "Live project")
+        let liveSnag = try await snag(owner: owner, project: live)
+        let keys = try await media(project: live, snag: liveSnag, creator: owner, prefix: "live")
+        let kinds = ["private_media", "private_drawing", "private_import", "legacy_photo", "legacy_drawing", "legacy_completion_photo"]
+        for kind in kinds {
+            let referenced = try await AccountDeletionGraphService.objectIsReferenced(kind: kind, key: keys.0, on: app.db)
+            XCTAssertTrue(referenced, "a live media row must stop a delete offered under \(kind)")
+        }
+        let unnamed = "platform/live/\(UUID())/original"
+        for kind in kinds {
+            let referenced = try await AccountDeletionGraphService.objectIsReferenced(kind: kind, key: unnamed, on: app.db)
+            XCTAssertFalse(referenced, "\(kind): an address nothing names is not made referenced by asking about it")
+        }
+        do {
+            _ = try await AccountDeletionGraphService.objectIsReferenced(kind: "private_video", key: keys.0, on: app.db)
+            XCTFail("A manifest row of an unknown kind is corrupt, not a licence to guess what it meant")
+        } catch { }
+    }
+
+    // MARK: - helpers for the cases above
+
+    /// Records every physical address the worker was asked to delete.
+    actor DeletedKeys {
+        private var keys: [String] = []
+        func record(_ key: String) { keys.append(key) }
+        func all() -> [String] { keys }
+    }
+
+    /// One worker pass over this account's job, under a lease PostgreSQL issued.
+    private func pass(jobID: UUID, userID: UUID) async throws -> String? {
+        let token = UUID()
+        try await VerifiedIdentityService.sql(app.db).raw("""
+            UPDATE account_deletion_jobs SET state='leased',lease_token=\(bind:token),
+                lease_expires_at=clock_timestamp()+INTERVAL '5 minutes' WHERE id=\(bind:jobID)
+            """).run()
+        let lease = AccountDeletionWorker.Lease(id: jobID, userID: userID, token: token, attempt: 1)
+        try await AccountDeletionWorker.perform(lease, app: app, on: app.db)
+        return try await AccountDeletionWorker.finish(lease, on: app.db)
     }
 }

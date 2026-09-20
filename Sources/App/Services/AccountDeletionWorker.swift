@@ -133,13 +133,26 @@ enum AccountDeletionWorker {
                 else if state == "blocked" { counts.blocked += 1 }
                 else { counts.retrying += 1 }
             } catch {
+                // Two accounts' writes are entangled: an intent this job would have
+                // to capture also names a workspace, a live project, a live import
+                // session or a live Contractor link outside this deletion's scope.
+                // The graph transaction refuses to capture a partial set and aborts,
+                // which is right - but it will refuse again on every pass, so
+                // recording it as an unavailable worker hides the one condition that
+                // means a person must look. It is a durable block with its own
+                // reason, on the same backoff the generic handler uses. The
+                // request-path abort is unchanged: there the person is present,
+                // nothing has been destroyed, and they can retry.
+                let scopeAmbiguous = (error as? Abort)?.identifier == "object_write_scope_ambiguous"
                 // Never log errors containing provider tokens, object addresses or PII.
                 try await VerifiedIdentityService.sql(db).raw("""
-                    UPDATE account_deletion_jobs SET state='ready',lease_token=NULL,lease_expires_at=NULL,
-                        available_at=clock_timestamp()+INTERVAL '300 seconds',last_error_kind='worker_unavailable'
+                    UPDATE account_deletion_jobs SET state=\(bind: scopeAmbiguous ? "blocked" : "ready"),
+                        lease_token=NULL,lease_expires_at=NULL,
+                        available_at=clock_timestamp()+INTERVAL '300 seconds',
+                        last_error_kind=\(bind: scopeAmbiguous ? "object_write_scope_ambiguous" : "worker_unavailable")
                     WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp()
                     """).run()
-                counts.retrying += 1
+                if scopeAmbiguous { counts.blocked += 1 } else { counts.retrying += 1 }
             }
         }
         if stoppedByBudget { counts.deferredByBudget = try await dueCount(on: db, limit: slots - used) }
@@ -196,20 +209,36 @@ enum AccountDeletionWorker {
             SELECT o.storage_kind,o.object_key FROM account_deletion_objects o
             WHERE o.job_id=\(bind:lease.id) AND o.completed_at IS NULL
               AND NOT EXISTS(SELECT 1 FROM object_erasure_fences f WHERE ltrim(f.object_key,'/')=ltrim(o.object_key,'/'))
+              -- One physical key, one answer. A legacy object reaches the manifest
+              -- both as the graph spells it, with a leading slash, and as its write
+              -- intent spells it, without one; and nothing stops one physical key
+              -- appearing under two storage kinds. The fence exclusion above has
+              -- always compared physical keys. These two now do as well, so a
+              -- spelling or a kind can no longer be the difference between a key
+              -- that is protected and the same key being deleted while a write to
+              -- it is still in flight.
               AND NOT EXISTS(
                 SELECT 1 FROM account_deletion_write_intents d
                 JOIN object_write_intents i ON i.id=d.intent_id
-                WHERE d.job_id=o.job_id AND i.storage_kind=o.storage_kind
-                  AND i.object_key=o.object_key AND i.state<>'settled')
+                WHERE d.job_id=o.job_id AND ltrim(i.object_key,'/')=ltrim(o.object_key,'/')
+                  AND i.state<>'settled')
               -- A create-only key is fenced, never deleted, even when every intent
               -- it has is settled and even when this pass ran out of time before
               -- reaching it. Settled says the bytes arrived; it does not say no
               -- other writer can still arrive, and only the fence says that.
+              --
+              -- The intent need not be one this job captured, and need not be under
+              -- this row's kind. A create-only address is fenced or it is nothing:
+              -- the only way one reaches this branch at all is that the capture was
+              -- incomplete, and the answer to an incomplete capture is the blocked
+              -- state the job already has a reason for - never a DELETE of an
+              -- address some writer may still be creating. This subsumes the
+              -- captured-by-this-job case, which is why there is one rule here and
+              -- not two.
               AND NOT EXISTS(
-                SELECT 1 FROM account_deletion_write_intents dc
-                JOIN object_write_intents ic ON ic.id=dc.intent_id
-                WHERE dc.job_id=o.job_id AND ic.storage_kind=o.storage_kind
-                  AND ic.object_key=o.object_key AND ic.write_protocol='create_only_v1')
+                SELECT 1 FROM object_write_intents ic
+                WHERE ltrim(ic.object_key,'/')=ltrim(o.object_key,'/')
+                  AND ic.write_protocol='create_only_v1')
             ORDER BY o.attempts,o.storage_kind,o.object_key LIMIT 16
             """).all()
         for object in objects {
@@ -253,6 +282,7 @@ enum AccountDeletionWorker {
                 EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
                     WHERE d.job_id=\(bind:lease.id) AND i.state='active' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'blocked' WHEN
                 EXISTS(SELECT 1 FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND completed_at IS NULL AND last_error_kind='object_still_referenced')
+                THEN 'blocked' WHEN \(AccountDeletionGraphService.targetAmbiguous(jobID: lease.id))
                 THEN 'blocked' WHEN EXISTS(SELECT 1 FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND completed_at IS NULL)
                 THEN 'pending' ELSE 'completed' END
             WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp()
@@ -284,6 +314,7 @@ enum AccountDeletionWorker {
                     WHEN apple_revocation_state='misconfigured' THEN 'apple_configuration'
                     WHEN apple_revocation_state='failing' THEN 'apple_unavailable'
                     WHEN EXISTS(SELECT 1 FROM account_deletion_unresolved_objects WHERE job_id=\(bind: lease.id)) THEN 'unresolved_legacy_object_ownership'
+                    WHEN \(AccountDeletionGraphService.targetAmbiguous(jobID: lease.id)) THEN 'object_target_ambiguous'
                     WHEN object_cleanup_state<>'completed' THEN 'object_cleanup_pending' ELSE NULL END,
                 available_at=clock_timestamp()+make_interval(secs => \(bind: delay)),lease_token=NULL,lease_expires_at=NULL
             WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp() RETURNING state

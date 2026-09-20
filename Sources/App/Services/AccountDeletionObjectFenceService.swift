@@ -58,6 +58,13 @@ enum AccountDeletionObjectFenceService {
     /// Keys whose captured intents agree on one exact physical target under
     /// `create_only_v1`. Requested fences come first, so an interrupted pass
     /// finishes what it started before it starts anything new.
+    ///
+    /// A key this `HAVING` drops is not merely skipped: the delete branch excludes
+    /// it too, because it has a create-only intent, so nothing will ever act on it
+    /// again. `AccountDeletionGraphService.targetAmbiguous` is this `HAVING`
+    /// negated, and is what turns that into a visible `blocked` state with
+    /// `object_target_ambiguous` instead of an hourly retry for ever. The two must
+    /// keep saying the same thing; change them together.
     static func candidates(_ lease: AccountDeletionWorker.Lease, on db: Database, limit: Int) async throws -> [Candidate] {
         let sql = try VerifiedIdentityService.sql(db)
         let rows = try await sql.raw("""

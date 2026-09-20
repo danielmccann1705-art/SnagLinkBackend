@@ -72,8 +72,19 @@ enum AccountDeletionGraphService {
         // usable after the project/link rows below have been removed.
         try await captureWriteIntents(jobID: jobID, userFallbackID: userID, on: sql)
 
-        // Queue exact keys before deleting any reference rows. A key is never inferred
-        // from uploader identity; every source below is inside the personal graph.
+        // Queue exact keys before deleting any reference rows. Every source below is
+        // rooted in an ownership edge inside the personal graph - the project, the
+        // personal workspace, an import session, or the Contractor link's creator -
+        // with two deliberate exceptions that are identity-rooted and each closed by
+        // its own condition, rather than by the edge:
+        //  - the `p.id IS NULL` disjuncts for Contractor links (`:43`) and for
+        //    `snag_deletions` below, which take the objects on `created_by_id` /
+        //    `owner_id` alone, and only once the project row they named is gone; and
+        //  - the uploader branch of `completion_upload_objects` below, which is
+        //    closed by a negative existence test over completions this deletion is
+        //    not erasing, so an object a surviving completion still shows never
+        //    enters.
+        // Nothing else infers a key from who uploaded the bytes.
         try await sql.raw("""
             INSERT INTO account_deletion_objects(job_id,storage_kind,object_key)
             SELECT \(bind: jobID),'private_media',key FROM (
@@ -170,6 +181,7 @@ enum AccountDeletionGraphService {
                         WHERE d.job_id=\(bind:jobID) AND i.state='uncertain' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'blocked'
                     WHEN EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
                         WHERE d.job_id=\(bind:jobID) AND i.state='active' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'blocked'
+                    WHEN \(targetAmbiguous(jobID: jobID)) THEN 'blocked'
                     WHEN EXISTS(SELECT 1 FROM account_deletion_objects WHERE job_id=\(bind: jobID) AND completed_at IS NULL) THEN 'pending'
                     ELSE 'completed' END,
                 last_error_kind=CASE WHEN EXISTS(SELECT 1 FROM account_deletion_unresolved_objects WHERE job_id=\(bind:jobID))
@@ -178,8 +190,51 @@ enum AccountDeletionGraphService {
                         WHERE d.job_id=\(bind:jobID) AND i.state='uncertain' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'object_write_uncertain'
                     WHEN EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
                         WHERE d.job_id=\(bind:jobID) AND i.state='active' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'object_write_pending'
+                    WHEN \(targetAmbiguous(jobID: jobID)) THEN 'object_target_ambiguous'
                     ELSE NULL END WHERE id=\(bind: jobID)
             """).run()
+    }
+
+    /// A job whose manifest still holds a key that can be neither fenced nor
+    /// deleted, and which therefore will not finish on its own.
+    ///
+    /// Two conditions, and the key has to meet both. The delete branch will never
+    /// touch it, because some `create_only_v1` intent names its physical address
+    /// (`AccountDeletionWorker.perform`); and the fence pass will never offer it,
+    /// because its captured intents do not satisfy the candidate `HAVING`
+    /// (`AccountDeletionObjectFenceService.candidates`). The second half is that
+    /// `HAVING` negated, so the two stay one rule.
+    ///
+    /// Three shapes land here. Two captured writers disagree about the target, or a
+    /// captured writer has no target at all: the object exists somewhere and this
+    /// job cannot say where. Or the intent naming the address was never captured by
+    /// this job — another job's, or another storage kind's — which means the
+    /// capture was incomplete, and the fence's own eligibility rule will refuse for
+    /// ever because of it. None of them is a licence to delete the address anyway,
+    /// and none of them will resolve by waiting.
+    ///
+    /// It is written once and read at every site that decides
+    /// `object_cleanup_state`, so `pending` keeps meaning "will finish on its own"
+    /// rather than "nothing here will ever move again". Without it the job returns
+    /// to `ready` and walks the backoff curve up to hourly, for ever, looking to an
+    /// operator exactly like work that is merely slow.
+    static func targetAmbiguous(jobID: UUID) -> SQLQueryString {
+        """
+        EXISTS(SELECT 1 FROM account_deletion_objects o
+            WHERE o.job_id=\(bind: jobID) AND o.completed_at IS NULL
+              AND EXISTS(SELECT 1 FROM object_write_intents ic
+                  WHERE ltrim(ic.object_key,'/')=ltrim(o.object_key,'/') AND ic.write_protocol='create_only_v1')
+              AND NOT EXISTS(
+                SELECT 1 FROM account_deletion_write_intents d
+                JOIN object_write_intents i ON i.id=d.intent_id
+                    AND i.storage_kind=o.storage_kind AND i.object_key=o.object_key
+                WHERE d.job_id=o.job_id
+                GROUP BY i.storage_kind,i.object_key
+                HAVING count(*) FILTER (WHERE i.write_protocol<>'create_only_v1')=0
+                   AND count(*) FILTER (WHERE i.storage_backend IS NULL OR i.storage_backend_identity IS NULL
+                       OR i.storage_bucket IS NULL OR i.storage_namespace IS NULL)=0
+                   AND count(DISTINCT (i.storage_backend,i.storage_backend_identity,i.storage_bucket,i.storage_namespace))=1))
+        """
     }
 
     private static func redactCopiedPayloads(userID: UUID, on database: Database) async throws {
@@ -372,30 +427,40 @@ enum AccountDeletionGraphService {
     /// Storage workers must recheck a manifest key immediately before delete.
     /// A same-job settled intent is evidence for this deletion, while any other
     /// durable intent remains a live reference even if its source row is absent.
+    ///
+    /// This is the check made immediately before a *destructive* act, so it is
+    /// never allowed to be weaker than the one made before a fence, which is not
+    /// destructive. It therefore asks the same two questions the fence's own
+    /// eligibility function asks, in the same words:
+    ///
+    ///  - the graph probe is `object_erasure_has_graph_reference` itself, over the
+    ///    same six-kind array `object_erasure_fence_eligible` uses
+    ///    (`CreateObjectErasureFences.swift:111-112`), rather than a second Swift
+    ///    copy of it per kind. One rule, two callers: a row of another kind that
+    ///    names this physical address is a live reference here exactly as it is
+    ///    there, and a future kind is added to the function once.
+    ///  - the intent probe compares physical keys, normalised, and does not compare
+    ///    `storage_kind` at all. A leading slash and a storage kind are spellings of
+    ///    an address, not addresses; a writer that can still create these bytes is a
+    ///    writer whichever way the manifest happens to spell them.
+    ///
+    /// `kind` is still required, and still refused when it is not one of the six,
+    /// because a manifest row of an unknown kind is a corrupt row and this is not
+    /// the place to guess what it meant.
     static func objectIsReferenced(kind: String, key: String, excludingJobID: UUID? = nil,
                                    on database: Database) async throws -> Bool {
         let sql = try VerifiedIdentityService.sql(database)
-        let query: SQLQueryString
-        switch kind {
-        case "private_media":
-            query = "SELECT 1 FROM media_assets WHERE original_key=\(bind: key) OR rendition_key=\(bind: key) LIMIT 1"
-        case "private_drawing":
-            query = "SELECT 1 FROM drawing_assets a LEFT JOIN drawing_asset_pages p ON p.asset_id=a.id WHERE a.original_key=\(bind: key) OR p.rendition_key=\(bind: key) OR p.thumbnail_key=\(bind: key) LIMIT 1"
-        case "private_import":
-            query = "SELECT 1 WHERE EXISTS(SELECT 1 FROM imported_file_objects WHERE rendition_key=\(bind: key)) OR EXISTS(SELECT 1 FROM legacy_import_file_processing WHERE rendition_key=\(bind: key)) OR EXISTS(SELECT 1 FROM legacy_import_drawing_processing WHERE rendition_key=\(bind: key) OR thumbnail_key=\(bind: key)) OR EXISTS(SELECT 1 FROM staged_legacy_import_files f JOIN staged_legacy_imports i ON i.id=f.session_id WHERE 'staged-import/'||lower(i.workspace_id::TEXT)||'/'||lower(f.session_id::TEXT)||'/'||lower(f.declaration_id::TEXT)||'/original'=\(bind: key))"
-        case "legacy_photo":
-            query = "SELECT 1 WHERE EXISTS(SELECT 1 FROM synced_photos WHERE ltrim(file_path,'/')=ltrim(\(bind: key),'/') OR ltrim(thumbnail_file_path,'/')=ltrim(\(bind: key),'/')) OR EXISTS(SELECT 1 FROM synced_drawings WHERE ltrim(file_path,'/')=ltrim(\(bind: key),'/')) OR EXISTS(SELECT 1 FROM snag_deletions d CROSS JOIN LATERAL unnest(d.file_paths) AS path(value) WHERE ltrim(path.value,'/')=ltrim(\(bind:key),'/'))"
-        case "legacy_drawing":
-            query = "SELECT 1 WHERE EXISTS(SELECT 1 FROM synced_drawings WHERE ltrim(file_path,'/')=ltrim(\(bind: key),'/')) OR EXISTS(SELECT 1 FROM synced_photos WHERE ltrim(file_path,'/')=ltrim(\(bind: key),'/') OR ltrim(thumbnail_file_path,'/')=ltrim(\(bind: key),'/')) OR EXISTS(SELECT 1 FROM snag_deletions d CROSS JOIN LATERAL unnest(d.file_paths) AS path(value) WHERE ltrim(path.value,'/')=ltrim(\(bind:key),'/'))"
-        case "legacy_completion_photo":
-            query = "SELECT 1 WHERE EXISTS(SELECT 1 FROM completion_upload_objects WHERE storage_key=\(bind:key) OR thumbnail_key=\(bind:key)) OR EXISTS(SELECT 1 FROM completion_photos WHERE upload_object_id IS NULL AND (ltrim(url,'/')=ltrim(\(bind:key),'/') OR ltrim(thumbnail_url,'/')=ltrim(\(bind:key),'/') OR url LIKE '%/'||ltrim(\(bind:key),'/') OR thumbnail_url LIKE '%/'||ltrim(\(bind:key),'/')))"
-        default:
+        guard PrivateObjectAllocationPolicy.storageKinds.contains(kind) else {
             throw Abort(.internalServerError, reason: "Unsupported deletion object kind")
         }
-        if try await sql.raw(query).first() != nil { return true }
+        if try await sql.raw("""
+            SELECT 1 WHERE EXISTS(SELECT 1 FROM unnest(ARRAY['private_media','private_drawing','private_import',
+                'legacy_photo','legacy_drawing','legacy_completion_photo']) k(kind)
+                WHERE object_erasure_has_graph_reference(k.kind,\(bind: key)))
+            """).first() != nil { return true }
         return try await sql.raw("""
             SELECT 1 FROM object_write_intents i
-            WHERE i.storage_kind=\(bind:kind) AND i.object_key=\(bind:key)
+            WHERE ltrim(i.object_key,'/')=ltrim(\(bind:key),'/')
               AND (CAST(\(bind:excludingJobID) AS UUID) IS NULL OR NOT EXISTS(
                 SELECT 1 FROM account_deletion_write_intents d
                 WHERE d.intent_id=i.id AND d.job_id=CAST(\(bind:excludingJobID) AS UUID)))
