@@ -71,6 +71,15 @@ enum PrivateContentStoreError: Error, Equatable {
     /// typed outcome decided from the status line, without the provider's error
     /// page ever being collated.
     case alreadyExists
+    /// There is no object at this key. Decided from a GET's status line and from
+    /// nothing else: "nothing is there" and "what came back could not be read"
+    /// are different facts about a photograph, and a caller that has just written
+    /// bytes acts differently on each — one says the write never landed, the
+    /// other says the storage answer cannot be trusted. Absence is therefore
+    /// never inferred from a parse failure, and a PUT answered 404 keeps its
+    /// existing meaning: `transportUnavailable`, because a refused write says
+    /// nothing about what is at the address.
+    case absent
 }
 
 /// Writes and reads private image content over the same transport discipline as
@@ -179,6 +188,11 @@ final class R2PrivateContentStore: PrivateContentStorage, Sendable {
             }
             return .init(target: target, key: key, body: body, contentType: contentType, metadata: metadata, etag: etag)
         } catch is CancellationError { throw CancellationError() }
+        // Absence survives this catch intact. Collapsing it here is what used to
+        // make "the object is not there" indistinguishable from "R2 did not
+        // answer", which are the two outcomes an interrupted upload has to tell
+        // apart before it decides whether a retry can help.
+        catch PrivateContentStoreError.absent { throw PrivateContentStoreError.absent }
         catch { throw PrivateContentStoreError.transportUnavailable }
     }
 }
@@ -239,6 +253,13 @@ struct R2PrivateContentHTTPClient: AWSHTTPClient {
                 // any of the branches below could read, collate or log a body.
                 if request.method == .PUT, response.status == .preconditionFailed {
                     throw PrivateContentStoreError.alreadyExists
+                }
+                // Absence is decided the same way, at the same point, and only for
+                // a GET: before any header is inspected and before any body could
+                // be read, collated or logged. A PUT answered 404 falls through to
+                // the transport failure below, unchanged.
+                if request.method == .GET, response.status == .notFound {
+                    throw PrivateContentStoreError.absent
                 }
                 // Never collate an error/redirect page, and never follow a public
                 // cache URL. The production HTTPClient has redirects disabled.

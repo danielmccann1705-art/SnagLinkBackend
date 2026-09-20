@@ -14,7 +14,7 @@ final class PrivateContentStoreTests: XCTestCase {
 
     actor HTTP: AWSHTTPClient {
         enum Mode: Sendable {
-            case normal, alreadyExists, lostPUT, redirect, error, stalled, putEchoesBody
+            case normal, alreadyExists, lostPUT, redirect, error, stalled, putEchoesBody, notFound
             case fence, fenceWithBytes, fenceWithoutMarker
             case missingETag, duplicateETag, wrongCacheControl, foreignMIME, contentWithMetadata
             case mislabelledBytes, overDeclared, underDeclared, oversizedDeclaration
@@ -71,6 +71,12 @@ final class PrivateContentStoreTests: XCTestCase {
                     return .init(status: .preconditionFailed, headers: [:], body: .init(asyncSequence: Stalled(), length: nil))
                 }
                 if mode == .lostPUT { throw Failure() }
+            }
+            // On either method. A real provider sends a document with its 404; it
+            // is attached to a sequence that never completes, so anything that
+            // reads or collates it stalls instead of passing.
+            if mode == .notFound {
+                return .init(status: .notFound, headers: [:], body: .init(asyncSequence: Stalled(), length: nil))
             }
             if mode == .redirect {
                 return .init(status: .temporaryRedirect, headers: ["Location": "https://public.example.invalid/cached"],
@@ -163,6 +169,12 @@ final class PrivateContentStoreTests: XCTestCase {
 
     private func rejected(_ action: () async throws -> Void, file: StaticString = #filePath, line: UInt = #line) async {
         do { try await action(); XCTFail("Expected fail-closed rejection", file: file, line: line) } catch { }
+    }
+    /// The refusal itself, for the cases where which refusal it is carries the
+    /// meaning — absence and a transport failure are the same status to a caller
+    /// that only asks whether something threw.
+    private func thrown(_ action: () async throws -> Void, file: StaticString = #filePath, line: UInt = #line) async -> (any Error)? {
+        do { try await action(); XCTFail("Expected fail-closed rejection", file: file, line: line); return nil } catch { return error }
     }
 
     // MARK: the create-only PUT
@@ -508,5 +520,200 @@ final class PrivateContentStoreTests: XCTestCase {
         XCTAssertEqual(calls.count, 6)
         XCTAssertEqual(calls.first, TestPrivateContentStore.Call.put(key: key, byteCount: jpeg.count, contentType: "image/jpeg"))
         XCTAssertEqual(calls.last, TestPrivateContentStore.Call.put(key: placeholder, byteCount: jpeg.count, contentType: "image/jpeg"))
+    }
+
+    // MARK: absence, and what it is not
+
+    /// An empty address is a distinct answer, not a failed read. It is decided
+    /// from the status line: the provider's 404 document is attached to a sequence
+    /// that never completes, so any collation stalls instead of passing.
+    func testAGETThatFindsNothingIsAbsentDecidedFromTheStatusLine() async throws {
+        await http.set(.notFound)
+        let start = ContinuousClock.now
+        let error = await thrown { _ = try await self.store.read(key: self.key, maximumBytes: PrivateContent.maximumBytes) }
+        XCTAssertEqual(error as? PrivateContentStoreError, .absent)
+        XCTAssertLessThan(start.duration(to: .now), .seconds(2), "the 404 body must never be collated")
+        let snapshot = await http.snapshot()
+        XCTAssertEqual(snapshot.methods, ["GET"], "the transport must have been reached")
+        XCTAssertTrue(snapshot.valid)
+    }
+
+    /// A PUT answered 404 keeps the meaning it has always had. A refused write
+    /// says nothing about what is at the address, so it must not become absence:
+    /// a caller that read "nothing is there" from its own failed write would
+    /// conclude the photograph never landed when it may well have.
+    func testAPUTAnsweredNotFoundStaysATransportFailure() async throws {
+        await http.set(.notFound)
+        let error = await thrown { _ = try await self.store.put(key: self.key, data: self.jpeg, contentType: "image/jpeg") }
+        XCTAssertEqual(error as? PrivateContentStoreError, .transportUnavailable)
+        XCTAssertNotEqual(error as? PrivateContentStoreError, .absent)
+        let snapshot = await http.snapshot()
+        XCTAssertEqual(snapshot.methods, ["PUT"])
+        XCTAssertEqual(snapshot.conditional, [["*"]], "a 404 does not relax the create-only condition")
+        XCTAssertTrue(snapshot.valid)
+    }
+
+    /// Absence comes from the status line and from nowhere else. A reply this
+    /// store cannot parse is not evidence that the object is missing — it is
+    /// evidence that the provider cannot be trusted about this key — and the two
+    /// lead a caller to opposite decisions about retrying.
+    func testAbsenceIsNeverInferredFromAMalformedReply() async {
+        for mode in [HTTP.Mode.missingETag, .duplicateETag, .wrongCacheControl, .foreignMIME, .contentWithMetadata,
+                     .mislabelledBytes, .overDeclared, .underDeclared, .oversizedDeclaration, .contentEncoding,
+                     .contentRange, .fenceWithBytes, .fenceWithoutMarker, .redirect, .error] {
+            await http.set(mode)
+            let error = await thrown { _ = try await self.store.read(key: self.key, maximumBytes: PrivateContent.maximumBytes) }
+            XCTAssertNotEqual(error as? PrivateContentStoreError, .absent, "\(mode) is unreadable, not empty")
+        }
+    }
+
+    // MARK: reserved namespaces
+
+    /// A private namespace equal to a legacy family's prefix is refused outright.
+    /// Until now nothing but a shape coincidence kept create-only content out of
+    /// an address space the physical-delete path still owns.
+    func testALegacyFamilyPrefixIsRefusedAsAPrivateNamespace() throws {
+        XCTAssertEqual(PrivateStorageTargetConfiguration.reservedNamespaces,
+                       ["platform/", "drawings/", "staged-import/", "uploads/"])
+        for reserved in ["platform/", "drawings/", "staged-import/", "uploads/"] {
+            var candidate = values
+            candidate["R2_PRIVATE_NAMESPACE"] = reserved
+            XCTAssertThrowsError(try PrivateStorageTargetConfiguration.load(environment: .testing, lookup: { candidate[$0] }),
+                                 "\(reserved) belongs to a legacy object family") { error in
+                guard case R2ObjectErasureFenceError.configurationUnavailable = error else {
+                    return XCTFail("Expected configurationUnavailable, got \(error)")
+                }
+            }
+        }
+        // The refusal is these four strings, not the shape of a namespace: a
+        // prefix that is not one of them still installs exactly as before.
+        for accepted in ["private-v1/", "immutable-v1/", "fence-gate-v1/", "platform-v1/", "uploads-v1/"] {
+            var candidate = values
+            candidate["R2_PRIVATE_NAMESPACE"] = accepted
+            let loaded = try PrivateStorageTargetConfiguration.load(environment: .testing, lookup: { candidate[$0] })
+            XCTAssertEqual(loaded?.target.namespace, accepted)
+        }
+    }
+
+    // MARK: the shared in-memory double
+
+    /// The double three later packets are written against. Create-only, exact
+    /// about keys, and able to say that an address is empty.
+    func testTheSharedDoubleIsCreateOnlyAnswersAbsentAndRecordsItsCalls() async throws {
+        let double = try InMemoryPrivateContentStore.synthetic()
+        XCTAssertEqual(double.target.writeProtocol, .createOnlyV1)
+        let key = double.originalKey()
+        let empty = await thrown { _ = try await double.read(key: key, maximumBytes: PrivateContent.maximumBytes) }
+        XCTAssertEqual(empty as? PrivateContentStoreError, .absent, "an address nobody has written to is empty, not broken")
+        let created = try await double.put(key: key, data: jpeg, contentType: "image/jpeg")
+        guard case .created(let etag) = created else { return XCTFail("Expected a created outcome, got \(created)") }
+        XCTAssertFalse(etag.isEmpty)
+        let read = try await double.read(key: key, maximumBytes: PrivateContent.maximumBytes)
+        XCTAssertEqual(read.target, double.target)
+        XCTAssertEqual(read.body, jpeg)
+        XCTAssertEqual(read.sha256, PrivateImageProcessor.digest(jpeg))
+        XCTAssertEqual(read.etag, etag)
+        XCTAssertFalse(read.isErasureFence)
+        let repeated = try await double.put(key: key, data: png, contentType: "image/png")
+        XCTAssertEqual(repeated, .alreadyExists)
+        let afterRepeat = try await double.read(key: key, maximumBytes: PrivateContent.maximumBytes)
+        XCTAssertEqual(afterRepeat.body, jpeg, "the refused write left the first bytes exactly as they were")
+        // What the real store refuses, the double refuses: the placeholder key,
+        // and bytes that are not the image type they are declared to be.
+        let placeholder = double.placeholderKey(for: key)
+        let mislabelled = double.originalKey()
+        await rejected { _ = try await double.put(key: placeholder, data: self.jpeg, contentType: "image/jpeg") }
+        await rejected { _ = try await double.put(key: mislabelled, data: self.png, contentType: "image/jpeg") }
+        let stored = await double.object(at: mislabelled)
+        XCTAssertNil(stored, "a refused write stores nothing")
+        let calls = await double.recordedCalls()
+        XCTAssertEqual(calls, [.read(key: key, maximumBytes: PrivateContent.maximumBytes),
+                               .put(key: key, byteCount: jpeg.count, contentType: "image/jpeg"),
+                               .read(key: key, maximumBytes: PrivateContent.maximumBytes),
+                               .put(key: key, byteCount: png.count, contentType: "image/png"),
+                               .read(key: key, maximumBytes: PrivateContent.maximumBytes),
+                               .put(key: placeholder, byteCount: jpeg.count, contentType: "image/jpeg"),
+                               .put(key: mislabelled, byteCount: png.count, contentType: "image/jpeg")],
+                       "every call is recorded, including the ones that were refused")
+    }
+
+    /// **The asymmetry the double exists to model.** A fence write is deliberately
+    /// unconditional and replaces content; a content write is create-only and can
+    /// never replace a fence. A double that let a photograph land back on a fenced
+    /// key would make a later packet's tests pass while the mechanism was broken.
+    func testInTheSharedDoubleAFenceWinsTheAddressAndContentNeverWinsItBack() async throws {
+        let double = try InMemoryPrivateContentStore.synthetic()
+        let marker = ["snaglist-erasure": ObjectErasureFenceService.marker]
+        let key = double.originalKey()
+        let written = try await double.put(key: key, data: jpeg, contentType: "image/jpeg")
+        guard case .created(let contentETag) = written else { return XCTFail("Expected a created outcome, got \(written)") }
+        let fenceETag = try await double.replaceWithEmptyFence(key: key, contentType: ObjectErasureFenceService.contentType,
+                                                               metadata: marker)
+        XCTAssertNotEqual(fenceETag, contentETag, "the fence is a different object from the photograph it replaced")
+        let fenceReadback = try await double.readFence(key: key, maximumBytes: 1)
+        XCTAssertEqual(fenceReadback.etag, fenceETag)
+        XCTAssertEqual(fenceReadback.byteCount, 0)
+        XCTAssertEqual(fenceReadback.metadata, marker)
+        let refused = try await double.put(key: key, data: jpeg, contentType: "image/jpeg")
+        XCTAssertEqual(refused, .alreadyExists, "a late writer cannot put the photograph back")
+        let afterFence = try await double.read(key: key, maximumBytes: PrivateContent.maximumBytes)
+        XCTAssertTrue(afterFence.isErasureFence)
+        XCTAssertEqual(afterFence.sha256, ObjectErasureFenceService.emptySHA256)
+        // A fence at an address nothing was ever written to holds it just as well.
+        let unwritten = double.originalKey()
+        _ = try await double.seedErasureFence(key: unwritten)
+        let neverLanded = try await double.put(key: unwritten, data: jpeg, contentType: "image/jpeg")
+        XCTAssertEqual(neverLanded, .alreadyExists)
+        let stillFenced = try await double.read(key: unwritten, maximumBytes: PrivateContent.maximumBytes)
+        XCTAssertTrue(stillFenced.isErasureFence)
+        // The fence side refuses anything that is not the exact fence, and an
+        // address holding nothing is a transport failure there, not absence.
+        await rejected { _ = try await double.replaceWithEmptyFence(key: key, contentType: "image/jpeg", metadata: marker) }
+        await rejected { _ = try await double.replaceWithEmptyFence(key: key, contentType: ObjectErasureFenceService.contentType, metadata: [:]) }
+        let missing = await thrown { _ = try await double.readFence(key: double.originalKey(), maximumBytes: 1) }
+        XCTAssertNil(missing as? PrivateContentStoreError, "absence is the content store's word, not the fence store's")
+        let content = double.originalKey()
+        _ = try await double.put(key: content, data: jpeg, contentType: "image/jpeg")
+        await rejected { _ = try await double.readFence(key: content, maximumBytes: 1) }
+    }
+
+    /// The two interrupted-PUT fixtures a later packet's state table is built on:
+    /// a response that was lost after the bytes landed, and a request that never
+    /// reached storage at all. They report the same failure and mean opposite
+    /// things, and only the readback tells them apart.
+    func testTheSharedDoubleReproducesBothInterruptedPUTOutcomes() async throws {
+        let double = try InMemoryPrivateContentStore.synthetic()
+        let landed = double.originalKey()
+        await double.dropNextPutResponse()
+        let dropped = await thrown { _ = try await double.put(key: landed, data: self.jpeg, contentType: "image/jpeg") }
+        XCTAssertEqual(dropped as? PrivateContentStoreError, .transportUnavailable, "a lost response is not a success")
+        let recovered = try await double.read(key: landed, maximumBytes: PrivateContent.maximumBytes)
+        XCTAssertEqual(recovered.body, jpeg, "the bytes are there: the response was lost, the write was not")
+        let never = double.originalKey()
+        await double.failNextPut()
+        let refused = await thrown { _ = try await double.put(key: never, data: self.jpeg, contentType: "image/jpeg") }
+        XCTAssertEqual(refused as? PrivateContentStoreError, .transportUnavailable)
+        let nothing = await thrown { _ = try await double.read(key: never, maximumBytes: PrivateContent.maximumBytes) }
+        XCTAssertEqual(nothing as? PrivateContentStoreError, .absent, "the write never landed")
+        let storedNothing = await double.object(at: never)
+        XCTAssertNil(storedNothing)
+        // Storage that does not answer the readback is neither of those.
+        await double.failNextRead()
+        let unreachable = await thrown { _ = try await double.read(key: landed, maximumBytes: PrivateContent.maximumBytes) }
+        XCTAssertEqual(unreachable as? PrivateContentStoreError, .transportUnavailable)
+        // A lost response over a fenced address stores nothing: the provider would
+        // have refused that write before there was a response to lose.
+        let fenced = double.originalKey()
+        _ = try await double.seedErasureFence(key: fenced)
+        await double.dropNextPutResponse()
+        await rejected { _ = try await double.put(key: fenced, data: self.jpeg, contentType: "image/jpeg") }
+        let intact = try await double.read(key: fenced, maximumBytes: PrivateContent.maximumBytes)
+        XCTAssertTrue(intact.isErasureFence, "a lost response must not let content land on a fence")
+        // Every control is one-shot: the next call behaves normally again.
+        let clear = double.originalKey()
+        let created = try await double.put(key: clear, data: jpeg, contentType: "image/jpeg")
+        guard case .created = created else { return XCTFail("Expected a created outcome, got \(created)") }
+        let readBack = try await double.read(key: clear, maximumBytes: PrivateContent.maximumBytes)
+        XCTAssertEqual(readBack.body, jpeg)
     }
 }

@@ -28,12 +28,16 @@ struct PrivateStorageTargetConfiguration: Sendable {
     ///
     /// `R2_ERASURE_FENCE_ENABLED` and `R2_ERASURE_FENCE_NAMESPACE` are retired:
     /// the fence is not a separate installation from the storage it fences.
+    ///
+    /// A namespace equal to a legacy object family is refused outright; see
+    /// `reservedNamespaces`.
     static func load(environment: Environment, lookup: (String) -> String? = Environment.get) throws -> Self? {
         guard let namespace = lookup("R2_PRIVATE_NAMESPACE") else { return nil }
         // Unchanged by this extraction: an adapter exists, production/staging
         // activation does not. Lifting this guard is a separate reviewed step.
         guard environment == .testing,
               matches(namespace, "^[A-Za-z0-9_-]+/$"),
+              !reservedNamespaces.contains(namespace),
               let account = lookup("R2_ACCOUNT_ID"), matches(account, "^[a-f0-9]{32}$"),
               let bucket = lookup("R2_PRIVATE_BUCKET_NAME"), matches(bucket, "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"),
               bucket != (lookup("R2_BUCKET_NAME") ?? "snaglist-uploads"),
@@ -44,6 +48,20 @@ struct PrivateStorageTargetConfiguration: Sendable {
         return .init(target: .init(backend: "r2", backendIdentity: account, bucket: bucket,
                                  namespace: namespace, writeProtocol: .createOnlyV1), accessKey: access, secretKey: secret)
     }
+    /// The prefixes a legacy object family already owns: `platform/` for private
+    /// media written before the namespace, `drawings/` and `staged-import/` for
+    /// the two kinds that do not move this wave, and `uploads/` for everything the
+    /// public bucket and the synced-photo path put there. A private namespace
+    /// equal to one of these would put create-only, fenceable content at addresses
+    /// the physical-delete path still treats as its own to delete. Today nothing
+    /// but a shape coincidence keeps them apart — `validateContentKey` happens to
+    /// refuse the legacy shapes, `deleteAccountObject` happens to require them —
+    /// and a coincidence that several validators must keep agreeing on is not a
+    /// rule.
+    /// This is the rule. Refused with the same `configurationUnavailable` as every
+    /// other wrong particular: a misconfigured target never loads half-installed.
+    static let reservedNamespaces: Set<String> = ["platform/", "drawings/", "staged-import/", "uploads/"]
+
     fileprivate static func matches(_ value: String, _ pattern: String) -> Bool {
         guard let match = value.range(of: pattern, options: .regularExpression) else { return false }
         return match.lowerBound == value.startIndex && match.upperBound == value.endIndex
@@ -67,6 +85,11 @@ struct PrivateStorageTargetConfiguration: Sendable {
     /// moment the asset is allocated, long before a rendition has been computed;
     /// it names an object that does not exist, and a store that accepted it would
     /// let a caller write content to an address no deletion pass expects.
+    ///
+    /// This shape is deliberately not widened in Wave 2. Drawings and imports keep
+    /// their legacy addresses and their physical deletes this wave; admitting them
+    /// here is a store change with its own real-R2 gate, not a line in a packet
+    /// that happens to be editing this file.
     func validateContentKey(_ key: String) throws {
         do { try validate(key: key) } catch { throw PrivateContentStoreError.invalidKey }
         let parts = key.dropFirst(target.namespace.count).split(separator: "/", omittingEmptySubsequences: false)
