@@ -13,7 +13,7 @@ enum AccountDeletionAppleRevocationService {
                      AND apple_revocation_state IN ('pending','misconfigured','failing') THEN apple_revocation_state
                      ELSE 'unavailable' END
             FROM account_deletion_jobs WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token)
-                AND state='leased' AND lease_expires_at>NOW()
+                AND state='leased' AND lease_expires_at>clock_timestamp()
                 AND (apple_credential_ciphertext IS NOT NULL OR
                     (apple_revocation_state IN ('pending','misconfigured','failing','unavailable')
                      AND NOT EXISTS(SELECT 1 FROM account_deletion_apple_credentials WHERE job_id=\(bind: lease.id))))
@@ -59,7 +59,7 @@ enum AccountDeletionAppleRevocationService {
                     completed_at=CASE WHEN \(bind: succeeded) THEN NOW() ELSE NULL END
                 WHERE id=\(bind: childID) AND job_id=\(bind: lease.id)
                     AND EXISTS(SELECT 1 FROM account_deletion_jobs WHERE id=\(bind: lease.id)
-                        AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>NOW())
+                        AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp())
                 """).run()
             }
         }
@@ -81,7 +81,7 @@ enum AccountDeletionAppleRevocationService {
                     WHERE job_id=j.id AND state NOT IN ('revoked','already_revoked')) THEN NULL ELSE apple_credential_ciphertext END,
                 apple_client_id=CASE WHEN NOT EXISTS(SELECT 1 FROM account_deletion_apple_credentials
                     WHERE job_id=j.id AND state NOT IN ('revoked','already_revoked')) THEN NULL ELSE apple_client_id END
-            WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>NOW()
+            WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp()
             """).run()
     }
 }

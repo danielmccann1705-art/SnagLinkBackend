@@ -213,6 +213,71 @@ final class AccountDeletionObjectFenceTests: XCTestCase {
         XCTAssertEqual(try row?.decode(column: "last_error_kind", as: String?.self) ?? nil, "fence_not_eligible")
     }
 
+    // MARK: one clock
+
+    /// Makes every job that already existed undue, so the claim below can only
+    /// return this test's own. `claim` selects by a global predicate, and a job
+    /// another test left behind would otherwise be the one it picks up.
+    private func parkExistingJobs() async throws {
+        try await VerifiedIdentityService.sql(app.db).raw("""
+            UPDATE account_deletion_jobs SET available_at=clock_timestamp()+INTERVAL '1 day',
+                lease_expires_at=CASE WHEN state='leased' THEN clock_timestamp()+INTERVAL '1 day' ELSE lease_expires_at END
+            WHERE state IN ('ready','blocked','leased')
+            """).run()
+    }
+
+    /// Every durable lease predicate in this flow is PostgreSQL's
+    /// `clock_timestamp()`, so a lease the database considers expired is expired for
+    /// everyone — whatever the application process believes the time to be.
+    ///
+    /// The provider here is the correct one throughout: it accepts the fence and
+    /// reads back exactly what was written. The only thing that differs between the
+    /// two halves is the lease, so the refusal can have come from nothing else.
+    func testACorrectProviderCannotAttestUnderAStaleLease() async throws {
+        let id = try await user(), key = "fences-v1/\(UUID())"
+        try await intent(userID: id, key: key, target: target())
+        try await parkExistingJobs()
+        let lease = try await endAndLease(id)
+        try await manifest(lease, key: key)
+        try await VerifiedIdentityService.sql(app.db).raw("UPDATE account_deletion_jobs SET database_cleanup_state='completed' WHERE id=\(bind: lease.id)").run()
+        let storage = Storage(target: target())
+        app.storage[AccountDeletionFenceProvider.InjectionKey.self] = storage
+
+        // Expired by the database's own clock, which is the only clock any
+        // predicate in this flow consults.
+        try await VerifiedIdentityService.sql(app.db).raw("""
+            UPDATE account_deletion_jobs SET lease_expires_at=clock_timestamp()-INTERVAL '1 minute' WHERE id=\(bind: lease.id)
+            """).run()
+
+        let stale = try await AccountDeletionObjectFenceService.perform(lease, app: app, on: app.db)
+        XCTAssertEqual(stale, 0, "an expired lease attests nothing, however willing the provider is")
+        var puts = await storage.putCount()
+        XCTAssertEqual(puts, 0, "the lease is checked before storage is reached")
+        var row = try await VerifiedIdentityService.sql(app.db).raw("""
+            SELECT completed_at FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND object_key=\(bind: key)
+            """).first()
+        XCTAssertNil(try row?.decode(column: "completed_at", as: Date?.self) ?? nil,
+                     "nothing about the key changed; it is simply left for a worker that holds a lease")
+
+        // The same key and the same provider, under a lease PostgreSQL issued itself.
+        try await VerifiedIdentityService.sql(app.db).raw("""
+            UPDATE account_deletion_jobs SET state='ready',lease_token=NULL,lease_expires_at=NULL,
+                available_at=clock_timestamp()-INTERVAL '1 minute' WHERE id=\(bind: lease.id)
+            """).run()
+        let claimed = try await AccountDeletionWorker.claim(on: app.db)
+        let fresh = try XCTUnwrap(claimed)
+        XCTAssertEqual(fresh.id, lease.id, "the parked rows leave exactly this job claimable")
+        let current = try await AccountDeletionObjectFenceService.perform(fresh, app: app, on: app.db)
+        XCTAssertEqual(current, 1, "the same provider response attests once the lease is current")
+        puts = await storage.putCount()
+        XCTAssertEqual(puts, 1)
+        row = try await VerifiedIdentityService.sql(app.db).raw("""
+            SELECT completed_at FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND object_key=\(bind: key)
+            """).first()
+        XCTAssertNotNil(try row?.decode(column: "completed_at", as: Date?.self) ?? nil,
+                        "a fresh claim fences the key the stale lease could not")
+    }
+
     // MARK: the provider
 
     /// A store for one target may not serve another, and nothing falls back to a

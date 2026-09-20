@@ -75,9 +75,9 @@ final class R2ObjectErasureFenceStoreTests: XCTestCase {
     var configuration: R2ObjectErasureFenceConfiguration!
     var store: R2ObjectErasureFenceStore!
     var values: [String: String] { [
-        "R2_ERASURE_FENCE_ENABLED": "true", "R2_ACCOUNT_ID": String(repeating: "a", count: 32),
+        "R2_ACCOUNT_ID": String(repeating: "a", count: 32),
         "R2_PRIVATE_BUCKET_NAME": "synthetic-private", "R2_BUCKET_NAME": "synthetic-public",
-        "R2_ERASURE_FENCE_NAMESPACE": "immutable-v1/", "R2_ACCESS_KEY_ID": "synthetic-key", "R2_SECRET_ACCESS_KEY": "synthetic-secret"
+        "R2_PRIVATE_NAMESPACE": "immutable-v1/", "R2_ACCESS_KEY_ID": "synthetic-key", "R2_SECRET_ACCESS_KEY": "synthetic-secret"
     ] }
     override func setUp() async throws {
         let values = values
@@ -91,13 +91,13 @@ final class R2ObjectErasureFenceStoreTests: XCTestCase {
     func testDisabledFactoryDoesNotReadCredentialsOrCreateTransport() throws {
         var read: [String] = []
         let disabled = try R2ObjectErasureFenceStore.makeIfEnabled(target: configuration.target, environment: .production, lookup: { read.append($0); return nil })
-        XCTAssertNil(disabled); XCTAssertEqual(read, ["R2_ERASURE_FENCE_ENABLED"])
+        XCTAssertNil(disabled); XCTAssertEqual(read, ["R2_PRIVATE_NAMESPACE"])
     }
     func testEnabledConfigurationRequiresTestingAndExactPrivateServerTarget() throws {
         let values = values
         XCTAssertThrowsError(try R2ObjectErasureFenceConfiguration.load(environment: .production, lookup: { values[$0] }))
         for (field,value) in [("R2_ACCOUNT_ID","foreign.example/path"), ("R2_PRIVATE_BUCKET_NAME","synthetic-public"),
-                              ("R2_ERASURE_FENCE_NAMESPACE","../"), ("R2_SECRET_ACCESS_KEY","")] {
+                              ("R2_PRIVATE_NAMESPACE","../"), ("R2_SECRET_ACCESS_KEY","")] {
             var wrong = values; wrong[field] = value
             XCTAssertThrowsError(try R2ObjectErasureFenceConfiguration.load(environment: .testing, lookup: { wrong[$0] }))
         }

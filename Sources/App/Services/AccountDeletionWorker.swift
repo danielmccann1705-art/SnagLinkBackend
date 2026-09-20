@@ -25,6 +25,10 @@ enum AccountDeletionWorker {
         var completed = 0
         var blocked = 0
         var retrying = 0
+        /// Jobs that were due and were not claimed, because the pass budget was
+        /// spent. Recorded in `cleanup_runs.removed_json`, where a number that keeps
+        /// growing says the window is too small, not that a job failed.
+        var deferredByBudget = 0
     }
     struct Lease: Sendable {
         let id: UUID
@@ -32,14 +36,63 @@ enum AccountDeletionWorker {
         let token: UUID
         let attempt: Int
     }
-    static func claim(on db: Database, now: Date = Date()) async throws -> Lease? {
+
+    /// How long one maintenance pass may spend on deletion work in total.
+    ///
+    /// The production cron handler awaits the whole maintenance pass, and a Worker
+    /// scheduled handler is cut off at fifteen minutes of wall clock. Eight claimed
+    /// jobs times a two-minute fence pass is sixteen minutes before the first
+    /// physical delete or Apple call even begins, so an unbounded pass is killed
+    /// part-way through: the advisory lock dies with the request and the next firing
+    /// records "skipped". Bounded, the work that does not fit is simply left due and
+    /// the next pass claims it.
+    ///
+    /// This clock is the application's, deliberately. It measures how long this
+    /// process has been running, which is not a comparison against any durable row.
+    /// Every lease predicate below is on PostgreSQL's `clock_timestamp()` instead,
+    /// precisely so a provider's correct answer cannot be thrown away because two
+    /// machines disagree about the time.
+    struct PassBudget: Sendable {
+        /// The whole pass, across every job it claims.
+        var total: TimeInterval = 480
+        /// A new job is not claimed with less than this left. Claiming one only to
+        /// hand it a near-zero budget spends an attempt and a lease for nothing.
+        var minimumPerJob: TimeInterval = 30
+        /// The most one job's fence pass may take, before the remaining time caps it.
+        var fenceCeiling: TimeInterval = AccountDeletionObjectFenceService.Budget.default.pass
+        /// Overridable so a test can drive a pass from its own clock.
+        var now: @Sendable () -> Date = Date.init
+        static let `default` = PassBudget()
+    }
+
+    /// The fence budget for the job about to start: never more than the ceiling,
+    /// never more than the pass has left, never negative.
+    static func fencePass(remaining: TimeInterval, budget: PassBudget = .default) -> TimeInterval {
+        max(0, min(budget.fenceCeiling, remaining))
+    }
+
+    /// How many jobs this pass left due when the budget stopped it, bounded by the
+    /// slots it never used. The predicate is `claim`'s own, so the number says what
+    /// the pass would have taken next: evidence for a runbook, not a control signal.
+    static func dueCount(on db: Database, limit: Int) async throws -> Int {
+        guard limit > 0 else { return 0 }
+        let row = try await VerifiedIdentityService.sql(db).raw("""
+            SELECT count(*) AS due FROM (SELECT id FROM account_deletion_jobs
+                WHERE ((state IN ('ready','blocked') AND available_at<=clock_timestamp())
+                    OR (state='leased' AND lease_expires_at<=clock_timestamp()))
+                LIMIT \(bind: limit)) AS deferred
+            """).first()
+        return try row?.decode(column: "due", as: Int.self) ?? 0
+    }
+
+    static func claim(on db: Database) async throws -> Lease? {
         let token = UUID()
         let row = try await VerifiedIdentityService.sql(db).raw("""
             UPDATE account_deletion_jobs SET state='leased',lease_token=\(bind: token),
-                lease_expires_at=\(bind: now.addingTimeInterval(300)),attempts=attempts+1
+                lease_expires_at=clock_timestamp()+INTERVAL '300 seconds',attempts=attempts+1
             WHERE id=(SELECT id FROM account_deletion_jobs
-                WHERE ((state IN ('ready','blocked') AND available_at<=\(bind: now))
-                    OR (state='leased' AND lease_expires_at<=\(bind: now)))
+                WHERE ((state IN ('ready','blocked') AND available_at<=clock_timestamp())
+                    OR (state='leased' AND lease_expires_at<=clock_timestamp()))
                 ORDER BY requested_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
             RETURNING id,user_id,attempts
             """).first()
@@ -49,18 +102,32 @@ enum AccountDeletionWorker {
     }
     static func renew(_ lease: Lease, on db: Database) async throws -> Bool {
         try await VerifiedIdentityService.sql(db).raw("""
-            UPDATE account_deletion_jobs SET lease_expires_at=\(bind: Date().addingTimeInterval(300))
-            WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>NOW() RETURNING id
+            UPDATE account_deletion_jobs SET lease_expires_at=clock_timestamp()+INTERVAL '300 seconds'
+            WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp() RETURNING id
             """).first() != nil
     }
-    static func run(app: Application, on database: Database? = nil, transactionMode: TransactionMode = .managed, limit: Int = 8) async throws -> Counts {
+    static func run(app: Application, on database: Database? = nil, transactionMode: TransactionMode = .managed,
+                    limit: Int = 8, budget: PassBudget = .default) async throws -> Counts {
         let db = database ?? app.db
         var counts = Counts()
-        for _ in 0..<max(0, min(limit, 32)) {
+        let slots = max(0, min(limit, 32))
+        let deadline = budget.now().addingTimeInterval(budget.total)
+        var used = 0, stoppedByBudget = false
+        for _ in 0..<slots {
+            // Checked before claiming rather than after. A claim takes a lease and
+            // increments attempts, and doing that for work there is no time left to
+            // start is how a job walks up the backoff curve without being tried.
+            guard deadline.timeIntervalSince(budget.now()) >= budget.minimumPerJob else {
+                stoppedByBudget = true
+                break
+            }
             guard let lease = try await claim(on: db) else { break }
+            used += 1
             counts.processed += 1
             do {
-                try await perform(lease, app: app, on: db, transactionMode: transactionMode)
+                var fence = AccountDeletionObjectFenceService.Budget.default
+                fence.pass = fencePass(remaining: deadline.timeIntervalSince(budget.now()), budget: budget)
+                try await perform(lease, app: app, on: db, transactionMode: transactionMode, fenceBudget: fence)
                 let state = try await finish(lease, on: db)
                 if state == "completed" { counts.completed += 1 }
                 else if state == "blocked" { counts.blocked += 1 }
@@ -69,12 +136,13 @@ enum AccountDeletionWorker {
                 // Never log errors containing provider tokens, object addresses or PII.
                 try await VerifiedIdentityService.sql(db).raw("""
                     UPDATE account_deletion_jobs SET state='ready',lease_token=NULL,lease_expires_at=NULL,
-                        available_at=\(bind: Date().addingTimeInterval(300)),last_error_kind='worker_unavailable'
-                    WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>NOW()
+                        available_at=clock_timestamp()+INTERVAL '300 seconds',last_error_kind='worker_unavailable'
+                    WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp()
                     """).run()
                 counts.retrying += 1
             }
         }
+        if stoppedByBudget { counts.deferredByBudget = try await dueCount(on: db, limit: slots - used) }
         return counts
     }
     /// Hold the parent row while writing child progress. A snapshot-only EXISTS
@@ -111,9 +179,10 @@ enum AccountDeletionWorker {
     }
 
     static func perform(_ lease: Lease, app: Application, on db: Database,
-                        transactionMode: TransactionMode = .managed) async throws {
+                        transactionMode: TransactionMode = .managed,
+                        fenceBudget: AccountDeletionObjectFenceService.Budget = .default) async throws {
         let sql = try VerifiedIdentityService.sql(db)
-        guard try await sql.raw("SELECT id FROM account_deletion_jobs WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>NOW()").first() != nil else { return }
+        guard try await sql.raw("SELECT id FROM account_deletion_jobs WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp()").first() != nil else { return }
         try await AccountDeletionAppleRevocationService.perform(lease, app: app, on: db, transactionMode: transactionMode)
         // Never delete evidence until the graph transaction has demonstrated it
         // is no longer referenced and recorded the exact deletion manifest.
@@ -122,7 +191,7 @@ enum AccountDeletionWorker {
         // protocol is fenced, never deleted, even when its known intents are all
         // settled: the ordinary branch below excludes anything that has a fence row
         // precisely so the two can never both act on one key.
-        try await AccountDeletionObjectFenceService.perform(lease, app: app, on: db, transactionMode: transactionMode)
+        try await AccountDeletionObjectFenceService.perform(lease, app: app, on: db, transactionMode: transactionMode, budget: fenceBudget)
         let objects = try await sql.raw("""
             SELECT o.storage_kind,o.object_key FROM account_deletion_objects o
             WHERE o.job_id=\(bind:lease.id) AND o.completed_at IS NULL
@@ -157,7 +226,7 @@ enum AccountDeletionWorker {
                         UPDATE account_deletion_objects SET attempts=attempts+1,last_error_kind='object_still_referenced'
                         WHERE job_id=\(bind: lease.id) AND storage_kind=\(bind: kind) AND object_key=\(bind: key)
                             AND EXISTS(SELECT 1 FROM account_deletion_jobs WHERE id=\(bind: lease.id)
-                                AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>NOW())
+                                AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp())
                         """).run()
                     }
                     continue
@@ -172,7 +241,7 @@ enum AccountDeletionWorker {
             try await sql.raw("""
                 UPDATE account_deletion_objects SET completed_at=\(bind: completedAt),attempts=attempts+1,last_error_kind=\(bind: objectFailure)
                 WHERE job_id=\(bind: lease.id) AND storage_kind=\(bind: kind) AND object_key=\(bind: key)
-                    AND EXISTS(SELECT 1 FROM account_deletion_jobs WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>NOW())
+                    AND EXISTS(SELECT 1 FROM account_deletion_jobs WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp())
                 """).run()
             }
         }
@@ -186,7 +255,7 @@ enum AccountDeletionWorker {
                 EXISTS(SELECT 1 FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND completed_at IS NULL AND last_error_kind='object_still_referenced')
                 THEN 'blocked' WHEN EXISTS(SELECT 1 FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND completed_at IS NULL)
                 THEN 'pending' ELSE 'completed' END
-            WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>NOW()
+            WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp()
             """).run()
         try await CompanyClosureLifecycleService.completeObjectPhase(lease, on: db, transactionMode: transactionMode)
     }
@@ -216,8 +285,8 @@ enum AccountDeletionWorker {
                     WHEN apple_revocation_state='failing' THEN 'apple_unavailable'
                     WHEN EXISTS(SELECT 1 FROM account_deletion_unresolved_objects WHERE job_id=\(bind: lease.id)) THEN 'unresolved_legacy_object_ownership'
                     WHEN object_cleanup_state<>'completed' THEN 'object_cleanup_pending' ELSE NULL END,
-                available_at=\(bind: Date().addingTimeInterval(delay)),lease_token=NULL,lease_expires_at=NULL
-            WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>NOW() RETURNING state
+                available_at=clock_timestamp()+make_interval(secs => \(bind: delay)),lease_token=NULL,lease_expires_at=NULL
+            WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp() RETURNING state
             """).first()
         return try row?.decode(column: "state", as: String.self)
     }

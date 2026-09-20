@@ -38,6 +38,20 @@ export function productionContainerEnvironment(env) {
       env.R2_PUBLIC_URL !== productionAPIOrigin) {
     throw new Error('Production uses separate buckets and no public R2 origin');
   }
+  // One immutable private-storage configuration: R2_PRIVATE_NAMESPACE installs the
+  // create-only content store and the erasure fence that replaces what it wrote.
+  // Production is greenfield, so every allocation is create-only from its first
+  // byte — there is no legacy production row and there must never be one. A missing
+  // namespace, or any other prefix, is a refusal rather than a default.
+  if (env.R2_PRIVATE_NAMESPACE !== 'private-v1/') {
+    throw new Error('Production private media requires its pinned create-only namespace');
+  }
+  // Deletion that cannot fence is deletion that cannot finish. The switch is an exact
+  // literal, and 'true' is reachable only past the namespace required above.
+  const deletion = env.ACCOUNT_DELETION_ENABLED === undefined ? 'false' : env.ACCOUNT_DELETION_ENABLED;
+  if (deletion !== 'true' && deletion !== 'false') {
+    throw new Error('Account deletion is switched by an exact true or false');
+  }
   const jwt = required('JWT_SECRET'), maintenance = required('MAINTENANCE_SECRET');
   const link = required('LINK_GRANT_TOKEN_KEY'), apple = required('APPLE_CREDENTIAL_KEY');
   if (jwt.length < 32 || maintenance.length < 32 || !capabilityKey(link) || !capabilityKey(apple) ||
@@ -67,6 +81,7 @@ export function productionContainerEnvironment(env) {
     PLATFORM_ENVIRONMENT: 'production', PORTAL_ORIGIN: productionPortalOrigin,
     R2_ACCOUNT_ID: env.R2_ACCOUNT_ID, R2_BUCKET_NAME: env.R2_BUCKET_NAME,
     R2_PRIVATE_BUCKET_NAME: env.R2_PRIVATE_BUCKET_NAME, R2_PUBLIC_URL: productionAPIOrigin,
+    R2_PRIVATE_NAMESPACE: env.R2_PRIVATE_NAMESPACE, ACCOUNT_DELETION_ENABLED: deletion,
     R2_ACCESS_KEY_ID: required('R2_ACCESS_KEY_ID'), R2_SECRET_ACCESS_KEY: required('R2_SECRET_ACCESS_KEY'),
     JWT_SECRET: jwt, MAINTENANCE_SECRET: maintenance, LINK_GRANT_TOKEN_KEY: link,
     APPLE_BUNDLE_ID: env.APPLE_BUNDLE_ID, APPLE_CLIENT_ID: env.APPLE_CLIENT_ID,

@@ -23,7 +23,7 @@ final class R2FenceGateTests: XCTestCase {
     private var evidence: [String: Any] = [:]
 
     override func setUpWithError() throws {
-        try XCTSkipUnless(Environment.get("R2_ERASURE_FENCE_ENABLED") == "true",
+        try XCTSkipUnless(Environment.get("R2_PRIVATE_NAMESPACE") != nil,
                           "The real-R2 gate runs only when deliberately enabled")
         let configuration = try XCTUnwrap(try R2ObjectErasureFenceConfiguration.load(environment: .testing),
                                           "Fence configuration is not loadable")

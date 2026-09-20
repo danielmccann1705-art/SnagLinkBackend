@@ -165,3 +165,28 @@ test('legacy import preparation stays off unless the enabled candidate opts in o
   assert.throws(() => containerEnvironment({...sample(),...platform(),...importOptIn()}),'the recovery deployment cannot opt in');
   assert.throws(() => containerEnvironment({...candidate(),STAGED_LEGACY_IMPORT_ENABLED:'true'}),'half-supplied opt-in fails closed');
 });
+
+test('private media and account deletion install only for the candidate that can fence', () => {
+  const off=containerEnvironment(candidate());
+  assert.equal(off.R2_PRIVATE_NAMESPACE,undefined);
+  assert.equal(off.ACCOUNT_DELETION_ENABLED,undefined);
+  const fenced=containerEnvironment({...candidate(),R2_PRIVATE_NAMESPACE:'private-v1/'});
+  assert.equal(fenced.R2_PRIVATE_NAMESPACE,'private-v1/');
+  assert.equal(fenced.ACCOUNT_DELETION_ENABLED,'false');
+  const deleting=containerEnvironment({...candidate(),R2_PRIVATE_NAMESPACE:'private-v1/',ACCOUNT_DELETION_ENABLED:'true'});
+  assert.equal(deleting.R2_PRIVATE_NAMESPACE,'private-v1/');
+  assert.equal(deleting.ACCOUNT_DELETION_ENABLED,'true');
+  for (const override of [{ACCOUNT_DELETION_ENABLED:'true'},{ACCOUNT_DELETION_ENABLED:'false'},
+    {R2_PRIVATE_NAMESPACE:'private-v1'},{R2_PRIVATE_NAMESPACE:'private-v2/'},
+    {R2_PRIVATE_NAMESPACE:''},{R2_PRIVATE_NAMESPACE:'../'},
+    {R2_PRIVATE_NAMESPACE:'private-v1/',ACCOUNT_DELETION_ENABLED:'1'},
+    {R2_PRIVATE_NAMESPACE:'private-v1/',ACCOUNT_DELETION_ENABLED:''}]) {
+    assert.throws(() => containerEnvironment({...candidate(),...override}));
+  }
+  // The recovery deployment has no fenced private storage and may carry neither switch.
+  for (const override of [{R2_PRIVATE_NAMESPACE:'private-v1/'},{ACCOUNT_DELETION_ENABLED:'true'},
+    {R2_PRIVATE_NAMESPACE:'private-v1/',ACCOUNT_DELETION_ENABLED:'true'}]) {
+    assert.throws(() => containerEnvironment({...sample(),...platform(),...override}));
+    assert.throws(() => containerEnvironment({...sample(),...override}));
+  }
+});

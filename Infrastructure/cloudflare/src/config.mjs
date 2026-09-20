@@ -84,7 +84,8 @@ export function containerEnvironment(env) {
     ...email,
     ...platformEnvironment(env),
     ...appleEnvironment(env, candidate),
-    ...importPreparation(env, candidate, base)
+    ...importPreparation(env, candidate, base),
+    ...privateStorage(env, candidate)
   };
 }
 
@@ -145,6 +146,23 @@ function importPreparation(env, candidate, base) {
     throw new Error('Legacy import preparation requires the enabled unified candidate bound to its own API origin');
   }
   return { STAGED_LEGACY_IMPORT_ENABLED: 'true', IMPORT_PREVIEW_API_ORIGIN: base };
+}
+
+// Private media is one installation, not two: R2_PRIVATE_NAMESPACE names the single
+// create-only prefix that both the content store and the erasure fence replacing what
+// it wrote are built from. Only the enabled unified candidate has a private bucket to
+// fence, and it uses the same pinned prefix production does. Deletion that cannot
+// fence is deletion that cannot finish, so the deletion switch is accepted only
+// beside that namespace, and only as an exact literal.
+/** @returns {Record<string, string>} */
+function privateStorage(env, candidate) {
+  if (env.R2_PRIVATE_NAMESPACE === undefined && env.ACCOUNT_DELETION_ENABLED === undefined) return {};
+  const deletion = env.ACCOUNT_DELETION_ENABLED === undefined ? 'false' : env.ACCOUNT_DELETION_ENABLED;
+  if (!candidate || env.STAGING_PLATFORM_ENABLED !== 'true' ||
+      env.R2_PRIVATE_NAMESPACE !== 'private-v1/' || (deletion !== 'true' && deletion !== 'false')) {
+    throw new Error('Private media requires the enabled unified candidate and its pinned create-only namespace');
+  }
+  return { R2_PRIVATE_NAMESPACE: env.R2_PRIVATE_NAMESPACE, ACCOUNT_DELETION_ENABLED: deletion };
 }
 
 // Keep the recovery image's configuration valid until the unified candidate is

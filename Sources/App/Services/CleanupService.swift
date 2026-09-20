@@ -50,15 +50,21 @@ struct CleanupService {
         app.lifecycle.use(CleanupLifecycleHandler())
     }
 
+    /// `budget` bounds the deletion worker's share of the pass. The scheduler that
+    /// calls this awaits the whole thing and is cut off at fifteen minutes, so the
+    /// bound is what keeps a long fence pass from taking the advisory lock down with
+    /// the request and turning the next hour into a "skipped" record.
     @discardableResult
-    static func runCleanup(app: Application, trigger: Trigger = .manual) async throws -> Removed? {
+    static func runCleanup(app: Application, trigger: Trigger = .manual,
+                           budget: AccountDeletionWorker.PassBudget = .default) async throws -> Removed? {
         try await app.db.withConnection { db in
-            try await runCleanup(app: app, trigger: trigger, on: db)
+            try await runCleanup(app: app, trigger: trigger, budget: budget, on: db)
         }
     }
 
     /// The session advisory lock and unlock must use this same pinned connection.
-    private static func runCleanup(app: Application, trigger: Trigger, on db: Database) async throws -> Removed? {
+    private static func runCleanup(app: Application, trigger: Trigger,
+                                   budget: AccountDeletionWorker.PassBudget, on db: Database) async throws -> Removed? {
         let sql = try VerifiedIdentityService.sql(db)
 
         // Refuse to pile up behind a pass already in flight rather than queueing.
@@ -75,7 +81,7 @@ struct CleanupService {
         // next firing find the lock still held and skip a pass it should have run.
         let started = Date()
         do {
-            let removed = try await perform(app: app, on: db)
+            let removed = try await perform(app: app, budget: budget, on: db)
             try await record(trigger: trigger, started: started, state: "succeeded", removed: removed, errorKind: nil, on: sql)
             try await unlock(key, on: sql)
             app.logger.info("Cleanup completed: \(removed.auditLogs) audit logs, \(removed.magicLinkAuthTokens) auth tokens, \(removed.expiredPreviewLinks) preview links")
@@ -93,11 +99,12 @@ struct CleanupService {
         try await sql.raw("SELECT pg_advisory_unlock(\(bind: key))").run()
     }
 
-    private static func perform(app: Application, on db: Database) async throws -> Removed {
+    private static func perform(app: Application, budget: AccountDeletionWorker.PassBudget, on db: Database) async throws -> Removed {
         var removed = Removed()
 
         removed.appleWebCredentials = try await AppleWebCredentialEscrowService.run(app: app, on: db)
-        removed.accountDeletionJobs = try await AccountDeletionWorker.run(app: app, on: db, transactionMode: .maintenanceConnection)
+        removed.accountDeletionJobs = try await AccountDeletionWorker.run(app: app, on: db, transactionMode: .maintenanceConnection,
+                                                                          budget: budget)
         try await SnagDeletionService.cleanupFiles(app: app, on: db)
         try await RateLimitService.cleanup(on: db)
 

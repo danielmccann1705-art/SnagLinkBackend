@@ -36,10 +36,14 @@ final class AccountDeletionLifecycleTests: XCTestCase {
             """).run()
         return (id, userID, reference)
     }
+    /// The lease window is stamped in the database's clock, because that is the
+    /// only clock the predicates under test consult. A fixture that stamped it from
+    /// this process would be asserting that two machines agree about the time.
     private func lease(_ id: UUID, user: UUID, expired: Bool = false) async throws -> AccountDeletionWorker.Lease {
         let token = UUID()
         try await VerifiedIdentityService.sql(app.db).raw("""
-            UPDATE account_deletion_jobs SET state='leased',lease_token=\(bind: token),lease_expires_at=\(bind: Date().addingTimeInterval(expired ? -60 : 300)) WHERE id=\(bind: id)
+            UPDATE account_deletion_jobs SET state='leased',lease_token=\(bind: token),
+                lease_expires_at=clock_timestamp()+make_interval(secs => \(bind: expired ? -60.0 : 300.0)) WHERE id=\(bind: id)
             """).run()
         return .init(id: id, userID: user, token: token, attempt: 1)
     }
@@ -272,5 +276,74 @@ final class AccountDeletionLifecycleTests: XCTestCase {
         development.storage[AccountDeletionTestActivation.self] = true
         XCTAssertThrowsError(try AccountDeletionService.requireAvailable(development))
         try await development.asyncShutdown()
+    }
+
+    // MARK: - the pass budget
+
+    /// Makes every job that already existed undue. `run` claims by a global
+    /// predicate, so a job another test left behind would be claimed by this pass
+    /// too and the counts below would be measuring someone else's work.
+    private func parkExistingJobs() async throws {
+        try await VerifiedIdentityService.sql(app.db).raw("""
+            UPDATE account_deletion_jobs SET available_at=clock_timestamp()+INTERVAL '1 day',
+                lease_expires_at=CASE WHEN state='leased' THEN clock_timestamp()+INTERVAL '1 day' ELSE lease_expires_at END
+            WHERE state IN ('ready','blocked','leased')
+            """).run()
+    }
+
+    /// One job's fence budget is the ceiling or whatever the pass has left,
+    /// whichever is smaller, and never below zero — an overrun hands the next fence
+    /// pass nothing rather than a deadline already behind it.
+    func testTheFenceBudgetIsTheSmallerOfTheCeilingAndWhatThePassHasLeft() {
+        let budget = AccountDeletionWorker.PassBudget()
+        XCTAssertEqual(budget.total, 480)
+        XCTAssertEqual(budget.minimumPerJob, 30)
+        XCTAssertEqual(budget.fenceCeiling, AccountDeletionObjectFenceService.Budget.default.pass)
+        XCTAssertEqual(AccountDeletionWorker.fencePass(remaining: 600, budget: budget), 120)
+        XCTAssertEqual(AccountDeletionWorker.fencePass(remaining: 45, budget: budget), 45)
+        XCTAssertEqual(AccountDeletionWorker.fencePass(remaining: -5, budget: budget), 0)
+    }
+
+    /// A pass is bounded in wall clock because the cron handler that awaits it is:
+    /// eight jobs times a two-minute fence pass outlives the scheduled handler, and
+    /// a pass cut off part-way leaves its advisory lock to die with the request.
+    ///
+    /// Three jobs, a five-second budget, four seconds of work each. The pass starts
+    /// one, refuses to start a second it has no room to finish, and records how many
+    /// it left. The two it did not start are still due — not failed, not backed off
+    /// and not charged an attempt — so the next pass simply takes them.
+    func testAPassSpendsAtMostItsBudgetAndLeavesTheRestForTheNextPass() async throws {
+        try await parkExistingJobs()
+        var ids: [UUID] = []
+        for _ in 0..<3 {
+            let (id, _, _) = try await job(objects: "pending")
+            _ = try await object(jobID: id)
+            ids.append(id)
+        }
+        app.storage[AccountDeletionWorkerDependenciesKey.self] = .init(
+            revokeApple: { _, _, _ in .revoked },
+            deleteObject: { _, _ in try await Task.sleep(nanoseconds: 4 * 1_000_000_000) })
+
+        let started = Date()
+        let counts = try await AccountDeletionWorker.run(app: app, budget: .init(total: 5, minimumPerJob: 2))
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertEqual(counts.processed, 1, "four seconds of work leaves less than the floor, so no second job is claimed")
+        XCTAssertEqual(counts.deferredByBudget, 2, "what the budget stopped is recorded, not silently dropped")
+        XCTAssertLessThan(elapsed, 9, "unbounded, three four-second jobs would be twelve")
+        let due = try await AccountDeletionWorker.dueCount(on: app.db, limit: 8)
+        XCTAssertEqual(due, 2, "the deferred jobs are still due rather than pushed down the backoff curve")
+
+        app.storage[AccountDeletionWorkerDependenciesKey.self] = .init(
+            revokeApple: { _, _, _ in .revoked }, deleteObject: { _, _ in })
+        let next = try await AccountDeletionWorker.run(app: app)
+        XCTAssertEqual(next.processed, 2, "the jobs that waited are taken by the next pass")
+        XCTAssertEqual(next.deferredByBudget, 0)
+        for id in ids {
+            let row = try await VerifiedIdentityService.sql(app.db).raw("SELECT state,attempts FROM account_deletion_jobs WHERE id=\(bind: id)").first()
+            XCTAssertEqual(try row?.decode(column: "state", as: String.self), "completed")
+            XCTAssertEqual(try row?.decode(column: "attempts", as: Int.self), 1,
+                           "a job the budget deferred was never claimed, so it never spent an attempt")
+        }
     }
 }

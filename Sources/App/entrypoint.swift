@@ -24,6 +24,7 @@ enum Entrypoint {
         } catch {
             app.logger.error("Server execution failed: \(error)")
             await AccountDeletionFenceProvider.shutdown(app: app)
+            await PrivateContentStoreProvider.shutdown(app: app)
             try? await StorageService.shutdown()
             try? await app.asyncShutdown()
             // Exit gracefully instead of throwing, which can trigger SIGILL
@@ -31,6 +32,7 @@ enum Entrypoint {
         }
 
         await AccountDeletionFenceProvider.shutdown(app: app)
+        await PrivateContentStoreProvider.shutdown(app: app)
         try? await StorageService.shutdown()
         try await app.asyncShutdown()
     }

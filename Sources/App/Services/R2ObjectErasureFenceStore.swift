@@ -5,41 +5,10 @@ import NIOCore
 import NIOHTTP1
 import Logging
 
-/// Fixed server configuration, never decoded from a request or an intent row.
-struct R2ObjectErasureFenceConfiguration: Sendable {
-    let target: ObjectStorageWriteTarget
-    var endpoint: String { "https://\(target.backendIdentity).r2.cloudflarestorage.com" }
-    fileprivate let accessKey: String
-    fileprivate let secretKey: String
-
-    static func load(environment: Environment, lookup: (String) -> String? = Environment.get) throws -> Self? {
-        guard lookup("R2_ERASURE_FENCE_ENABLED") == "true" else { return nil }
-        // This packet provides an adapter, not production/staging activation.
-        guard environment == .testing,
-              let account = lookup("R2_ACCOUNT_ID"), matches(account, "^[a-f0-9]{32}$"),
-              let bucket = lookup("R2_PRIVATE_BUCKET_NAME"), matches(bucket, "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"),
-              bucket != (lookup("R2_BUCKET_NAME") ?? "snaglist-uploads"),
-              let namespace = lookup("R2_ERASURE_FENCE_NAMESPACE"), matches(namespace, "^[A-Za-z0-9_-]+/$"),
-              let access = lookup("R2_ACCESS_KEY_ID"), !access.isEmpty,
-              let secret = lookup("R2_SECRET_ACCESS_KEY"), !secret.isEmpty else {
-            throw R2ObjectErasureFenceError.configurationUnavailable
-        }
-        return .init(target: .init(backend: "r2", backendIdentity: account, bucket: bucket,
-                                 namespace: namespace, writeProtocol: .createOnlyV1), accessKey: access, secretKey: secret)
-    }
-    fileprivate static func matches(_ value: String, _ pattern: String) -> Bool {
-        guard let match = value.range(of: pattern, options: .regularExpression) else { return false }
-        return match.lowerBound == value.startIndex && match.upperBound == value.endIndex
-    }
-    func validate(key: String) throws {
-        let parts = key.split(separator: "/", omittingEmptySubsequences: false)
-        guard key.utf8.count <= 1024, key.hasPrefix(target.namespace), key.count > target.namespace.count,
-              parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." &&
-                  Self.matches(String($0), "^[A-Za-z0-9_.-]+$") }) else {
-            throw R2ObjectErasureFenceError.invalidFence
-        }
-    }
-}
+/// This store's configuration is `PrivateStorageTargetConfiguration` (see
+/// PrivateStorageTarget.swift), which the private content store is built from
+/// too. One loader, one target: the fence and the content it fences cannot drift
+/// onto different buckets or namespaces, because there is nothing to drift from.
 
 enum R2ObjectErasureFenceError: Error { case configurationUnavailable, transportUnavailable, invalidFence }
 
@@ -64,7 +33,7 @@ final class R2ObjectErasureFenceStore: ObjectErasureFenceStorage, Sendable {
     init(configuration: R2ObjectErasureFenceConfiguration, httpClient: any AWSHTTPClient) {
         self.configuration = configuration; self.target = configuration.target; self.ownedHTTP = nil
         let transport = R2ObjectErasureFenceHTTPClient(base: httpClient, configuration: configuration)
-        let client = AWSClient(credentialProvider: .static(accessKeyId: configuration.accessKey, secretAccessKey: configuration.secretKey),
+        let client = AWSClient(credentialProvider: configuration.credentialProvider,
                                retryPolicy: .noRetry, httpClient: transport)
         self.client = client
         self.s3 = S3(client: client, region: .init(rawValue: "auto"), endpoint: configuration.endpoint, timeout: .seconds(30), options: [.s3DisableChunkedUploads])
@@ -72,7 +41,7 @@ final class R2ObjectErasureFenceStore: ObjectErasureFenceStorage, Sendable {
     private init(configuration: R2ObjectErasureFenceConfiguration, httpClient: HTTPClient, ownedHTTP: HTTPClient) {
         self.configuration = configuration; self.target = configuration.target; self.ownedHTTP = ownedHTTP
         let transport = R2ObjectErasureFenceHTTPClient(base: httpClient, configuration: configuration)
-        let client = AWSClient(credentialProvider: .static(accessKeyId: configuration.accessKey, secretAccessKey: configuration.secretKey),
+        let client = AWSClient(credentialProvider: configuration.credentialProvider,
                                retryPolicy: .noRetry, httpClient: transport)
         self.client = client
         self.s3 = S3(client: client, region: .init(rawValue: "auto"), endpoint: configuration.endpoint, timeout: .seconds(30), options: [.s3DisableChunkedUploads])

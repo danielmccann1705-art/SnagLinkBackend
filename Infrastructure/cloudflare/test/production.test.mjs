@@ -17,7 +17,8 @@ function configured(overrides = {}) {
     BASE_URL: api, MAGIC_LINK_BASE_URL: api, PORTAL_ORIGIN: portal,
     R2_ACCOUNT_ID: '387d49014cd0d45f9e6434196ab513c0',
     R2_BUCKET_NAME: 'snaglist-production-uploads', R2_PRIVATE_BUCKET_NAME: 'snaglist-production-private',
-    R2_PUBLIC_URL: api, R2_ACCESS_KEY_ID: 'synthetic-access', R2_SECRET_ACCESS_KEY: 'synthetic-secret',
+    R2_PUBLIC_URL: api, R2_PRIVATE_NAMESPACE: 'private-v1/',
+    R2_ACCESS_KEY_ID: 'synthetic-access', R2_SECRET_ACCESS_KEY: 'synthetic-secret',
     JWT_SECRET: key('j'), MAINTENANCE_SECRET: key('m'), LINK_GRANT_TOKEN_KEY: key('l'),
     APPLE_CREDENTIAL_KEY: key('a'), APPLE_BUNDLE_ID: 'com.snaglist.app', APPLE_CLIENT_ID: 'com.snaglist.app',
     APPLE_TEAM_ID: '52ZZHYHM62', APPLE_KEY_ID: 'SYNTHETIC2', APPLE_PRIVATE_KEY: '-----BEGIN PRIVATE KEY----- synthetic only',
@@ -64,6 +65,23 @@ test('production import remains disabled unless its distinct switch and exact id
   assert.equal(enabled.PRODUCTION_LEGACY_IMPORT_ENABLED, 'true');
   assert.equal(enabled.PRODUCTION_IMPORT_API_ORIGIN, api);
   assert.equal(enabled.STAGED_LEGACY_IMPORT_ENABLED, undefined);
+});
+
+test('production private media requires its pinned create-only namespace and cannot delete without it', () => {
+  for (const override of [{R2_PRIVATE_NAMESPACE: undefined}, {R2_PRIVATE_NAMESPACE: ''},
+    {R2_PRIVATE_NAMESPACE: 'private-v1'}, {R2_PRIVATE_NAMESPACE: 'private-v2/'},
+    {R2_PRIVATE_NAMESPACE: 'immutable-v1/'}, {R2_PRIVATE_NAMESPACE: '../'},
+    {R2_PRIVATE_NAMESPACE: undefined, ACCOUNT_DELETION_ENABLED: 'true'},
+    {R2_PRIVATE_NAMESPACE: 'private-v2/', ACCOUNT_DELETION_ENABLED: 'true'},
+    {ACCOUNT_DELETION_ENABLED: ''}, {ACCOUNT_DELETION_ENABLED: '1'}, {ACCOUNT_DELETION_ENABLED: 'TRUE'}
+  ]) assert.throws(() => productionContainerEnvironment(configured(override)));
+  const off = productionContainerEnvironment(configured());
+  assert.equal(off.R2_PRIVATE_NAMESPACE, 'private-v1/');
+  assert.equal(off.ACCOUNT_DELETION_ENABLED, 'false');
+  assert.equal(productionContainerEnvironment(configured({ACCOUNT_DELETION_ENABLED: 'false'})).ACCOUNT_DELETION_ENABLED, 'false');
+  const deleting = productionContainerEnvironment(configured({ACCOUNT_DELETION_ENABLED: 'true'}));
+  assert.equal(deleting.ACCOUNT_DELETION_ENABLED, 'true');
+  assert.equal(deleting.R2_PRIVATE_NAMESPACE, 'private-v1/');
 });
 
 test('production refuses partial identity, mail, purchase and encryption configuration', () => {

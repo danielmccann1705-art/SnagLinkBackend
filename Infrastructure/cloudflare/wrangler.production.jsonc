@@ -11,6 +11,8 @@
   "vars": {
     "PRODUCTION_ENABLED": "false",
     "PRODUCTION_LEGACY_IMPORT_ENABLED": "false",
+    // Account deletion stays off here. Turning it on is a separate reviewed step.
+    "ACCOUNT_DELETION_ENABLED": "false",
     "PLATFORM_ENVIRONMENT": "production",
     "PRODUCTION_DATABASE_HOST": "",
     "PRODUCTION_DATABASE_NAME": "",
@@ -20,6 +22,8 @@
     "R2_ACCOUNT_ID": "387d49014cd0d45f9e6434196ab513c0",
     "R2_BUCKET_NAME": "snaglist-production-uploads",
     "R2_PRIVATE_BUCKET_NAME": "snaglist-production-private",
+    // Create-only from the first byte: production has no legacy private row.
+    "R2_PRIVATE_NAMESPACE": "private-v1/",
     "R2_PUBLIC_URL": "https://api.snaglist.dev",
     "EMAIL_FROM": "Snaglist <notifications@mail.usesnaglist.com>",
     "APPLE_BUNDLE_ID": "com.snaglist.app",

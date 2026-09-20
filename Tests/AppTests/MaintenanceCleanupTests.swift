@@ -103,6 +103,46 @@ final class MaintenanceCleanupTests: XCTestCase {
         XCTAssertEqual(second?.expiredPreviewLinks, 0, "the second pass has nothing left to remove")
     }
 
+    /// The budget belongs in the record. A pass that quietly leaves deletion work
+    /// behind every hour looks exactly like a pass that had nothing to do, and that
+    /// indistinguishability is the whole reason `cleanup_runs` exists.
+    func testTheRecordSaysHowManyJobsTheBudgetDeferred() async throws {
+        let ownerID = try await owner()
+        let sql = try VerifiedIdentityService.sql(app.db)
+        // Everything that already existed is made undue, so the count below is this
+        // test's one job and nothing another suite happened to leave behind.
+        try await sql.raw("""
+            UPDATE account_deletion_jobs SET available_at=clock_timestamp()+INTERVAL '1 day',
+                lease_expires_at=CASE WHEN state='leased' THEN clock_timestamp()+INTERVAL '1 day' ELSE lease_expires_at END
+            WHERE state IN ('ready','blocked','leased')
+            """).run()
+        let jobID = UUID(), reference = UUID().uuidString + UUID().uuidString
+        try await sql.raw("""
+            INSERT INTO account_deletion_jobs(id,user_id,receipt_hash,requested_at,state,available_at,
+                database_cleanup_state,object_cleanup_state,apple_revocation_state)
+            VALUES(\(bind: jobID),\(bind: ownerID),\(bind: AccountDeletionService.receiptHash(reference)),NOW(),'ready',NOW(),
+                'completed','completed','not_applicable')
+            """).run()
+
+        // A budget with nothing left in it: the pass claims no deletion job at all,
+        // does the rest of its work, and says what it did not get to.
+        let removed = try await CleanupService.runCleanup(app: app, trigger: .test,
+                                                          budget: .init(total: 0, minimumPerJob: 30))
+        XCTAssertEqual(removed?.accountDeletionJobs.processed, 0, "a job is not claimed with no budget to run it")
+        XCTAssertEqual(removed?.accountDeletionJobs.deferredByBudget, 1)
+
+        let row = try await sql.raw("SELECT removed_json FROM cleanup_runs ORDER BY started_at DESC LIMIT 1").first()
+        let json = try XCTUnwrap(try row?.decode(column: "removed_json", as: String?.self))
+        let decoded = try JSONDecoder().decode(CleanupService.Removed.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.accountDeletionJobs.deferredByBudget, 1,
+                       "the durable record, not just the return value, carries what the budget deferred")
+        XCTAssertFalse(json.contains("@"), "the run record must never carry an address")
+
+        // The job was only ever a stand-in for a backlog; leaving it due would hand
+        // it to the next test's pass.
+        try await sql.raw("DELETE FROM account_deletion_jobs WHERE id=\(bind: jobID)").run()
+    }
+
     // MARK: - The route
 
     func testTheRouteIsInvisibleWithoutTheSecret() async throws {
