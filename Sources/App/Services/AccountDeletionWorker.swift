@@ -118,6 +118,11 @@ enum AccountDeletionWorker {
         // Never delete evidence until the graph transaction has demonstrated it
         // is no longer referenced and recorded the exact deletion manifest.
         guard try await CompanyClosureLifecycleService.prepareObjects(lease, on: db, transactionMode: transactionMode) else { return }
+        // Before any physical delete. A key whose writers use the create-only
+        // protocol is fenced, never deleted, even when its known intents are all
+        // settled: the ordinary branch below excludes anything that has a fence row
+        // precisely so the two can never both act on one key.
+        try await AccountDeletionObjectFenceService.perform(lease, app: app, on: db, transactionMode: transactionMode)
         let objects = try await sql.raw("""
             SELECT o.storage_kind,o.object_key FROM account_deletion_objects o
             WHERE o.job_id=\(bind:lease.id) AND o.completed_at IS NULL
@@ -127,6 +132,15 @@ enum AccountDeletionWorker {
                 JOIN object_write_intents i ON i.id=d.intent_id
                 WHERE d.job_id=o.job_id AND i.storage_kind=o.storage_kind
                   AND i.object_key=o.object_key AND i.state<>'settled')
+              -- A create-only key is fenced, never deleted, even when every intent
+              -- it has is settled and even when this pass ran out of time before
+              -- reaching it. Settled says the bytes arrived; it does not say no
+              -- other writer can still arrive, and only the fence says that.
+              AND NOT EXISTS(
+                SELECT 1 FROM account_deletion_write_intents dc
+                JOIN object_write_intents ic ON ic.id=dc.intent_id
+                WHERE dc.job_id=o.job_id AND ic.storage_kind=o.storage_kind
+                  AND ic.object_key=o.object_key AND ic.write_protocol='create_only_v1')
             ORDER BY o.attempts,o.storage_kind,o.object_key LIMIT 16
             """).all()
         for object in objects {
