@@ -107,24 +107,7 @@ enum AccountDeletionWorker {
             }
             return true
         }
-        switch transactionMode {
-        case .managed:
-            return try await db.transaction(write)
-        case .maintenanceConnection:
-            // Fluent marks a withConnection handle inTransaction=true without
-            // BEGIN. This handle is exclusively owned by CleanupService and
-            // never enters this method inside another transaction.
-            let sql = try VerifiedIdentityService.sql(db)
-            try await sql.raw("BEGIN").run()
-            do {
-                let changed = try await write(db)
-                try await sql.raw("COMMIT").run()
-                return changed
-            } catch {
-                try await sql.raw("ROLLBACK").run()
-                throw error
-            }
-        }
+        return try await AccountDeletionTransaction.run(transactionMode, on: db, write)
     }
 
     static func perform(_ lease: Lease, app: Application, on db: Database,

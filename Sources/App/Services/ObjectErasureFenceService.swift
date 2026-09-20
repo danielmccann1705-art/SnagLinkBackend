@@ -65,9 +65,14 @@ enum ObjectErasureFenceService {
     /// A durable successful fence survives acknowledgement loss and worker
     /// restart. A current worker can observe it without creating another attempt.
     static func requestIfNeeded(_ lease: AccountDeletionWorker.Lease, target: ObjectStorageWriteTarget,
-                                kind: String, key: String, on database: Database) async throws -> Ticket? {
-        guard !database.inTransaction, target.writeProtocol == .createOnlyV1 else { throw unavailable() }
-        return try await database.transaction { db -> Ticket? in
+                                kind: String, key: String, on database: Database,
+                                transactionMode: AccountDeletionWorker.TransactionMode = .managed) async throws -> Ticket? {
+        // A pooled handle must not already be in a transaction. The pinned
+        // maintenance handle reports that it is without one ever having begun,
+        // which is why the check follows the mode rather than the flag alone.
+        guard target.writeProtocol == .createOnlyV1,
+              transactionMode == .maintenanceConnection || !database.inTransaction else { throw unavailable() }
+        return try await AccountDeletionTransaction.run(transactionMode, on: database) { db -> Ticket? in
             let sql = try VerifiedIdentityService.sql(db)
             let expiry = try await requireLease(lease.id, token: lease.token, on: sql)
             try await sql.raw("SELECT object_erasure_lock(\(bind:key))").run()
@@ -108,12 +113,14 @@ enum ObjectErasureFenceService {
     /// No remote implementation is installed. This verifier is exercised with a
     /// synthetic adapter; a future reviewed R2 adapter must use direct bucket IO.
     static func verify(_ ticket: Ticket, using storage: any ObjectErasureFenceStorage,
-                       on database: Database) async throws -> VerifiedObjectErasureFence {
-        guard !database.inTransaction, ticket.target.writeProtocol == .createOnlyV1,
-              storage.target == ticket.target else { throw unavailable() }
+                       on database: Database,
+                       transactionMode: AccountDeletionWorker.TransactionMode = .managed) async throws -> VerifiedObjectErasureFence {
+        guard ticket.target.writeProtocol == .createOnlyV1, storage.target == ticket.target,
+              transactionMode == .maintenanceConnection || !database.inTransaction else { throw unavailable() }
         // Database time and the durable attempt decide admission. No application
         // wall clock is compared with PostgreSQL, and no lock is held over IO.
-        try await database.transaction { db in
+        // Admission commits before any storage call: no row transaction spans IO.
+        try await AccountDeletionTransaction.run(transactionMode, on: database) { db in
             let sql = try VerifiedIdentityService.sql(db)
             _ = try await requireLease(ticket.jobID, token: ticket.leaseToken, on: sql)
             try await sql.raw("SELECT object_erasure_lock(\(bind:ticket.key))").run()
@@ -135,10 +142,11 @@ enum ObjectErasureFenceService {
         return try row.decode(column: "attested", as: Bool.self)
     }
     static func attest(_ ticket: Ticket, evidence: VerifiedObjectErasureFence,
-                       on database: Database) async throws {
-        guard !database.inTransaction, evidence.attemptID == ticket.attemptID,
-              evidence.target == ticket.target, evidence.key == ticket.key else { throw unavailable() }
-        try await database.transaction { db in
+                       on database: Database,
+                       transactionMode: AccountDeletionWorker.TransactionMode = .managed) async throws {
+        guard evidence.attemptID == ticket.attemptID, evidence.target == ticket.target, evidence.key == ticket.key,
+              transactionMode == .maintenanceConnection || !database.inTransaction else { throw unavailable() }
+        try await AccountDeletionTransaction.run(transactionMode, on: database) { db in
             let sql = try VerifiedIdentityService.sql(db)
             // Serialize before observing completion so a concurrent successful
             // attestation remains recoverable even if it also finishes the job.
