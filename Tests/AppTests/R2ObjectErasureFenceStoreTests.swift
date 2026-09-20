@@ -93,9 +93,14 @@ final class R2ObjectErasureFenceStoreTests: XCTestCase {
         let disabled = try R2ObjectErasureFenceStore.makeIfEnabled(target: configuration.target, environment: .production, lookup: { read.append($0); return nil })
         XCTAssertNil(disabled); XCTAssertEqual(read, ["R2_PRIVATE_NAMESPACE"])
     }
-    func testEnabledConfigurationRequiresTestingAndExactPrivateServerTarget() throws {
+    /// D1 lifted the `.testing` gate: `R2_PRIVATE_NAMESPACE` alone installs the
+    /// namespace, in every environment, so that activation is one act by one
+    /// person rather than a code change that has to accompany it. Everything the
+    /// loader refuses it still refuses, and it still refuses on the exact target.
+    func testEnabledConfigurationInstallsInEveryEnvironmentOnTheExactPrivateServerTarget() throws {
         let values = values
-        XCTAssertThrowsError(try R2ObjectErasureFenceConfiguration.load(environment: .production, lookup: { values[$0] }))
+        let production = try XCTUnwrap(R2ObjectErasureFenceConfiguration.load(environment: .production, lookup: { values[$0] }))
+        XCTAssertEqual(production.target, configuration.target)
         for (field,value) in [("R2_ACCOUNT_ID","foreign.example/path"), ("R2_PRIVATE_BUCKET_NAME","synthetic-public"),
                               ("R2_PRIVATE_NAMESPACE","../"), ("R2_SECRET_ACCESS_KEY","")] {
             var wrong = values; wrong[field] = value

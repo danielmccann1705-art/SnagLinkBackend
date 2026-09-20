@@ -144,12 +144,13 @@ enum AccountDeletionWorker {
                 // request-path abort is unchanged: there the person is present,
                 // nothing has been destroyed, and they can retry.
                 let scopeAmbiguous = (error as? Abort)?.identifier == "object_write_scope_ambiguous"
+                let reason: DeletionReasonKind = scopeAmbiguous ? .objectWriteScopeAmbiguous : .workerUnavailable
                 // Never log errors containing provider tokens, object addresses or PII.
                 try await VerifiedIdentityService.sql(db).raw("""
                     UPDATE account_deletion_jobs SET state=\(bind: scopeAmbiguous ? "blocked" : "ready"),
                         lease_token=NULL,lease_expires_at=NULL,
                         available_at=clock_timestamp()+INTERVAL '300 seconds',
-                        last_error_kind=\(bind: scopeAmbiguous ? "object_write_scope_ambiguous" : "worker_unavailable")
+                        last_error_kind=\(bind: reason.rawValue)
                     WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp()
                     """).run()
                 if scopeAmbiguous { counts.blocked += 1 } else { counts.retrying += 1 }
@@ -252,7 +253,7 @@ enum AccountDeletionWorker {
                                                                                  excludingJobID: lease.id, on: db) else {
                     try await writeIfCurrent(lease, on: db, transactionMode: transactionMode) { sql in
                     try await sql.raw("""
-                        UPDATE account_deletion_objects SET attempts=attempts+1,last_error_kind='object_still_referenced'
+                        UPDATE account_deletion_objects SET attempts=attempts+1,last_error_kind=\(DeletionReasonKind.objectStillReferenced.sql)
                         WHERE job_id=\(bind: lease.id) AND storage_kind=\(bind: kind) AND object_key=\(bind: key)
                             AND EXISTS(SELECT 1 FROM account_deletion_jobs WHERE id=\(bind: lease.id)
                                 AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp())
@@ -264,7 +265,7 @@ enum AccountDeletionWorker {
                     try await dependencies.deleteObject(kind, key)
                 } else { try await StorageService.deleteAccountObject(kind: kind, key: key, app: app) }
                 completed = Date()
-            } catch { failureKind = "storage_unavailable" }
+            } catch { failureKind = DeletionReasonKind.storageUnavailable.rawValue }
             let completedAt = completed, objectFailure = failureKind
             try await writeIfCurrent(lease, on: db, transactionMode: transactionMode) { sql in
             try await sql.raw("""
@@ -281,7 +282,7 @@ enum AccountDeletionWorker {
                     WHERE d.job_id=\(bind:lease.id) AND i.state='uncertain' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'blocked' WHEN
                 EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
                     WHERE d.job_id=\(bind:lease.id) AND i.state='active' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'blocked' WHEN
-                EXISTS(SELECT 1 FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND completed_at IS NULL AND last_error_kind='object_still_referenced')
+                EXISTS(SELECT 1 FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND completed_at IS NULL AND last_error_kind=\(DeletionReasonKind.objectStillReferenced.sql))
                 THEN 'blocked' WHEN \(AccountDeletionGraphService.targetAmbiguous(jobID: lease.id))
                 THEN 'blocked' WHEN EXISTS(SELECT 1 FROM account_deletion_objects WHERE job_id=\(bind: lease.id) AND completed_at IS NULL)
                 THEN 'pending' ELSE 'completed' END
@@ -303,19 +304,22 @@ enum AccountDeletionWorker {
                 completed_at=CASE WHEN database_cleanup_state='completed' AND object_cleanup_state='completed'
                         AND apple_revocation_state IN ('not_applicable','revoked','already_revoked')
                         AND NOT EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND state<>'completed') THEN NOW() ELSE NULL END,
-                last_error_kind=CASE WHEN EXISTS(SELECT 1 FROM account_deletion_unresolved_objects WHERE job_id=\(bind: lease.id)) THEN 'unresolved_legacy_object_ownership'
+                last_error_kind=CASE WHEN EXISTS(SELECT 1 FROM account_deletion_unresolved_objects WHERE job_id=\(bind: lease.id)) THEN \(DeletionReasonKind.unresolvedLegacyObjectOwnership.sql)
                     WHEN EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
-                        WHERE d.job_id=\(bind:lease.id) AND i.state='uncertain' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'object_write_uncertain'
+                        WHERE d.job_id=\(bind:lease.id) AND i.state='uncertain' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN \(DeletionReasonKind.objectWriteUncertain.sql)
                     WHEN EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
-                        WHERE d.job_id=\(bind:lease.id) AND i.state='active' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'object_write_pending'
-                    WHEN database_cleanup_state<>'completed' AND EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND mode='explicit' AND state<>'completed') THEN 'company_closure_pending'
-                    WHEN database_cleanup_state<>'completed' THEN 'database_erasure_pending'
-                    WHEN apple_revocation_state='unavailable' THEN 'apple_credential_unavailable'
-                    WHEN apple_revocation_state='misconfigured' THEN 'apple_configuration'
-                    WHEN apple_revocation_state='failing' THEN 'apple_unavailable'
-                    WHEN EXISTS(SELECT 1 FROM account_deletion_unresolved_objects WHERE job_id=\(bind: lease.id)) THEN 'unresolved_legacy_object_ownership'
-                    WHEN \(AccountDeletionGraphService.targetAmbiguous(jobID: lease.id)) THEN 'object_target_ambiguous'
-                    WHEN object_cleanup_state<>'completed' THEN 'object_cleanup_pending' ELSE NULL END,
+                        WHERE d.job_id=\(bind:lease.id) AND i.state='active' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN \(DeletionReasonKind.objectWritePending.sql)
+                    WHEN database_cleanup_state<>'completed' AND EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND mode='explicit' AND state<>'completed') THEN \(DeletionReasonKind.companyClosurePending.sql)
+                    WHEN database_cleanup_state<>'completed' THEN \(DeletionReasonKind.databaseErasurePending.sql)
+                    WHEN apple_revocation_state='unavailable' THEN \(DeletionReasonKind.appleCredentialUnavailable.sql)
+                    WHEN apple_revocation_state='misconfigured' THEN \(DeletionReasonKind.appleConfiguration.sql)
+                    WHEN apple_revocation_state='failing' THEN \(DeletionReasonKind.appleUnavailable.sql)
+                    -- The unresolved-objects branch is the first one above, and was
+                    -- written a second time here where nothing could reach it. One
+                    -- condition, one branch: a second copy of a rule is a place for
+                    -- the two copies to stop agreeing.
+                    WHEN \(AccountDeletionGraphService.targetAmbiguous(jobID: lease.id)) THEN \(DeletionReasonKind.objectTargetAmbiguous.sql)
+                    WHEN object_cleanup_state<>'completed' THEN \(DeletionReasonKind.objectCleanupPending.sql) ELSE NULL END,
                 available_at=clock_timestamp()+make_interval(secs => \(bind: delay)),lease_token=NULL,lease_expires_at=NULL
             WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp() RETURNING state
             """).first()

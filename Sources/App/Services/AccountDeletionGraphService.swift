@@ -185,12 +185,12 @@ enum AccountDeletionGraphService {
                     WHEN EXISTS(SELECT 1 FROM account_deletion_objects WHERE job_id=\(bind: jobID) AND completed_at IS NULL) THEN 'pending'
                     ELSE 'completed' END,
                 last_error_kind=CASE WHEN EXISTS(SELECT 1 FROM account_deletion_unresolved_objects WHERE job_id=\(bind:jobID))
-                    THEN 'unresolved_legacy_object_ownership'
+                    THEN \(DeletionReasonKind.unresolvedLegacyObjectOwnership.sql)
                     WHEN EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
-                        WHERE d.job_id=\(bind:jobID) AND i.state='uncertain' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'object_write_uncertain'
+                        WHERE d.job_id=\(bind:jobID) AND i.state='uncertain' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN \(DeletionReasonKind.objectWriteUncertain.sql)
                     WHEN EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
-                        WHERE d.job_id=\(bind:jobID) AND i.state='active' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN 'object_write_pending'
-                    WHEN \(targetAmbiguous(jobID: jobID)) THEN 'object_target_ambiguous'
+                        WHERE d.job_id=\(bind:jobID) AND i.state='active' AND NOT object_write_is_resolved(d.job_id,i.id)) THEN \(DeletionReasonKind.objectWritePending.sql)
+                    WHEN \(targetAmbiguous(jobID: jobID)) THEN \(DeletionReasonKind.objectTargetAmbiguous.sql)
                     ELSE NULL END WHERE id=\(bind: jobID)
             """).run()
     }

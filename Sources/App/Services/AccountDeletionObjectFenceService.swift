@@ -124,7 +124,7 @@ enum AccountDeletionObjectFenceService {
             guard try await isEligible(requested, on: db) else { throw Refusal.notEligible }
             ticket = requested
         } catch {
-            try await record(failure: "fence_not_eligible", candidate, lease: lease, on: db, transactionMode: transactionMode)
+            try await record(failure: .fenceNotEligible, candidate, lease: lease, on: db, transactionMode: transactionMode)
             return false
         }
         do {
@@ -133,10 +133,10 @@ enum AccountDeletionObjectFenceService {
             try await ObjectErasureFenceService.attest(ticket, evidence: evidence, on: db, transactionMode: transactionMode)
             return true
         } catch let failure as AccountDeletionFenceProvider.Failure where failure == .unavailable {
-            try await record(failure: "fence_configuration", candidate, lease: lease, on: db, transactionMode: transactionMode)
+            try await record(failure: .fenceConfiguration, candidate, lease: lease, on: db, transactionMode: transactionMode)
             return false
         } catch {
-            try await record(failure: "fence_unavailable", candidate, lease: lease, on: db, transactionMode: transactionMode)
+            try await record(failure: .fenceUnavailable, candidate, lease: lease, on: db, transactionMode: transactionMode)
             return false
         }
     }
@@ -153,13 +153,15 @@ enum AccountDeletionObjectFenceService {
         return try row.decode(column: "eligible", as: Bool.self)
     }
 
-    /// Fixed internal reasons only. A raw provider error may contain a key, a
-    /// bucket or a credential, and a deletion receipt is shown to a person.
-    private static func record(failure kind: String, _ candidate: Candidate, lease: AccountDeletionWorker.Lease,
+    /// Fixed internal reasons only, from the closed set every deletion writes
+    /// from. A raw provider error may contain a key, a bucket or a credential;
+    /// none of those may reach a durable row, and a durable row is read by an
+    /// operator runbook long after the pass that wrote it.
+    private static func record(failure kind: DeletionReasonKind, _ candidate: Candidate, lease: AccountDeletionWorker.Lease,
                                on db: Database, transactionMode: AccountDeletionWorker.TransactionMode) async throws {
         _ = try await AccountDeletionWorker.writeIfCurrent(lease, on: db, transactionMode: transactionMode) { sql in
             try await sql.raw("""
-                UPDATE account_deletion_objects SET attempts=attempts+1,last_error_kind=\(bind: kind)
+                UPDATE account_deletion_objects SET attempts=attempts+1,last_error_kind=\(bind: kind.rawValue)
                 WHERE job_id=\(bind: lease.id) AND storage_kind=\(bind: candidate.kind) AND object_key=\(bind: candidate.key)
                     AND completed_at IS NULL
                 """).run()

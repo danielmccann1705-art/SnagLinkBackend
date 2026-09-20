@@ -28,6 +28,17 @@ test('candidate and portal configurations are disabled, digest-pinned and isolat
   }
 });
 
+// D1 carries the namespace into the candidate; it does not turn deletion on.
+// The two switches are separate acts, and only the first one is code's to make.
+test('the candidate carries the pinned private namespace with account deletion still off',()=>{
+  const {backend}=configs();
+  assert.equal(backend.vars.R2_PRIVATE_NAMESPACE,'private-v1/');
+  assert.equal(backend.vars.ACCOUNT_DELETION_ENABLED,undefined);
+  const output=containerEnvironment(enabled());
+  assert.equal(output.R2_PRIVATE_NAMESPACE,'private-v1/');
+  assert.equal(output.ACCOUNT_DELETION_ENABLED,'false');
+});
+
 test('mutable image tags and incomplete/relative asset inputs cannot produce deployment config',()=>{
   for(const imageDigest of ['latest','sha256:'+'0'.repeat(64),'sha256:abcd','sha256:'+'G'.repeat(64)]) {
     assert.throws(()=>candidateConfigs({imageDigest,assetsDirectory:'/synthetic/dist'}));

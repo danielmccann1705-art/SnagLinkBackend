@@ -54,23 +54,12 @@ enum PrivateMediaWriteService {
 
     // MARK: - What the operator is told
 
-    /// The fixed operator vocabulary for a private write. One line per key, one
-    /// `kind` from this list, and nothing else: a storage error's own words can
-    /// carry a key, an ETag, a bucket or a credential, and none of them reaches a
-    /// log or a client. A6 collects these into one enum beside B3's read kinds.
-    enum LogKind: String, Sendable {
-        /// The address was already taken and then answered "nothing is here".
-        /// Two facts that cannot both be true; storage is not to be trusted yet.
-        case existsThenAbsent = "exists_then_absent"
-        /// The address was already taken and the readback did not answer.
-        case readbackUnavailable = "readback_unavailable"
-        /// The PUT's outcome was unknown and nothing is at the address: the write
-        /// never landed. This is the row the readback was built for — it is the
-        /// one that says a retry will help.
-        case notLanded = "not_landed"
-        /// The PUT's outcome was unknown and neither did the readback answer.
-        case storageUnreachable = "storage_unreachable"
-    }
+    /// The fixed operator vocabulary for a private write: one line per key, one
+    /// `kind`, and nothing else. It is the shared private-media vocabulary, not a
+    /// second one — the write kinds and B3's read kinds are one closed set,
+    /// because two of them describe the same physical observation read from two
+    /// sides. See `PrivateMediaLogKind`.
+    typealias LogKind = PrivateMediaLogKind
 
     // MARK: - What the client is told
 

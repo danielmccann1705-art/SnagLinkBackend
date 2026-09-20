@@ -31,12 +31,19 @@ struct PrivateStorageTargetConfiguration: Sendable {
     ///
     /// A namespace equal to a legacy object family is refused outright; see
     /// `reservedNamespaces`.
+    ///
+    /// `environment` is threaded in by every caller — `PrivateObjectAllocationPolicy.install`,
+    /// `R2PrivateContentStore.makeIfConfigured`, `R2ObjectErasureFenceStore.makeIfEnabled` —
+    /// and is deliberately not consulted. It used to carry a `.testing` gate: the
+    /// switch existed, nothing was behind it anywhere, and the gate was the catch
+    /// that said so. The switch is now the whole answer, in every environment, so
+    /// that installing the namespace is one act by one person rather than a code
+    /// change that has to accompany it. What a *missing* namespace means still
+    /// depends on the environment, and that question is decided once at boot
+    /// (`PrivateStorageBoot`) — not here, where it would be answered per caller.
     static func load(environment: Environment, lookup: (String) -> String? = Environment.get) throws -> Self? {
         guard let namespace = lookup("R2_PRIVATE_NAMESPACE") else { return nil }
-        // Unchanged by this extraction: an adapter exists, production/staging
-        // activation does not. Lifting this guard is a separate reviewed step.
-        guard environment == .testing,
-              matches(namespace, "^[A-Za-z0-9_-]+/$"),
+        guard matches(namespace, "^[A-Za-z0-9_-]+/$"),
               !reservedNamespaces.contains(namespace),
               let account = lookup("R2_ACCOUNT_ID"), matches(account, "^[a-f0-9]{32}$"),
               let bucket = lookup("R2_PRIVATE_BUCKET_NAME"), matches(bucket, "^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$"),

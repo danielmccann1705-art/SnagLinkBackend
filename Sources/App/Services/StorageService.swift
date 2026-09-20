@@ -219,7 +219,6 @@ enum StorageService {
         }
         return nil
     }
-    static func requirePrivateStorage(app: Application) throws { _ = try privateBucket(app: app) }
 
     /// Internal import-original transport only. Reuses the existing AWSClient and
     /// private bucket; no public/local fallback or generic caller-supplied key.

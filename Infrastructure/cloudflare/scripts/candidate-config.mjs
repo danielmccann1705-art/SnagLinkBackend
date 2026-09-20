@@ -29,7 +29,7 @@ export function candidateConfigs({imageDigest, assetsDirectory}) {
         GOOGLE_IOS_CLIENT_ID:'853801285577-umo2ith1f73rvn8g7802hj9a1sjevmd0.apps.googleusercontent.com',
         R2_ACCOUNT_ID:'387d49014cd0d45f9e6434196ab513c0',R2_BUCKET_NAME:'snaglist-unified-staging-uploads',
         R2_PUBLIC_URL:'https://pub-d7c456d4b396462fb5ee8ef008dcf93b.r2.dev',
-        R2_PRIVATE_BUCKET_NAME:'snaglist-staging-private'},
+        R2_PRIVATE_BUCKET_NAME:'snaglist-staging-private',R2_PRIVATE_NAMESPACE:'private-v1/'},
       containers:[{class_name:'SnaglistBackend',
         image:`registry.cloudflare.com/387d49014cd0d45f9e6434196ab513c0/snaglist-unified-staging@${imageDigest}`,
         instance_type:'basic',max_instances:1,constraints:{regions:['WEUR']},observability:{logs:{enabled:false}}}],

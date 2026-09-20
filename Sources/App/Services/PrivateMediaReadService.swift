@@ -30,17 +30,12 @@ import Logging
 /// after it.
 enum PrivateMediaReadService {
 
-    /// The fixed operator vocabulary for a private read. One line per key, one
-    /// `kind` from this list, and nothing else: a storage error's own words can
-    /// carry a key or a credential, and they never reach a log or a client.
-    ///
-    /// A6 collects these into one enum beside B2's write kinds.
-    enum LogKind: String, Sendable {
-        /// There is nothing at the address. Decided from the GET's status line.
-        case absent
-        /// Storage did not answer, or answered something that could not be read.
-        case storageUnreachable = "storage_unreachable"
-    }
+    /// The fixed operator vocabulary for a private read: one line per key, one
+    /// `kind`, and nothing else. It is the shared private-media vocabulary, not a
+    /// second one — a read that finds nothing at an address and a write whose PUT
+    /// never landed are the same physical observation, and they belong in one
+    /// list rather than in two that can drift. See `PrivateMediaLogKind`.
+    typealias LogKind = PrivateMediaLogKind
 
     /// Every refusal this service makes, as a fixed literal chosen here. Nothing
     /// from a store error, a key, an ETag, a bucket, a namespace or a grant token

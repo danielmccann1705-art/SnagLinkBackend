@@ -16,13 +16,38 @@ struct AccountDeletionReceipt: Content, Sendable {
     let completedAt: Date?
 }
 
-/// Deliberately unavailable in deployed environments until graph erasure and its
-/// acceptance tests are integrated. No environment variable can bypass this gate.
+/// Account deletion as a test turns it on, and only a test.
+///
+/// It is honoured under `.testing` and ignored entirely in every other
+/// environment — its presence is not trusted, it is not read. A deployed process
+/// has exactly one way to enable deletion, and it is the configuration switch
+/// below; this key cannot reach one and a deployment cannot reach this key.
 struct AccountDeletionTestActivation: StorageKey { typealias Value = Bool }
 
 enum AccountDeletionService {
-    static func requireAvailable(_ app: Application) throws {
-        guard app.environment == .testing, app.storage[AccountDeletionTestActivation.self] == true else {
+
+    /// The deployed switch, read from configuration alone.
+    ///
+    /// Accepted only as the exact literal `true`. Any other spelling leaves
+    /// deletion off, which is the safe direction for a switch whose "on"
+    /// destroys data — and the Cloudflare adapter refuses every other spelling
+    /// upstream (`Infrastructure/cloudflare/src/config.mjs`), so a typo is caught
+    /// before it reaches a container rather than silently read as "off".
+    ///
+    /// Turning it on is a deliberate act and not this code's to make: the switch
+    /// is read here and set nowhere in this repository outside a test. A boot
+    /// that finds it on without a private namespace refuses to start
+    /// (`PrivateStorageBoot`), because a deletion that cannot fence cannot finish.
+    static func isEnabledByConfiguration(lookup: (String) -> String? = Environment.get) -> Bool {
+        lookup("ACCOUNT_DELETION_ENABLED") == "true"
+    }
+
+    /// Two ways in and no third: a test that activated it under `.testing`, or a
+    /// deployment that set the switch. The reason and identifier are unchanged —
+    /// a client that already handles this refusal keeps handling it.
+    static func requireAvailable(_ app: Application, lookup: (String) -> String? = Environment.get) throws {
+        if app.environment == .testing, app.storage[AccountDeletionTestActivation.self] == true { return }
+        guard isEnabledByConfiguration(lookup: lookup) else {
             throw Abort(.serviceUnavailable, reason: "Account deletion is not available yet", identifier: "account_deletion_unavailable")
         }
     }
@@ -100,7 +125,7 @@ enum AccountDeletionService {
                 (id,user_id,receipt_hash,requested_at,state,available_at,database_cleanup_state,apple_revocation_state,
                  apple_credential_ciphertext,apple_client_id,object_cleanup_state,last_error_kind)
                 VALUES (\(bind: jobID),\(bind: userID),\(bind: hash),\(bind: now),'ready',\(bind: now),'blocked',\(bind: appleState),
-                        NULL,NULL,'blocked','database_erasure_pending')
+                        NULL,NULL,'blocked',\(DeletionReasonKind.databaseErasurePending.sql))
                 """).run()
             try await CompanyDeletionPreparationService.closeEmpty(emptyCompanies, userID: userID, jobID: jobID, on: db)
             try await CompanyClosureLifecycleService.create(companyClosures, parentJobID: jobID, on: db)
@@ -156,7 +181,7 @@ enum AccountDeletionService {
                 try await AccountDeletionGraphService.erase(userID: userID, jobID: jobID, on: db)
             } else {
                 try await CompanyClosureLifecycleService.freezeAndSeal(companyClosures, parentJobID: jobID, on: db)
-                try await sql.raw("UPDATE account_deletion_jobs SET object_cleanup_state='pending',last_error_kind='company_closure_pending' WHERE id=\(bind: jobID)").run()
+                try await sql.raw("UPDATE account_deletion_jobs SET object_cleanup_state='pending',last_error_kind=\(DeletionReasonKind.companyClosurePending.sql) WHERE id=\(bind: jobID)").run()
             }
             return try await status(reference: body.receiptReference, on: db)
         }

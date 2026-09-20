@@ -455,8 +455,11 @@ final class PrivateContentStoreTests: XCTestCase {
         XCTAssertNil(disabled)
         XCTAssertEqual(read, ["R2_PRIVATE_NAMESPACE"])
         let values = values
-        XCTAssertThrowsError(try R2PrivateContentStore.makeIfConfigured(target: configuration.target, environment: .production,
-                                                                        lookup: { values[$0] }))
+        // D1: a complete configuration loads the same target in production as it
+        // does in a test. The environment decides only what a *missing* namespace
+        // means, and that is decided once at boot rather than per caller.
+        let production = try XCTUnwrap(PrivateStorageTargetConfiguration.load(environment: .production, lookup: { values[$0] }))
+        XCTAssertEqual(production.target, configuration.target)
         let foreign = ObjectStorageWriteTarget(backend: "r2", backendIdentity: configuration.target.backendIdentity,
                                                bucket: "foreign-private", namespace: configuration.target.namespace,
                                                writeProtocol: .createOnlyV1)
