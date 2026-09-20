@@ -99,6 +99,7 @@ public func configure(_ app: Application) async throws {
         app.migrations.add(CreateCompanyClosureGraphErasure())
         app.migrations.add(CreateObjectWriteIntents())
         app.migrations.add(CreateObjectErasureFences())
+        app.migrations.add(BindMediaAssetKeysAtUpload())
 
         try await app.autoMigrate()
     } else {

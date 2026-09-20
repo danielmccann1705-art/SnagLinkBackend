@@ -331,8 +331,8 @@ enum PrivateObjectAllocationPolicy {
         }
     }
 
-    /// Records the durable write intent for one allocated address and then performs
-    /// the write, with the target filled in from the allocation.
+    /// Records the durable write intent for one allocated address, then performs
+    /// the write and whatever readback that write's outcome makes necessary.
     ///
     /// The ordering is `ObjectWriteIntentService`'s and is deliberately unchanged:
     /// the intent commits **before** the PUT is issued, and settles only once the
@@ -345,21 +345,98 @@ enum PrivateObjectAllocationPolicy {
     /// candidate query silently drops, so the object it describes can never be made
     /// permanently unreadable — and nothing about the row shows that.
     ///
-    /// The `operation` parameter is provisional and B2 removes it. A caller can
-    /// still record a create-only intent and then write unconditionally inside the
-    /// closure, which is the one thing recording the target does not close; B2
-    /// closes it by performing the PUT and the readback here, through
-    /// `PrivateContentStoreProvider.store(for: allocation.target)`, rather than
-    /// taking a closure from a caller at all.
-    @discardableResult
-    static func write<T: Sendable>(_ allocation: Allocation, data: Data, contentType: String,
-                                   source: ObjectWriteIntentService.Source, on database: Database,
-                                   authorize: @escaping @Sendable (Database) async throws -> ObjectWriteIntentService.Scope,
-                                   operation: @escaping @Sendable () async throws -> T) async throws -> T {
+    /// **And there is no `operation` parameter any more.** A caller used to be able
+    /// to record a create-only intent and then write unconditionally inside a
+    /// closure of its own; recording the target did not close that, and it was the
+    /// last way an object could reach a create-only address through a writer that
+    /// cannot express "create only". The PUT, the readback and the verification are
+    /// performed here, through `PrivateContentStoreProvider.store(for:)`, and the
+    /// closure `ObjectWriteIntentService.execute` wraps returns only on the rows
+    /// where the bytes at the key are provably this intent's bytes. So
+    /// `markUncertain` is the only path to `uncertain`, and `settle` is unreachable
+    /// except after a verified row.
+    ///
+    /// The store is resolved **before** the intent exists, so a target with no
+    /// store leaves no row behind — the same reason A3 moved the content checks
+    /// ahead of `begin`.
+    static func write(_ allocation: Allocation, data: Data, contentType: String,
+                      source: ObjectWriteIntentService.Source, app: Application, on database: Database,
+                      authorize: @escaping @Sendable (Database) async throws -> ObjectWriteIntentService.Scope) async throws {
         try requireContent(allocation, data: data, contentType: contentType)
-        return try await ObjectWriteIntentService.write(
-            .init(storageKind: allocation.storageKind, key: allocation.key, data: data, contentType: contentType),
-            source: source, allocation: allocation, on: database, authorize: authorize, operation: operation)
+        let store: any PrivateContentStorage
+        do { store = try PrivateContentStoreProvider.store(for: allocation.target, app: app) }
+        catch { throw PrivateMediaWriteService.Refusal.storageUnavailable }
+        let object = ObjectWriteIntentService.Object(storageKind: allocation.storageKind, key: allocation.key,
+                                                     data: data, contentType: contentType)
+        let key = allocation.key, sha256 = object.sha256
+        try await ObjectWriteIntentService.write(object, source: source, allocation: allocation,
+                                                 on: database, authorize: authorize) {
+            try await issue(store: store, key: key, data: data, contentType: contentType, sha256: sha256)
+        }
+    }
+
+    /// One key, one row of B2's state table.
+    ///
+    /// A `created` acknowledgement is a create-only provider naming an object it
+    /// has just made at an address nobody else could have taken, so the bytes are
+    /// ours by construction and no readback is required. The only thing a readback
+    /// after `created` could find is a fence written in between — and a fence
+    /// exists only after the `media_assets` row was destroyed in the transaction
+    /// that completed the account's database cleanup, so a request that could see
+    /// one has already failed its own re-authorization against that missing row.
+    ///
+    /// The other two outcomes do not say whether the bytes landed, so for those,
+    /// and only those, the readback decides. It is issued with the ceiling rather
+    /// than this object's byte count, so an object of the wrong size comes back and
+    /// is classified by its digest — a terminal conflict — instead of looking like
+    /// a transport failure that a retry might clear.
+    private static func issue(store: any PrivateContentStorage, key: String, data: Data,
+                              contentType: String, sha256: String) async throws {
+        var outcome: PutOutcome?
+        do {
+            outcome = try await store.put(key: key, data: data, contentType: contentType)
+        } catch is CancellationError {
+            // Row 15. Nobody is waiting, and the PUT may yet land: uncertain.
+            throw PrivateMediaWriteService.Refusal.unavailable(nil)
+        } catch PrivateContentStoreError.invalidKey {
+            // Row 9. Unreachable: this policy validated the key when it allocated
+            // it, with the same configuration the store holds.
+            throw PrivateMediaWriteService.Refusal.requestFailed
+        } catch PrivateContentStoreError.invalidContent {
+            // Row 10. Unreachable: `requireContent` makes every one of these
+            // refusals before the intent exists.
+            throw PrivateMediaWriteService.Refusal.mismatch
+        } catch {
+            // Everything else the transport can produce is gathered into one
+            // meaning, and it is the load-bearing one: the outcome is unknown.
+            outcome = nil
+        }
+        if case .created = outcome { return }                                   // row 1
+        let existed = outcome != nil                                            // `alreadyExists`
+        let readback: Readback
+        do {
+            readback = try await store.read(key: key, maximumBytes: PrivateContent.maximumBytes)
+        } catch is CancellationError {
+            throw PrivateMediaWriteService.Refusal.unavailable(nil)             // row 15
+        } catch PrivateContentStoreError.absent {
+            // Rows 8a and 14a. The second is the row this design was built for:
+            // the write never landed, and a retry is the answer.
+            throw PrivateMediaWriteService.Refusal.unavailable(existed ? .existsThenAbsent : .notLanded)
+        } catch PrivateContentStoreError.invalidKey, PrivateContentStoreError.invalidContent {
+            // Row 17. Refused before the GET was issued, about a key this policy
+            // allocated: a caller bug, and so a 500 rather than a 503 that invites
+            // a retry that cannot help.
+            throw PrivateMediaWriteService.Refusal.requestFailed
+        } catch {
+            throw PrivateMediaWriteService.Refusal.unavailable(existed ? .readbackUnavailable : .storageUnreachable)
+        }
+        // Rows 6 and 12. The key belongs to a deleted account. No content lands on
+        // it, the intent is never settled, and the client is never told otherwise.
+        guard !readback.isErasureFence else { throw PrivateMediaWriteService.Refusal.erased }
+        // Rows 7 and 13 against rows 5 and 11. The intent's claim is "these bytes,
+        // this digest, at this key"; the readback either verifies it or finds
+        // somebody else's object at an address create-only will keep refusing.
+        guard readback.sha256 == sha256 else { throw PrivateMediaWriteService.Refusal.keyConflict }
     }
 
     private static func isDigest(_ value: String) -> Bool {

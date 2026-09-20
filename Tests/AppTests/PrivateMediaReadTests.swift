@@ -83,10 +83,16 @@ final class PrivateMediaReadTests: XCTestCase {
          "sha256": PrivateImageProcessor.digest(Self.png), "byteCount": Self.png.count, "mimeType": "image/png"]
     }
 
-    /// One ready asset, uploaded the way every asset is uploaded today: a
-    /// historical `platform/` address written by the historical writer. The
-    /// namespace is installed for these tests, and it deliberately changes nothing
-    /// about that — B2 is what moves allocation.
+    /// One ready asset at a historical `platform/` address: an object written
+    /// before the namespace existed, which is the only way such a row can exist.
+    ///
+    /// It used to be produced by driving the upload route. B2 made that
+    /// impossible in both directions, deliberately: allocation now draws a
+    /// namespaced key or refuses, and `StorageService.uploadPrivate` — the
+    /// unconditional writer that put bytes at the historical location — is gone.
+    /// A historical row is therefore written the way a historical row got there,
+    /// directly, and the store is never touched, so a call log means what these
+    /// tests read it to mean.
     private struct Ready {
         let actor: User
         let project: PlatformProjectResponse
@@ -103,16 +109,29 @@ final class PrivateMediaReadTests: XCTestCase {
         if let existingProject { project = existingProject } else { project = try await self.project(actor) }
         let snag = try await self.snag(actor, project)
         let route = path(project, snag)
-        let allocated = try await call(.POST, route, actor, body: command(snag))
-        XCTAssertEqual(allocated.status, .ok, allocated.body.string)
-        let asset = try allocated.content.decode(MediaAssetResponse.self)
-        let uploaded = try await call(.PUT, route + "/\(asset.id)/content", actor, bytes: Self.png)
-        XCTAssertEqual(uploaded.status, .ok, uploaded.body.string)
-        let row = try await PrivateMediaService.row(asset.id, snagID: snag.snag.id, projectID: project.project.id, on: app.db)
-        let renditionKey = try row.decode(column: "rendition_key", as: String.self)
-        let bytes = try await StorageService.downloadPrivate(key: renditionKey, app: app)
-        return .init(actor: actor, project: project, snag: snag, path: route, assetID: asset.id,
-                     renditionBytes: bytes, renditionSHA: try row.decode(column: "rendition_sha256", as: String.self))
+        let assetID = UUID()
+        let processed = try PrivateImageProcessor.process(Self.png, mime: "image/png")
+        let renditionSHA = PrivateImageProcessor.digest(processed.jpeg)
+        let prefix = "platform/\(project.workspaceId)/\(project.project.id)/\(assetID)"
+        let original = prefix + "/original", rendition = prefix + "/view-\(renditionSHA).jpg"
+        try await VerifiedIdentityService.sql(app.db).raw("""
+            INSERT INTO media_assets (id, workspace_id, project_id, snag_id, creator_id, purpose, state,
+                original_sha256, original_size, original_mime, original_key, rendition_key,
+                rendition_sha256, rendition_size, width, height, base_snag_revision, created_at, expires_at, ready_at)
+            VALUES (\(bind: assetID), \(bind: project.workspaceId), \(bind: project.project.id), \(bind: snag.snag.id),
+                \(bind: try actor.requireID()), 'capture', 'ready', \(bind: PrivateImageProcessor.digest(Self.png)),
+                \(bind: Self.png.count), 'image/png', \(bind: original), \(bind: rendition),
+                \(bind: renditionSHA), \(bind: processed.jpeg.count), \(bind: processed.width), \(bind: processed.height),
+                \(bind: snag.revision), NOW(), NOW() + INTERVAL '1 day', NOW())
+            """).run()
+        for (key, bytes) in [(original, Self.png), (rendition, processed.jpeg)] {
+            let url = URL(fileURLWithPath: app.directory.workingDirectory)
+                .appendingPathComponent("PrivateMedia").appendingPathComponent(key)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try bytes.write(to: url)
+        }
+        return .init(actor: actor, project: project, snag: snag, path: route, assetID: assetID,
+                     renditionBytes: processed.jpeg, renditionSHA: renditionSHA)
     }
 
     /// Repoints a ready row at two namespaced addresses and puts the same bytes
@@ -130,10 +149,25 @@ final class PrivateMediaReadTests: XCTestCase {
         try await rebind(ready, original: original.key, rendition: rendition.key)
         return (original.key, rendition.key)
     }
+    /// Moving a ready row onto two other addresses is something production must
+    /// never do — B2's `preserve_media_asset_keys` makes an address final, because
+    /// under create-only the first one is spent and a row that forgot it would
+    /// abandon the object it named. These tests still need a namespaced row to
+    /// hold against the reader, and the grant, workflow and attachment rows
+    /// already point at this asset, so the row is moved rather than replaced and
+    /// the guard is lifted for exactly that statement.
     private func rebind(_ ready: Ready, original: String, rendition: String) async throws {
-        try await VerifiedIdentityService.sql(app.db).raw("""
-            UPDATE media_assets SET original_key = \(bind: original), rendition_key = \(bind: rendition) WHERE id = \(bind: ready.assetID)
-            """).run()
+        let sql = try VerifiedIdentityService.sql(app.db)
+        try await sql.raw("ALTER TABLE media_assets DISABLE TRIGGER preserve_media_asset_keys").run()
+        do {
+            try await sql.raw("""
+                UPDATE media_assets SET original_key = \(bind: original), rendition_key = \(bind: rendition) WHERE id = \(bind: ready.assetID)
+                """).run()
+        } catch {
+            try await sql.raw("ALTER TABLE media_assets ENABLE TRIGGER preserve_media_asset_keys").run()
+            throw error
+        }
+        try await sql.raw("ALTER TABLE media_assets ENABLE TRIGGER preserve_media_asset_keys").run()
     }
 
     // MARK: the Contractor link route

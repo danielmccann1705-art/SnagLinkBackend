@@ -297,6 +297,11 @@ final class PrivateObjectAllocationPolicyTests: XCTestCase {
     func testContentTheStoreWouldRefuseIsRefusedBeforeAnIntentExists() async throws {
         let configuration = try installNamespace()
         let store = TestPrivateContentStore(configuration: configuration)
+        // B2 took the `operation` closure away: the policy issues the PUT itself,
+        // through the store that owns the allocation's target. So the store is
+        // injected rather than called by hand, and "the store was never reached"
+        // is a statement about a store the policy really would have used.
+        app.storage[PrivateContentStoreProvider.InjectionKey.self] = store
         let userID = try await user()
         let allocation = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: UUID(), projectID: UUID(), app: app)
         // A PNG, declared a JPEG: exactly what `R2PrivateContentStore.put` refuses.
@@ -305,9 +310,8 @@ final class PrivateObjectAllocationPolicyTests: XCTestCase {
         do {
             try await PrivateObjectAllocationPolicy.write(
                 allocation, data: declaredJPEG, contentType: "image/jpeg",
-                source: .init(kind: "media_asset", id: UUID()), on: app.db,
-                authorize: { _ in .init(userID: userID) },
-                operation: { _ = try await store.put(key: allocation.key, data: declaredJPEG, contentType: "image/jpeg") })
+                source: .init(kind: "media_asset", id: UUID()), app: app, on: app.db,
+                authorize: { _ in .init(userID: userID) })
             XCTFail("a payload the store would refuse must never reach an intent row")
         } catch {
             XCTAssertEqual(error as? PrivateObjectAllocationPolicy.Failure, .contentInvalid)
@@ -368,18 +372,26 @@ final class PrivateObjectAllocationPolicyTests: XCTestCase {
     /// system can be a candidate. This is what changes that.
     func testAnAllocatedWriteIsOfferedToTheFencePassWithExactlyItsTarget() async throws {
         let configuration = try installNamespace()
+        let store = InMemoryPrivateContentStore(configuration: configuration)
+        app.storage[PrivateContentStoreProvider.InjectionKey.self] = store
         let userID = try await user()
         let allocation = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: UUID(), projectID: UUID(), app: app)
         let bytes = jpeg("original")
 
         // Twice, because a repeated write of the same address is the ordinary retry
-        // and must not turn the key into one whose writers disagree.
+        // and must not turn the key into one whose writers disagree. Under B2 the
+        // policy performs the PUT itself: the first takes the create, the second
+        // meets its own object and settles on the readback that verifies it.
         for _ in 0..<2 {
             try await PrivateObjectAllocationPolicy.write(
                 allocation, data: bytes, contentType: "image/jpeg",
-                source: .init(kind: "media_asset", id: UUID()), on: app.db,
-                authorize: { _ in .init(userID: userID) }, operation: { })
+                source: .init(kind: "media_asset", id: UUID()), app: app, on: app.db,
+                authorize: { _ in .init(userID: userID) })
         }
+        let recorded = await store.recordedCalls()
+        XCTAssertEqual(recorded, [.put(key: allocation.key, byteCount: bytes.count, contentType: "image/jpeg"),
+                                  .put(key: allocation.key, byteCount: bytes.count, contentType: "image/jpeg"),
+                                  .read(key: allocation.key, maximumBytes: PrivateContent.maximumBytes)])
 
         let lease = try await endAndLease(userID)
         try await manifest(lease, key: allocation.key)

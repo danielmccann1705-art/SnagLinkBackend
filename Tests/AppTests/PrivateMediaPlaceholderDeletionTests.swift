@@ -64,6 +64,18 @@ final class PrivateMediaPlaceholderDeletionTests: XCTestCase {
             mutation: .init(operationId: UUID(), deviceId: UUID()), id: assetID, expectedRevision: snag.revision,
             purpose: "capture", intentId: nil, sha256: String(repeating: "a", count: 64), byteCount: 24, mimeType: "image/jpeg"
         ), snag: snag, project: project, actorID: try owner.requireID(), on: app.db)
+        // B2 stopped allocation writing either address: a key is born with the
+        // write intent that records it. The historical rows this suite is about —
+        // allocated before that, carrying a `view.jpg` placeholder for an object
+        // that was never uploaded — are still in staging, and the deletion path
+        // still has to finish them. So the row is given the shape allocation used
+        // to give it, which the key-preservation trigger permits exactly once
+        // because both columns start NULL.
+        let prefix = "platform/\(try workspace.requireID().uuidString)/\(try project.requireID().uuidString)/\(assetID.uuidString)"
+        try await VerifiedIdentityService.sql(app.db).raw("""
+            UPDATE media_assets SET original_key = \(bind: prefix + "/original"), rendition_key = \(bind: prefix + "/view.jpg")
+            WHERE id = \(bind: assetID)
+            """).run()
         let row = try await PrivateMediaService.row(assetID, snagID: snag.requireID(), projectID: project.requireID(), on: app.db)
         return (project, snag, try row.decode(column: "rendition_key", as: String.self))
     }
@@ -113,7 +125,9 @@ final class PrivateMediaPlaceholderDeletionTests: XCTestCase {
 
     func testPlaceholderRemainsUnavailableToUploadAndReadAndMalformedDeletionKeysFailClosed() async throws {
         let placeholder = key()
-        await assertRejected { try await StorageService.uploadPrivate(Data("bytes".utf8), key: placeholder, mime: "image/jpeg", app: self.app) }
+        // The unconditional private writer that used to be refused here no longer
+        // exists at all (B2 R2), which is strictly stronger than refusing it. The
+        // reader still refuses the placeholder, and that is what remains to pin.
         await assertRejected { _ = try await StorageService.downloadPrivate(key: placeholder, app: self.app) }
 
         let workspace = UUID(), project = UUID(), asset = UUID()

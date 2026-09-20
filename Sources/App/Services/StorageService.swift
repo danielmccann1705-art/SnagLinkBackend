@@ -254,22 +254,24 @@ enum StorageService {
             .appendingPathComponent(key)
     }
 
-    /// The unconditional private writer, and the reason B2 deletes it. Until then
-    /// it refuses the namespace outright: a create-only address must never be
-    /// reachable from a writer that cannot express "create only".
-    static func uploadPrivate(_ data: Data, key: String, mime: String, app: Application) async throws {
-        try refuseNamespaceMutation(key, app: app)
-        let path = try privatePath(key, app: app)
-        if let bucket = try privateBucket(app: app) {
-            _ = try await _s3Client.putObject(.init(body: .init(buffer: ByteBuffer(data: data)), bucket: bucket, cacheControl: "private, no-store", contentType: mime, key: key))
-        } else {
-            try await app.threadPool.runIfActive(eventLoop: app.eventLoopGroup.next()) {
-                try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-                try data.write(to: path, options: .atomic)
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
-            }.get()
-        }
-    }
+    // The unconditional private writer is gone.
+    //
+    // `uploadPrivate` wrote a private media object with a plain `putObject` and no
+    // `If-None-Match`, or, with no bucket configured, straight onto local disk. It
+    // was the last writer that could put bytes at a create-only address without
+    // being able to express "create only", and B2 removes it rather than guarding
+    // it: a two-path controller is exactly the seam where a namespaced key meets
+    // the wrong writer, and a guard is a rule four validators have to keep
+    // agreeing on. Private media is now written only through
+    // `PrivateObjectAllocationPolicy.write`, over
+    // `PrivateContentStoreProvider.store(for:)`, where every PUT is conditional.
+    //
+    // `privatePath` stays, because `downloadPrivate` below still serves the
+    // historical `platform/` address that `PrivateMediaReadService` routes to it.
+    // Two consequences are deliberate and recorded: a deployment serving private
+    // uploads now needs the namespace installed, and local development loses the
+    // private-media disk path.
+
     static func downloadPrivate(key: String, app: Application) async throws -> Data {
         let path = try privatePath(key, app: app)
         if let bucket = try privateBucket(app: app) {

@@ -28,10 +28,24 @@ enum PrivateMediaService {
         let now = Date()
         let pending = try await sql.raw("SELECT count(*) AS n FROM media_assets WHERE (creator_id = \(bind: actorID) OR creator_grant_id = \(bind: grantID)) AND attached_at IS NULL AND state != 'retired' AND expires_at > \(bind: now)").first()!.decode(column: "n", as: Int.self)
         guard pending < 200 else { throw Abort(.tooManyRequests, reason: "Finish or discard existing photo uploads before adding more") }
-        let prefix = "platform/\(project.workspaceId!)/\(try project.requireID())/\(command.id)"
+        // No storage address is written here, and that is the whole of R1.
+        //
+        // Allocation used to write `platform/<workspace>/<project>/<asset>/original`
+        // and a `view.jpg` rendition placeholder into the row before any write
+        // intent existed. Under the private namespace an address that reaches
+        // `media_assets` without an intent behind it is an address no erasure can
+        // ever fence — it enters the manifest through the row, finds no captured
+        // `create_only_v1` intent, and is handed to a physical-delete branch that
+        // refuses a namespaced key by shape, for good. Every allocated-never-
+        // uploaded asset would be one of those, and that is the common case.
+        //
+        // So both columns stay NULL until the upload that records the intent for
+        // exactly that string, in the same transaction. A row with no address
+        // contributes nothing to a manifest, which is the correct amount of work
+        // for an object whose bytes were never written.
         try await sql.raw("""
-            INSERT INTO media_assets (id, workspace_id, project_id, snag_id, creator_id, creator_grant_id, purpose, intent_id, state, original_sha256, original_size, original_mime, original_key, rendition_key, base_snag_revision, created_at, expires_at)
-            VALUES (\(bind: command.id), \(bind: project.workspaceId!), \(bind: project.requireID()), \(bind: snag.requireID()), \(bind: actorID), \(bind: grantID), \(bind: command.purpose), \(bind: command.intentId), 'allocated', \(bind: command.sha256), \(bind: command.byteCount), \(bind: command.mimeType), \(bind: prefix + "/original"), \(bind: prefix + "/view.jpg"), \(bind: command.expectedRevision), \(bind: now), \(bind: now.addingTimeInterval(86400)))
+            INSERT INTO media_assets (id, workspace_id, project_id, snag_id, creator_id, creator_grant_id, purpose, intent_id, state, original_sha256, original_size, original_mime, base_snag_revision, created_at, expires_at)
+            VALUES (\(bind: command.id), \(bind: project.workspaceId!), \(bind: project.requireID()), \(bind: snag.requireID()), \(bind: actorID), \(bind: grantID), \(bind: command.purpose), \(bind: command.intentId), 'allocated', \(bind: command.sha256), \(bind: command.byteCount), \(bind: command.mimeType), \(bind: command.expectedRevision), \(bind: now), \(bind: now.addingTimeInterval(86400)))
             """).run()
         return try await MediaAssetResponse(row(command.id, snagID: snag.requireID(), projectID: project.requireID(), on: db))
     }

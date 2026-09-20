@@ -75,9 +75,10 @@ final class StorageMutationRefusalTests: XCTestCase {
         await assertNamespaceRefusal("the public writer never writes into the private namespace") {
             try await StorageService.upload(data: ByteBuffer(data: Self.png), key: key, contentType: "image/png", app: self.app)
         }
-        await assertNamespaceRefusal("the unconditional private writer is exactly what a fence must be safe from") {
-            try await StorageService.uploadPrivate(Self.png, key: key, mime: "image/png", app: self.app)
-        }
+        // `uploadPrivate` was here, refused. B2 R2 deleted it outright: the
+        // unconditional private writer a fence had to be safe from no longer
+        // exists in any configuration, which is stronger than refusing it, and
+        // there is no entry left in this file that can write private media.
         await assertNamespaceRefusal("snag deletion never removes a namespaced object") {
             try await StorageService.deleteOwnedSyncedPhoto(key: key, app: self.app)
         }
@@ -118,8 +119,15 @@ final class StorageMutationRefusalTests: XCTestCase {
         try await StorageService.upload(data: ByteBuffer(data: Self.png), key: publicKey, contentType: "image/png", app: app)
         XCTAssertTrue(FileManager.default.fileExists(atPath: app.directory.publicDirectory + publicKey))
 
+        // Placed at the historical location directly, because the writer that used
+        // to put it there is gone (B2 R2). What is being shown is unchanged: the
+        // reader and the deletion path still accept a historical `platform/`
+        // address with the namespace installed the whole time.
         let privateKey = "platform/\(UUID().uuidString)/\(UUID().uuidString)/\(UUID().uuidString)/original"
-        try await StorageService.uploadPrivate(Self.png, key: privateKey, mime: "image/png", app: app)
+        let privatePath = URL(fileURLWithPath: app.directory.workingDirectory)
+            .appendingPathComponent("PrivateMedia").appendingPathComponent(privateKey)
+        try FileManager.default.createDirectory(at: privatePath.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Self.png.write(to: privatePath)
         let stored = try await StorageService.downloadPrivate(key: privateKey, app: app)
         XCTAssertEqual(stored, Self.png)
 
@@ -148,10 +156,7 @@ final class StorageMutationRefusalTests: XCTestCase {
     func testWithNoNamespaceInstalledThereIsNothingForTheRuleToRefuse() async throws {
         XCTAssertNil(app.storage[PrivateObjectAllocationPolicy.InjectionKey.self])
         let key = namespaced()
-        await assertRefusedButNotByTheNamespaceRule("the private writer refuses it for its shape, as it always did") {
-            try await StorageService.uploadPrivate(Self.png, key: key, mime: "image/png", app: self.app)
-        }
-        await assertRefusedButNotByTheNamespaceRule("and so does the deletion path") {
+        await assertRefusedButNotByTheNamespaceRule("the deletion path refuses it for its shape, as it always did") {
             try await StorageService.deleteAccountObject(kind: "private_media", key: key, app: self.app)
         }
         await assertRefusedButNotByTheNamespaceRule("and the synced-photo deletion") {

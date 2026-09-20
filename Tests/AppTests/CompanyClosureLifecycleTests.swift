@@ -200,6 +200,16 @@ final class CompanyClosureLifecycleTests: XCTestCase {
             mutation: .init(operationId: UUID(), deviceId: UUID()), id: assetID, expectedRevision: snag.revision,
             purpose: "capture", intentId: nil, sha256: String(repeating: "a", count: 64), byteCount: 24, mimeType: "image/jpeg"
         ), snag: snag, project: project, actorID: try f.owner.requireID(), on: app.db)
+        // The historical row shape: allocation stopped writing either address in
+        // B2, so a row that carries the `view.jpg` placeholder is one allocated
+        // before that change. Staging still holds them and the worker still has to
+        // finish them. NULL to a value is the one transition the key-preservation
+        // trigger allows.
+        let prefix = "platform/\(f.company.uuidString)/\(try project.requireID().uuidString)/\(assetID.uuidString)"
+        try await VerifiedIdentityService.sql(app.db).raw("""
+            UPDATE media_assets SET original_key = \(bind: prefix + "/original"), rendition_key = \(bind: prefix + "/view.jpg")
+            WHERE id = \(bind: assetID)
+            """).run()
         let asset = try await PrivateMediaService.row(assetID, snagID: snag.requireID(), projectID: project.requireID(), on: app.db)
         let placeholder = try asset.decode(column: "rendition_key", as: String.self)
         XCTAssertTrue(placeholder.hasSuffix("/view.jpg"))

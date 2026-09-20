@@ -6,7 +6,10 @@ struct PrivateMediaController: RouteCollection {
     struct Page: Content { let items: [MediaAssetResponse]; let page: Int; let hasMore: Bool }
     private struct Upload: Sendable {
         let response: MediaAssetResponse
-        let originalKey: String
+        let workspaceID: UUID
+        /// NULL until an upload binds it. The row's address is born with the
+        /// write intent that records it, never with the allocation before it.
+        let originalKey: String?
     }
     func boot(routes: RoutesBuilder) throws {
         let media = routes.grouped("api", "v2", "projects", ":projectId", "snags", ":snagId", "media").grouped(PlatformAuthMiddleware())
@@ -52,7 +55,7 @@ struct PrivateMediaController: RouteCollection {
         let projectID = try id("projectId", req), snagID = try id("snagId", req), actorID = try req.requireAuthenticatedUserId()
         let body = try req.content.decode(MediaAllocateCommand.self)
         let hash = try PlatformMutationService.requestHash(body, route: "POST:\(req.url.path)")
-        try StorageService.requirePrivateStorage(app: req.application)
+        try PrivateMediaWriteService.requireAllocatable(app: req.application, logger: req.logger)
         return try await req.db.transaction { db in
             try await PlatformMutationService.lock(actorID: actorID, mutation: body.mutation, on: db)
             let (project, _) = try await ProjectAccessService.require(body.purpose == "completion" ? .submitCompletion : .edit, projectID: projectID, actorID: actorID, on: db)
@@ -65,6 +68,12 @@ struct PrivateMediaController: RouteCollection {
     }
     /// The immutable allocation (asset UUID + hash + size + purpose + creator)
     /// is the retry identity for binary PUT. A different payload never overwrites it.
+    ///
+    /// Everything about where the bytes go, and whether they went, belongs to
+    /// `PrivateMediaWriteService`; this route supplies only the three things that
+    /// are its own — who may do it, which bytes, and what readiness looks like.
+    /// The Contractor link route supplies exactly the same three, which is what
+    /// stops the two flows from drifting apart.
     @Sendable func upload(req: Request) async throws -> MediaAssetResponse {
         let projectID = try id("projectId", req), snagID = try id("snagId", req), assetID = try id("assetId", req), actorID = try req.requireAuthenticatedUserId()
         guard let buffer = req.body.data else { throw Abort(.badRequest, reason: "Photo bytes are missing") }
@@ -85,35 +94,32 @@ struct PrivateMediaController: RouteCollection {
                   req.headers.contentType?.description == response.mimeType else {
                 throw Abort(.unprocessableEntity, reason: "Photo bytes differ from the allocated size, checksum or type", identifier: "media_mismatch")
             }
-            return try .init(response: response, originalKey: row.decode(column: "original_key", as: String.self))
+            return try .init(response: response, workspaceID: row.decode(column: "workspace_id", as: UUID.self),
+                             originalKey: row.decode(column: "original_key", as: String?.self))
         }
         if prepared.response.state == "ready" { return prepared.response }
         let processed = try await req.application.threadPool.runIfActive(eventLoop: req.eventLoop) {
             try PrivateImageProcessor.process(data, mime: prepared.response.mimeType)
         }.get()
-        let renditionSHA = PrivateImageProcessor.digest(processed.jpeg)
-        let renditionKey = String(prepared.originalKey.dropLast("original".count)) + "view-\(renditionSHA).jpg"
         let authorizeWrite: @Sendable (Database) async throws -> ObjectWriteIntentService.Scope = { db in
             let (project, actions) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
             try PlatformMutationService.requireManaged(project)
             let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: projectID, on: db)
             try PrivateMediaService.requireUploader(row, actorID: actorID)
-            guard actions.contains(prepared.response.purpose == "completion" ? .submitCompletion : .edit),
-                  try row.decode(column: "original_key", as: String.self) == prepared.originalKey else { throw Abort(.forbidden) }
+            guard actions.contains(prepared.response.purpose == "completion" ? .submitCompletion : .edit) else { throw Abort(.forbidden) }
             let snag = try await PlatformSnagService.find(snagID, projectID: projectID, on: db)
             try PrivateMediaService.available(snag)
             if prepared.response.purpose == "completion" { try PrivateMediaService.submittable(snag) }
             return .init(userID: actorID, workspaceID: project.workspaceId, projectID: projectID)
         }
-        let source = ObjectWriteIntentService.Source(kind: "media_asset", id: assetID)
-        try await ObjectWriteIntentService.write(.init(storageKind: "private_media", key: prepared.originalKey, data: data, contentType: prepared.response.mimeType), source: source, on: req.db, authorize: authorizeWrite) {
-            try await StorageService.uploadPrivate(data, key: prepared.originalKey, mime: prepared.response.mimeType, app: req.application)
-        }
-        try await ObjectWriteIntentService.write(.init(storageKind: "private_media", key: renditionKey, data: processed.jpeg, contentType: "image/jpeg"), source: source, on: req.db, authorize: authorizeWrite) {
-            try await StorageService.uploadPrivate(processed.jpeg, key: renditionKey, mime: "image/jpeg", app: req.application)
-        }
+        let written = try await PrivateMediaWriteService.write(
+            assetID: assetID, workspaceID: prepared.workspaceID, projectID: projectID,
+            boundOriginalKey: prepared.originalKey, original: data, mimeType: prepared.response.mimeType,
+            rendition: processed.jpeg, app: req.application, on: req.db, logger: req.logger, authorize: authorizeWrite)
         // Processing/storage occur outside membership locks. Revalidate before
         // committing readiness; revocation cannot be bypassed by an in-flight PUT.
+        // Readiness is reached only from a row where both writes were verified,
+        // which is what makes the `ready` short-circuit above sound.
         return try await req.db.transaction { db in
             let (project, actions) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
             try PlatformMutationService.requireManaged(project)
@@ -123,10 +129,11 @@ struct PrivateMediaController: RouteCollection {
             let snag = try await PlatformSnagService.find(snagID, projectID: projectID, on: db)
             try PrivateMediaService.available(snag)
             if try row.decode(column: "state", as: String.self) == "ready" { return try .init(row) }
+            try PrivateMediaWriteService.requireWritten(row, matches: written)
             if prepared.response.purpose == "completion" { try PrivateMediaService.submittable(snag) }
             try await VerifiedIdentityService.sql(db).raw("""
                 UPDATE media_assets SET state = 'ready', revision = revision + 1, ready_at = \(bind: Date()),
-                    rendition_key = \(bind: renditionKey), rendition_sha256 = \(bind: renditionSHA), rendition_size = \(bind: processed.jpeg.count), width = \(bind: processed.width), height = \(bind: processed.height)
+                    rendition_key = \(bind: written.renditionKey), rendition_sha256 = \(bind: written.renditionSHA256), rendition_size = \(bind: processed.jpeg.count), width = \(bind: processed.width), height = \(bind: processed.height)
                 WHERE id = \(bind: assetID)
                 """).run()
             return try await .init(PrivateMediaService.row(assetID, snagID: snagID, projectID: projectID, on: db))

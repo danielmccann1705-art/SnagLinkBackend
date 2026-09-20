@@ -6,11 +6,23 @@ import JWT
 
 final class PrivateMediaTests: XCTestCase {
     var app: Application!
+    var store: InMemoryPrivateContentStore!
+    var configuration: PrivateStorageTargetConfiguration!
     static let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAACAAAAAYCAIAAAAUMWhjAAAAJHRFWHRDb21tZW50AFBSSVZBVEVfTE9DQVRJT05fVEVTVF9NQVJLRVLma54XAAAAJElEQVR4nGPY56FDU8QwasGoBaMWjFowasGoBaMWjFowNCwAALvIli6pZSDtAAAAAElFTkSuQmCC")!
     override func setUp() async throws {
         try XCTSkipIf(Environment.get("DATABASE_URL") == nil, "Disposable PostgreSQL required")
         app = try await Application.make(.testing); try await configure(app)
         app.storage[PlatformConfigurationKey.self] = .init(origin: "https://portal.example.test", environment: "local")
+        // After B2 there is no unconditional private writer and no local-disk
+        // fallback in any configuration: private media is allocated into the
+        // installed namespace and written through the create-only content store,
+        // or it is refused. Under `.testing` that store is this double, and its
+        // `put` runs the real signature validation, so a fixture that passes here
+        // is one the real store would also accept.
+        configuration = try InMemoryPrivateContentStore.syntheticConfiguration()
+        store = InMemoryPrivateContentStore(configuration: configuration)
+        app.storage[PrivateObjectAllocationPolicy.InjectionKey.self] = configuration
+        app.storage[PrivateContentStoreProvider.InjectionKey.self] = store
     }
     override func tearDown() async throws { if let app { try await app.asyncShutdown() } }
     private func user() async throws -> User {
@@ -80,9 +92,12 @@ final class PrivateMediaTests: XCTestCase {
         XCTAssertTrue(image.headers[.cacheControl].flatMap { $0.split(separator: ",") }.contains { $0.trimmingCharacters(in: .whitespaces).lowercased() == "no-store" }); XCTAssertFalse(image.body.string.contains("PRIVATE_LOCATION_TEST_MARKER"))
         let raw = try await PrivateMediaService.row(ready.id, snagID: snag.snag.id, projectID: project.project.id, on: app.db)
         let originalKey = try raw.decode(column: "original_key", as: String.self)
-        let storedOriginal = try await StorageService.downloadPrivate(key: originalKey, app: app)
+        XCTAssertTrue(originalKey.hasPrefix(configuration.target.namespace), originalKey)
+        let storedObject = await store.object(at: originalKey)
+        let storedOriginal = try XCTUnwrap(storedObject).data
         XCTAssertEqual(storedOriginal, Self.png)
         XCTAssertFalse(FileManager.default.fileExists(atPath: app.directory.publicDirectory + originalKey))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: app.directory.workingDirectory + "PrivateMedia/" + originalKey))
         let publicRoute = try await call(.GET, originalKey, nil)
         XCTAssertEqual(publicRoute.status, .notFound)
         XCTAssertFalse(uploaded.body.string.contains("original_key")); XCTAssertFalse(uploaded.body.string.contains("r2"))
@@ -257,10 +272,13 @@ final class PrivateMediaTests: XCTestCase {
         let row = try await PrivateMediaService.row(asset.id, snagID: snag.snag.id, projectID: project.project.id, on: app.db)
         let key = try row.decode(column: "original_key", as: String.self)
         var corrupt = Self.png; corrupt[corrupt.count - 1] ^= 1
-        try await StorageService.uploadPrivate(corrupt, key: key, mime: "image/png", app: app)
+        // Placed behind the create-only rule on purpose: no writer in the
+        // application can replace an object at a taken address, so the only way to
+        // stage corruption is to reach past `put` into the store's contents.
+        try await store.seedContent(key: key, data: corrupt, contentType: "image/png")
         let denied = try await call(.GET, path + "/\(asset.id)/original", owner)
         XCTAssertEqual(denied.status, .serviceUnavailable); XCTAssertTrue(denied.body.string.contains("media_unavailable"))
-        try await StorageService.uploadPrivate(Self.png, key: key, mime: "image/png", app: app)
+        try await store.seedContent(key: key, data: Self.png, contentType: "image/png")
         try await VerifiedIdentityService.sql(app.db).raw("UPDATE media_assets SET original_size = original_size + 1 WHERE id = \(bind: asset.id)").run()
         let wrongSize = try await call(.GET, path + "/\(asset.id)/original", owner)
         XCTAssertEqual(wrongSize.status, .serviceUnavailable)

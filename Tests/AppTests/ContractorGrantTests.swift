@@ -12,6 +12,13 @@ final class ContractorGrantTests: XCTestCase {
         app = try await Application.make(.testing); try await configure(app)
         app.storage[LinkGrantTokenKey.self] = Data(repeating: 7, count: 32)
         app.storage[PlatformConfigurationKey.self] = .init(origin: "https://portal.example.test", environment: "local")
+        // B2: private media is allocated into the installed namespace or not at
+        // all, and the only writer left is the private content store. Both are
+        // injected so the upload route this suite drives has an address to draw
+        // and somewhere to put bytes.
+        let privateStorage = try InMemoryPrivateContentStore.syntheticConfiguration()
+        app.storage[PrivateObjectAllocationPolicy.InjectionKey.self] = privateStorage
+        app.storage[PrivateContentStoreProvider.InjectionKey.self] = InMemoryPrivateContentStore(configuration: privateStorage)
     }
     override func tearDown() async throws { if let app { try await app.asyncShutdown() } }
     private func user() async throws -> User {

@@ -9,7 +9,13 @@ struct ContractorGrantController: RouteCollection {
         let id: UUID; let state: String; let width: Int?; let height: Int?; let intentId: UUID?
         init(_ media: MediaAssetResponse) { id = media.id; state = media.state; width = media.width; height = media.height; intentId = media.intentId }
     }
-    private struct Upload: Sendable { let media: MediaAssetResponse; let originalKey: String }
+    private struct Upload: Sendable {
+        let media: MediaAssetResponse
+        let workspaceID: UUID
+        let projectID: UUID
+        /// NULL until an upload binds it; see `PrivateMediaWriteService`.
+        let originalKey: String?
+    }
     func boot(routes: RoutesBuilder) throws {
         routes.get("assets", "contractor", "v2", ":name", use: resource)
         let grant = routes.grouped("api", "v2", "contractor", ":token").grouped(ContractorErrorBoundary())
@@ -90,7 +96,7 @@ struct ContractorGrantController: RouteCollection {
         }
     }
     @Sendable func allocate(req: Request) async throws -> PhotoResult {
-        try LinkGrantService.requireWrite(req); try StorageService.requirePrivateStorage(app: req.application)
+        try LinkGrantService.requireWrite(req); try PrivateMediaWriteService.requireAllocatable(app: req.application, logger: req.logger)
         let token = try Self.token(req), snagID = try LinkGrantController.id("snagId", req), body = try req.content.decode(MediaAllocateCommand.self)
         let hash = try PlatformMutationService.requestHash(body, route: "contractor:\(snagID):media")
         return try await req.db.transaction { db in
@@ -103,6 +109,10 @@ struct ContractorGrantController: RouteCollection {
             return result
         }
     }
+    /// The Contractor link half of the one upload flow. It differs from the
+    /// manager route in who is authorized and in what comes back, and in nothing
+    /// else: the address, the create-only write, the readback and every refusal
+    /// are `PrivateMediaWriteService`'s, so the two routes cannot drift apart.
     @Sendable func upload(req: Request) async throws -> PhotoResult {
         try LinkGrantService.requireWrite(req)
         let token = try Self.token(req), snagID = try LinkGrantController.id("snagId", req), assetID = try LinkGrantController.id("assetId", req)
@@ -115,27 +125,23 @@ struct ContractorGrantController: RouteCollection {
             let media = try MediaAssetResponse(row)
             if media.state != "ready" { try PrivateMediaService.submittable(snag) }
             guard data.count == media.byteCount, PrivateImageProcessor.digest(data) == media.originalSHA256, req.headers.contentType?.description == media.mimeType else { throw Abort(.unprocessableEntity, reason: "This photo differs from the original upload. Choose it again", identifier: "media_mismatch") }
-            return try .init(media: media, originalKey: row.decode(column: "original_key", as: String.self))
+            return try .init(media: media, workspaceID: row.decode(column: "workspace_id", as: UUID.self),
+                             projectID: project.requireID(), originalKey: row.decode(column: "original_key", as: String?.self))
         }
         if upload.media.state == "ready" { return .init(upload.media) }
         let processed = try await req.application.threadPool.runIfActive(eventLoop: req.eventLoop) { try PrivateImageProcessor.process(data, mime: upload.media.mimeType) }.get()
-        let sha = PrivateImageProcessor.digest(processed.jpeg), key = String(upload.originalKey.dropLast("original".count)) + "view-\(sha).jpg"
         let authorizeWrite: @Sendable (Database) async throws -> ObjectWriteIntentService.Scope = { db in
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
             let snag = try await LinkGrantService.item(snagID, grant: grant, project: project, write: true, on: db)
             let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: project.requireID(), on: db)
             try PrivateMediaService.requireUploader(row, actorID: nil, grantID: grant.decode(column: "id", as: UUID.self))
             try PrivateMediaService.submittable(snag)
-            guard try row.decode(column: "original_key", as: String.self) == upload.originalKey else { throw Abort(.forbidden) }
             return try .init(workspaceID: project.workspaceId, projectID: project.requireID())
         }
-        let source = ObjectWriteIntentService.Source(kind: "media_asset", id: assetID)
-        try await ObjectWriteIntentService.write(.init(storageKind: "private_media", key: upload.originalKey, data: data, contentType: upload.media.mimeType), source: source, on: req.db, authorize: authorizeWrite) {
-            try await StorageService.uploadPrivate(data, key: upload.originalKey, mime: upload.media.mimeType, app: req.application)
-        }
-        try await ObjectWriteIntentService.write(.init(storageKind: "private_media", key: key, data: processed.jpeg, contentType: "image/jpeg"), source: source, on: req.db, authorize: authorizeWrite) {
-            try await StorageService.uploadPrivate(processed.jpeg, key: key, mime: "image/jpeg", app: req.application)
-        }
+        let written = try await PrivateMediaWriteService.write(
+            assetID: assetID, workspaceID: upload.workspaceID, projectID: upload.projectID,
+            boundOriginalKey: upload.originalKey, original: data, mimeType: upload.media.mimeType,
+            rendition: processed.jpeg, app: req.application, on: req.db, logger: req.logger, authorize: authorizeWrite)
         return try await req.db.transaction { db in
             // Recheck grant, PIN, assignment and uploader AFTER processing/storage.
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
@@ -143,8 +149,9 @@ struct ContractorGrantController: RouteCollection {
             let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: project.requireID(), on: db)
             try PrivateMediaService.requireUploader(row, actorID: nil, grantID: grant.decode(column: "id", as: UUID.self))
             if try row.decode(column: "state", as: String.self) == "ready" { return try .init(MediaAssetResponse(row)) }
+            try PrivateMediaWriteService.requireWritten(row, matches: written)
             try PrivateMediaService.submittable(snag)
-            try await VerifiedIdentityService.sql(db).raw("UPDATE media_assets SET state = 'ready', revision = revision + 1, ready_at = \(bind: Date()), rendition_key = \(bind: key), rendition_sha256 = \(bind: sha), rendition_size = \(bind: processed.jpeg.count), width = \(bind: processed.width), height = \(bind: processed.height) WHERE id = \(bind: assetID)").run()
+            try await VerifiedIdentityService.sql(db).raw("UPDATE media_assets SET state = 'ready', revision = revision + 1, ready_at = \(bind: Date()), rendition_key = \(bind: written.renditionKey), rendition_sha256 = \(bind: written.renditionSHA256), rendition_size = \(bind: processed.jpeg.count), width = \(bind: processed.width), height = \(bind: processed.height) WHERE id = \(bind: assetID)").run()
             return try await .init(MediaAssetResponse(PrivateMediaService.row(assetID, snagID: snagID, projectID: project.requireID(), on: db)))
         }
     }
