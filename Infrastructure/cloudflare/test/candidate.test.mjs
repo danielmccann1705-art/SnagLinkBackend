@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {candidateConfigs,candidateOrigin,managerOrigin} from '../scripts/candidate-config.mjs';
+import {candidateConfigs,candidateLogging,candidateOrigin,loggingVariable,managerOrigin} from '../scripts/candidate-config.mjs';
 import {containerEnvironment} from '../src/config.mjs';
 
-const configs=()=>candidateConfigs({imageDigest:'sha256:'+'a'.repeat(64),assetsDirectory:'/synthetic/immutable/dist'});
+// `environment` is supplied everywhere here so an ambient logging variable cannot
+// decide what the rest of this file sees; the switch has its own tests below.
+const configs=(environment={})=>candidateConfigs({imageDigest:'sha256:'+'a'.repeat(64),
+  assetsDirectory:'/synthetic/immutable/dist',environment});
 const enabled=()=>({...configs().backend.vars,STAGING_ENABLED:'true',
   DATABASE_URL:'postgresql://synthetic:synthetic@ep-solitary-union-zav239mi.c-2.eu-west-2.aws.neon.tech/snaglist_platform_test_0910222943_fc44?sslmode=require',
   JWT_SECRET:'synthetic-only-jwt-at-least-32-characters',LINK_GRANT_TOKEN_KEY:btoa('z'.repeat(32)),
@@ -135,14 +138,76 @@ test('a regenerated deploy replaces every variable the live candidate Worker alr
   assert.deepEqual(backend.triggers.crons,['0 * * * *']);
 });
 
-// B5 and the journey run read per-write `kind:` lines off the staging candidate, so
-// the candidate keeps invocation and container logs on. Nothing here speaks for the
-// portal, the recovery Worker or production.
-test('the staging candidate emits logs and the portal stays quiet',()=>{
+// Logging is a switch and its safe state is the default one. Turning the Worker's
+// `observability` on also turns on Cloudflare's invocation logs, whose message for a
+// fetch is the request method and the request URL — and Snaglist's capability tokens
+// live in URL paths. So the generator produces logging off unless
+// `SNAGLIST_CANDIDATE_LOGGING=on` was set for that generation, and writes both states
+// down in full rather than leaving a reader to know a platform default. The reason,
+// and what B5 needs it for, is recorded once on `loggingVariable`.
+test('the staging candidate generates with logging off unless the switch is turned on',()=>{
   const {backend,portal}=configs();
-  assert.equal(backend.observability.enabled,true);
-  assert.equal(backend.containers[0].observability.logs.enabled,true);
+  assert.equal(backend.observability.enabled,false,'logging is off unless deliberately turned on');
+  assert.equal(backend.observability.logs.enabled,false);
+  assert.equal(backend.observability.logs.invocation_logs,false,
+    'invocation logs carry the request URL, and Snaglist URL paths carry capability tokens');
+  assert.equal(backend.containers[0].observability.logs.enabled,false);
   assert.equal(portal.observability.enabled,false,'the portal carries browser URLs; it stays quiet');
   assert.equal(backend.name,'snaglist-api-unified-staging');
   assert.equal(backend.vars.PLATFORM_ENVIRONMENT,'staging');
+});
+
+test('the switch turns the Worker and the container on together, and nothing else',()=>{
+  const off=configs().backend;
+  const {backend,portal}=configs({[loggingVariable]:'on'});
+  assert.equal(backend.observability.enabled,true);
+  assert.equal(backend.observability.logs.enabled,true);
+  assert.equal(backend.observability.logs.invocation_logs,true,
+    'on means on, written down: the generated file must not hide what it will record');
+  // The container's stdout is where B2.1's `kind:` lines are, and it reaches the
+  // dashboard only when the Worker's observability is on too.
+  assert.equal(backend.containers[0].observability.logs.enabled,true);
+  assert.equal(portal.observability.enabled,false,'the switch never speaks for the portal');
+  // Nothing but the observability settings moves. A logging decision is not a
+  // licence to change a variable, an origin, a bucket or the pinned image.
+  assert.deepEqual({...backend,observability:null,containers:null},
+                   {...off,observability:null,containers:null});
+  assert.deepEqual(backend.vars,off.vars);
+  assert.deepEqual({...backend.containers[0],observability:null},
+                   {...off.containers[0],observability:null});
+});
+
+test('the logging switch reads one variable, defaults off, and refuses anything else',()=>{
+  assert.equal(candidateLogging({}),false);
+  assert.equal(candidateLogging({[loggingVariable]:''}),false);
+  assert.equal(candidateLogging({[loggingVariable]:'off'}),false);
+  assert.equal(candidateLogging({[loggingVariable]:'on'}),true);
+  // A typo must not be read as the safe state either: a switch that exists to make a
+  // state deliberate may not let a misspelling choose one for it.
+  for (const value of ['true','1','yes','ON','On','enabled','false']) {
+    assert.throws(()=>candidateLogging({[loggingVariable]:value}),
+      new RegExp(`${loggingVariable}`),`${loggingVariable}=${value} must be refused, not read as off`);
+  }
+  assert.throws(()=>candidateConfigs({imageDigest:'sha256:'+'a'.repeat(64),
+    assetsDirectory:'/synthetic/immutable/dist',environment:{[loggingVariable]:'yes'}}));
+});
+
+// The generator reads the switch off the real process environment when it is not
+// given one, which is how the command-line path in this file gets it.
+test('an unset variable in the real process environment generates logging off',()=>{
+  const previous=process.env[loggingVariable];
+  try {
+    delete process.env[loggingVariable];
+    assert.equal(candidateLogging(),false);
+    const {backend}=candidateConfigs({imageDigest:'sha256:'+'a'.repeat(64),
+      assetsDirectory:'/synthetic/immutable/dist'});
+    assert.equal(backend.observability.enabled,false);
+    assert.equal(backend.containers[0].observability.logs.enabled,false);
+    process.env[loggingVariable]='on';
+    assert.equal(candidateLogging(),true);
+    assert.equal(candidateConfigs({imageDigest:'sha256:'+'a'.repeat(64),
+      assetsDirectory:'/synthetic/immutable/dist'}).backend.observability.enabled,true);
+  } finally {
+    if (previous===undefined) delete process.env[loggingVariable]; else process.env[loggingVariable]=previous;
+  }
 });
