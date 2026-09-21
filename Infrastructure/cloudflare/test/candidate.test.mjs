@@ -138,13 +138,15 @@ test('a regenerated deploy replaces every variable the live candidate Worker alr
   assert.deepEqual(backend.triggers.crons,['0 * * * *']);
 });
 
-// Logging is a switch and its safe state is the default one. Turning the Worker's
-// `observability` on also turns on Cloudflare's invocation logs, whose message for a
-// fetch is the request method and the request URL — and Snaglist's capability tokens
-// live in URL paths. So the generator produces logging off unless
-// `SNAGLIST_CANDIDATE_LOGGING=on` was set for that generation, and writes both states
-// down in full rather than leaving a reader to know a platform default. The reason,
-// and what B5 needs it for, is recorded once on `loggingVariable`.
+// Logging is a switch and its safe state is the default one. Cloudflare's invocation
+// logs, whose message for a fetch is the request method and the request URL, are what
+// makes Worker logging dangerous here — Snaglist's capability tokens live in URL
+// paths. So the generator produces logging off unless `SNAGLIST_CANDIDATE_LOGGING=on`
+// was set for that generation, and writes both states down in full rather than
+// leaving a reader to know a platform default. `on` is narrowed to what the B5 gate
+// actually reads: the Worker's observability and the container's logs on, so B2.1's
+// per-write `kind:` lines reach the store, and `invocation_logs` off, so request URLs
+// are never recorded. The reason is recorded once on `loggingVariable`.
 test('the staging candidate generates with logging off unless the switch is turned on',()=>{
   const {backend,portal}=configs();
   assert.equal(backend.observability.enabled,false,'logging is off unless deliberately turned on');
@@ -162,8 +164,12 @@ test('the switch turns the Worker and the container on together, and nothing els
   const {backend,portal}=configs({[loggingVariable]:'on'});
   assert.equal(backend.observability.enabled,true);
   assert.equal(backend.observability.logs.enabled,true);
-  assert.equal(backend.observability.logs.invocation_logs,true,
-    'on means on, written down: the generated file must not hide what it will record');
+  assert.equal(backend.observability.logs.invocation_logs,false,
+    'on is narrowed: the invocation log records the request method and URL, and the B5 gate drives '+
+    'the Contractor link path, so on must never turn that line on');
+  // Written down in full, and exactly these three keys: an added key would be a
+  // platform default nobody chose.
+  assert.deepEqual(backend.observability,{enabled:true,logs:{enabled:true,invocation_logs:false}});
   // The container's stdout is where B2.1's `kind:` lines are, and it reaches the
   // dashboard only when the Worker's observability is on too.
   assert.equal(backend.containers[0].observability.logs.enabled,true);

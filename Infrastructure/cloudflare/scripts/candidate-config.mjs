@@ -11,11 +11,13 @@ export const candidateDatabase = 'snaglist_platform_test_0910222943_fc44';
 // deliberately turned on at generation time. This is the one place the decision and
 // its reason are written down.
 //
-// **Why it is off.** Turning `observability` on for the backend Worker also turns on
-// Cloudflare's *invocation logs*, whose message for a fetch event is the request
-// method and the request URL. Snaglist's capability tokens live in URL paths —
-// `/m/:slug`, `/link/:token`, `/preview/:token`, `/auth/:token` and
-// `/api/v1/magic-links/:token/...` — so with logging on, every such request records
+// **Why it is off by default.** Turning `observability` on for the backend Worker
+// also turns on Cloudflare's *invocation logs*, whose message for a fetch event is
+// the request method and the request URL. Snaglist's capability tokens live in URL
+// paths —
+// `/m/:slug`, `/link/:token`, `/preview/:token`, `/auth/:token`,
+// `/api/v1/magic-links/:token/...` and the `/api/v2/contractor/:token/...` Contractor
+// link path the B5 gate itself drives — so a Worker left to log everything records
 // a bearer URL in a store that is read by more people, and kept in more places, than
 // the service it describes. The application's own request logging never writes a URL
 // (`PrivateRequestLoggingMiddleware` logs the registered route pattern and a status
@@ -26,14 +28,30 @@ export const candidateDatabase = 'snaglist_platform_test_0910222943_fc44';
 // added — one fixed word per private-media write, chosen at the call site from a
 // closed enum. Those lines leave the Vapor process on stdout, and container stdout
 // reaches the dashboard only when the *Worker's* `observability` is on as well
-// (https://developers.cloudflare.com/containers/faq/). The two booleans therefore
-// move together: B5 cannot read a `kind:` line without the Worker's logging, and the
-// Worker's logging is what brings the request URLs with it.
+// (https://developers.cloudflare.com/containers/faq/). The Worker's
+// `observability.enabled` is therefore what carries the container's lines: B5 cannot
+// read a `kind:` line without it, and it is what brings the invocation log with it
+// unless that line is named off — which is what `on` now does.
 //
-// **What "on" costs.** While it is on, the candidate's log store must be treated as
-// credential-bearing: not copied into evidence folders, screenshots or Drive, and
-// left to expire rather than exported. Set it back to off — by removing the
-// variable — as soon as the gate that needed it has run.
+// **What "on" means.** On is narrowed to exactly what the B5 gate reads. The
+// Worker's `observability.enabled` and the container's `logs.enabled` are true, so
+// B2.1's per-write `kind:` lines leave the container and reach the store; the
+// Worker's `logs.invocation_logs` is **false**, so the line that would record the
+// request method and URL is not written at all. That is Dan's decision of
+// 21 September on the log-exposure audit of the same date: the `kind:` lines are a
+// closed vocabulary carrying no value, the invocation log is the one line that would
+// carry a Contractor link token, and the gate needs the first without the second.
+// The backend Worker's own code logs nothing — no `console.*` anywhere in `src/` —
+// so with invocation logs off the Worker adds no line of its own and the container's
+// stdout is all that flows.
+//
+// **What "on" still costs.** The container's stdout is the whole Vapor log, not only
+// B2.1's lines, and one live line still interpolates a value: the ZIP warning in
+// `WebReportController.swift` prints an object key under the *public* upload bucket.
+// That is an address rather than a credential, but it is a capability by knowledge,
+// so a wholesale export or screenshot of the log store is still not an evidence-grade
+// artefact — B2.1's `kind:` lines themselves are safe to quote. Set the switch back
+// to off — by removing the variable — as soon as the gate that needed it has run.
 //
 // Production and the recovery Worker are not this switch's business. They keep
 // logging off unconditionally in their own configurations, which this file does not
@@ -76,9 +94,13 @@ export function candidateConfigs({imageDigest, assetsDirectory, environment = pr
       // decision and its reason are recorded on `loggingVariable` above. Both states
       // are written down in full, `invocation_logs` included, so the generated file
       // says plainly whether request URLs will be recorded instead of leaving it to
-      // a platform default that a reader has to know.
+      // a platform default that a reader has to know. `invocation_logs` is false in
+      // both states, and that is the whole of the difference between `on` and what
+      // `on` used to mean: turning the switch on lets the container's `kind:` lines
+      // through and never turns on the platform line that records the request method
+      // and URL.
       observability: logging
-        ? {enabled:true,logs:{enabled:true,invocation_logs:true}}
+        ? {enabled:true,logs:{enabled:true,invocation_logs:false}}
         : {enabled:false,logs:{enabled:false,invocation_logs:false}},
       vars:{STAGING_ENABLED:'false',STAGING_DEPLOYMENT:'unified-candidate',STAGING_PLATFORM_ENABLED:'true',
         STAGING_DATABASE_HOST:'ep-solitary-union-zav239mi.c-2.eu-west-2.aws.neon.tech',
@@ -129,6 +151,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const logging = candidateLogging();
   console.log('Prepared disabled candidate configurations. No deployment or resource change performed.');
   console.log(logging
-    ? `Logging: ON (${loggingVariable}=on). Invocation logs record request URLs, and Snaglist URL paths carry capability tokens: treat this candidate's log store as credential-bearing, keep it out of evidence, and regenerate with the variable unset once the gate that needed it has run.`
+    ? `Logging: ON (${loggingVariable}=on), narrowed. The Worker's observability and the container's logs are on so B2.1's per-write kind: lines reach the store; invocation_logs is off, so request URLs — which on this product carry capability tokens — are not recorded. Read the lines in the dashboard rather than exporting the store, and regenerate with the variable unset once the gate that needed it has run.`
     : `Logging: off (default). Set ${loggingVariable}=on to generate with the Worker's observability and the container's logs enabled for the B5 gate.`);
 }
