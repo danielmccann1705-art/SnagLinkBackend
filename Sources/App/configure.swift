@@ -3,13 +3,57 @@ import FluentPostgresDriver
 import Vapor
 import JWT
 
-public func configure(_ app: Application) async throws {
+/// Everything this process decides before it serves anything.
+///
+/// The two lookups are injected for one reason: the boot gates are the first
+/// things here, and a test has to be able to drive one into a refusal — and then
+/// check that no migration followed — without setting or unsetting a process
+/// environment variable the rest of the suite shares. Every other read below is
+/// still the process environment's own.
+public func configure(_ app: Application,
+                      privateStorageLookup: (String) -> String? = Environment.get,
+                      signingSecretLookup: (String) -> String? = Environment.get) async throws {
     // MARK: - Server Configuration
     app.http.server.configuration.hostname = "0.0.0.0"
     app.http.server.configuration.port = Environment.get("PORT").flatMap(Int.init) ?? 8080
 
     // MARK: - Logging
     app.logger.logLevel = .info
+
+    // MARK: - Private object allocation and the deletion switch
+    // Resolve both switches once, here, so a half-configured one is visible at
+    // boot rather than as a surprise inside an upload, and so the first request
+    // does not pay to parse configuration. Three states are refused outright and
+    // the process does not start: a namespace that is set and unusable, account
+    // deletion enabled with no namespace to fence into, and a production boot
+    // with no namespace at all in a build that has no other private writer. The
+    // reasons name the variable to fix and the state it was found in, and carry
+    // no value of any kind. See `PrivateStorageBoot`.
+    //
+    // This is the first thing a boot decides, ahead of the database and its
+    // migrations, and the order is the whole of "fail closed": a deployment that
+    // is not allowed to start must do nothing at all. The gate used to run after
+    // `autoMigrate()`, so a production boot with a missing or unusable namespace
+    // applied every pending migration to the live database and only then refused
+    // — a schema change made by a process that was never permitted to serve a
+    // request. Nothing here needs a schema, or a database, or the network: it
+    // reads the environment, records what it found, and returns.
+    try PrivateStorageBoot.install(app: app, lookup: privateStorageLookup)
+
+    // MARK: - Token signing
+    // The second thing a boot decides, and for the same reason as the first: a
+    // process that cannot sign a session cannot serve one, so it must do nothing
+    // at all rather than migrate a live schema on its way to refusing. This used
+    // to sit below `autoMigrate()` and refuse with `fatalError`, which is a trap
+    // and not an exit — and `fatalError` never returns, so the `exit(1)` in
+    // `Entrypoint`'s catch never ran either. It is moved, not changed: it reads
+    // the same variable and refuses on the same condition. Nothing between here
+    // and where it used to stand reads a signer — the span is `databases.use`,
+    // the migration list and `autoMigrate()`, and no migration reads any
+    // configuration at all — and nothing it needs runs after this point: it reads
+    // the environment, installs an HS256 signer into application storage, and
+    // returns. It names the variable and never its value. See `SigningSecretBoot`.
+    try SigningSecretBoot.install(app: app, lookup: signingSecretLookup)
 
     // MARK: - Database Configuration
     if let databaseURL = Environment.get("DATABASE_URL"),
@@ -106,13 +150,6 @@ public func configure(_ app: Application) async throws {
         app.logger.warning("DATABASE_URL not set, database features disabled")
     }
 
-    // MARK: - JWT Configuration
-    guard let jwtSecret = Environment.get("JWT_SECRET") else {
-        app.logger.critical("JWT_SECRET environment variable is required")
-        fatalError("JWT_SECRET must be set")
-    }
-    app.jwt.signers.use(.hs256(key: jwtSecret))
-
     // MARK: - Apple Sign In (JWKS-based verification)
     app.jwt.apple.applicationIdentifier = AuthController.appleApplicationIdentifier
 
@@ -142,17 +179,6 @@ public func configure(_ app: Application) async throws {
     if StorageService.backend == .local {
         app.middleware.use(FileMiddleware(publicDirectory: app.directory.publicDirectory))
     }
-
-    // MARK: - Private object allocation and the deletion switch
-    // Resolve both switches once, here, so a half-configured one is visible at
-    // boot rather than as a surprise inside an upload, and so the first request
-    // does not pay to parse configuration. Three states are refused outright and
-    // the process does not start: a namespace that is set and unusable, account
-    // deletion enabled with no namespace to fence into, and a production boot
-    // with no namespace at all in a build that has no other private writer. The
-    // reasons name the variable to fix and the state it was found in, and carry
-    // no value of any kind. See `PrivateStorageBoot`.
-    try PrivateStorageBoot.install(app: app)
 
     // MARK: - Routes
     try routes(app)
