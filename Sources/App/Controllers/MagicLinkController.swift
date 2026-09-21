@@ -1147,7 +1147,15 @@ struct MagicLinkController: RouteCollection {
             try await syncedPhoto.save(on: req.db)
         }
 
-        req.logger.info("Photo synced: \(metadata.id) for magic link: \(token.prefix(8))...")
+        // No part of the token, not even a prefix. It is the capability that opens the
+        // link, it lives in a URL path, and a fragment of a credential in a store kept
+        // for seven days is only ever defended as harmless. The link is not named by its
+        // database id either: two unauthenticated routes in this controller take the
+        // token in a path segment spelled `:linkId`, so "link id" in a log line cannot
+        // be read as a key rather than a capability without knowing which route wrote
+        // it. The synced photo's own id identifies the event and carries nothing: it is
+        // a record key the authenticated caller is handed back in the response body.
+        req.logger.info("Photo synced: \(metadata.id)")
 
         return PhotoSyncResponse(
             success: true,
@@ -1236,7 +1244,8 @@ struct MagicLinkController: RouteCollection {
             try await syncedDrawing.save(on: req.db)
         }
 
-        req.logger.info("Drawing synced: \(drawingId) for magic link: \(token.prefix(8))...")
+        // No part of the token, for the reason recorded on the photo sync above.
+        req.logger.info("Drawing synced: \(drawingId)")
 
         return DrawingSyncResponse(
             success: true,

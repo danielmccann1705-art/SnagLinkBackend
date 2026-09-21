@@ -45,13 +45,35 @@ export const candidateDatabase = 'snaglist_platform_test_0910222943_fc44';
 // so with invocation logs off the Worker adds no line of its own and the container's
 // stdout is all that flows.
 //
-// **What "on" still costs.** The container's stdout is the whole Vapor log, not only
-// B2.1's lines, and one live line still interpolates a value: the ZIP warning in
-// `WebReportController.swift` prints an object key under the *public* upload bucket.
-// That is an address rather than a credential, but it is a capability by knowledge,
-// so a wholesale export or screenshot of the log store is still not an evidence-grade
-// artefact — B2.1's `kind:` lines themselves are safe to quote. Set the switch back
-// to off — by removing the variable — as soon as the gate that needed it has run.
+// **What "on" still costs.** The container's log is the whole Vapor log, not only
+// B2.1's lines, so every line in it is published the moment this switch is on. Three
+// lines used to carry a value that should not be published, and all three were
+// redacted in the change that made the store readable — each keeps its level, its
+// metadata shape and the operational fact it carried, and drops only the address:
+//
+//   * `WebReportController.swift` — the ZIP warning printed an object key under the
+//     *public* upload bucket. That bucket serves without a signature, so the address
+//     is the whole of the access. It now says a report photo was missing and skipped.
+//   * `UploadController.swift` — printed the stored filename, which is the same
+//     public key less its fixed prefix, on the success path of every completion photo
+//     upload rather than on an error branch. It now says a completion photo was
+//     stored, and whether the thumbnail was generated or fell back.
+//   * `MagicLinkController.swift` — two photo/drawing sync lines printed the first
+//     eight characters of the link token. Eight characters open nothing, but a
+//     fragment of a capability in a seven-day store is only ever defended as
+//     harmless. They now name the synced record's own id and nothing about the link.
+//
+// What remains is bounded and deliberate. `PrivateRequestLoggingMiddleware` logs the
+// registered route pattern — parameter names, never their values — with a method and
+// a status. B2.1's `kind:` words and the boot refusals are closed vocabularies that
+// name a variable and never its contents. `APNsService` still logs an eight-character
+// device-token prefix in four places; staging cannot reach it, because this adapter
+// refuses `APNS_PRIVATE_KEY` outright, but production would, and it is the same class
+// of partial credential as the two magic-link lines above. Twelve sites interpolate a
+// caught `\(error)` — email, APNs, JSON decoding, thumbnailing and boot — which is not
+// a known leak but is an unbounded surface, since a library's error description is
+// not ours to predict. Neither is a reason to leave this switch on longer than the
+// gate needs: set it back to off — by removing the variable — once that gate has run.
 //
 // Production and the recovery Worker are not this switch's business. They keep
 // logging off unconditionally in their own configurations, which this file does not
@@ -70,6 +92,56 @@ export function candidateLogging(environment = process.env) {
   return setting === 'on';
 }
 
+// Which stream the container writes its log on, and the marker that switches the
+// one-run log-stream diagnostic on. Both live here for the same reason the logging
+// switch does: they are deployment decisions, and `wrangler deploy` replaces the
+// Worker's whole variable map, so a name this generator does not produce is a name
+// the next deploy removes.
+//
+// **Why the stream is a variable at all.** The container emits nothing into the log
+// store. The Worker's observability is on, the container's `logs.enabled` is on and
+// in its current top-level placement, and over six hours the account's `containers`
+// dataset held a thousand events of which not one was ours. Every line that does
+// arrive, from the one other container on the account, looks like standard error.
+// This process logs on standard output. That is a correlation and not a finding, so
+// `LOG_STREAM_PROBE` tests it and `LOG_STREAM` makes the answer deployable: if the
+// store turns out to keep standard error, the fix is this variable and a redeploy,
+// not another thirty-two minute image build.
+//
+// **What the stream does not change.** Nothing about any line's text, level or
+// metadata. The image keeps ConsoleKit's `ConsoleLogger` and its default renderer
+// and only swaps the destination the handler holds. B2.1's `kind:` words are fixed
+// strings from closed enums and cannot be reached from here.
+export const logStreamVariable = 'SNAGLIST_CANDIDATE_LOG_STREAM';
+export const logProbeVariable = 'SNAGLIST_CANDIDATE_LOG_PROBE';
+
+// `stdout` unless the variable says otherwise, because `stdout` is where this image
+// has always logged. Anything that is neither word is refused rather than quietly
+// read as the default, for the reason the logging switch is: a variable set in order
+// to move the log must not be able to leave it where it was and say nothing.
+export function candidateLogStream(environment = process.env) {
+  const setting = environment[logStreamVariable];
+  if (setting === undefined || setting === '') return 'stdout';
+  if (setting !== 'stdout' && setting !== 'stderr') {
+    throw new Error(`${logStreamVariable} accepts only 'stdout' or 'stderr'; it is stdout when unset`);
+  }
+  return setting;
+}
+
+// Absent unless a run asks for one, and a run asks for one by naming a marker. The
+// alphabet is uppercase letters, digits and the hyphen: narrow enough that no base64
+// key, bearer, cookie or Contractor link token can be routed through it, which matters
+// because the marker is written into a log line verbatim. A marker is meant to be
+// unique to its run, so nothing already in the store can collide with it.
+export function candidateLogProbe(environment = process.env) {
+  const setting = environment[logProbeVariable];
+  if (setting === undefined || setting === '') return undefined;
+  if (!/^[A-Z0-9][A-Z0-9-]{6,46}[A-Z0-9]$/.test(setting)) {
+    throw new Error(`${logProbeVariable} is 8 to 48 characters of A-Z, 0-9 and the hyphen; it is unset by default`);
+  }
+  return setting;
+}
+
 // Produces disabled configurations only. No secrets, live Worker mutation,
 // registry push, database creation or resource inference happens here.
 //
@@ -85,6 +157,8 @@ export function candidateConfigs({imageDigest, assetsDirectory, environment = pr
   }
   if (!isAbsolute(assetsDirectory)) throw new Error('Use the absolute immutable portal dist directory');
   const logging = candidateLogging(environment);
+  const logStream = candidateLogStream(environment);
+  const logProbe = candidateLogProbe(environment);
   return {
     backend: {
       $schema:join(infrastructure,'node_modules/wrangler/config-schema.json'),
@@ -117,7 +191,15 @@ export function candidateConfigs({imageDigest, assetsDirectory, environment = pr
         STAGED_LEGACY_IMPORT_ENABLED:'true',IMPORT_PREVIEW_API_ORIGIN:candidateOrigin,
         // Written down explicitly off. Turning account deletion on stays a separate
         // reviewed act; naming it here only stops a deploy deciding it by omission.
-        ACCOUNT_DELETION_ENABLED:'false'},
+        ACCOUNT_DELETION_ENABLED:'false',
+        // Which stream the container's log leaves on. Written down in both states
+        // rather than left unset, so the generated file says where the log goes
+        // instead of leaving that to a default a reader has to know. The reason the
+        // variable exists at all is recorded on `logStreamVariable` above.
+        LOG_STREAM:logStream,
+        // Present only for a deliberate one-run diagnostic. Absent is the normal
+        // state, and a configuration generated without it is one with the probe off.
+        ...(logProbe ? {LOG_STREAM_PROBE:logProbe} : {})},
       containers:[{class_name:'SnaglistBackend',
         image:`registry.cloudflare.com/387d49014cd0d45f9e6434196ab513c0/snaglist-unified-staging@${imageDigest}`,
         instance_type:'basic',max_instances:1,constraints:{regions:['WEUR']},observability:{logs:{enabled:logging}}}],
@@ -149,7 +231,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     writeFileSync(join(outputDirectory,`${name}.json`),JSON.stringify(config,null,2)+'\n',{flag:'wx'});
   }
   const logging = candidateLogging();
+  const logStream = candidateLogStream();
+  const logProbe = candidateLogProbe();
   console.log('Prepared disabled candidate configurations. No deployment or resource change performed.');
+  console.log(`Container log stream: ${logStream} (${logStreamVariable}${logStream === 'stdout' ? ' unset' : '=' + logStream}).`);
+  console.log(logProbe
+    ? `Log-stream probe: ON, marker ${logProbe}. Boot and every /health request emit one line per stream. Regenerate with ${logProbeVariable} unset once the run has been read.`
+    : `Log-stream probe: off (default). Set ${logProbeVariable} to a marker to emit one line per stream at boot and on every /health request.`);
   console.log(logging
     ? `Logging: ON (${loggingVariable}=on), narrowed. The Worker's observability and the container's logs are on so B2.1's per-write kind: lines reach the store; invocation_logs is off, so request URLs — which on this product carry capability tokens — are not recorded. Read the lines in the dashboard rather than exporting the store, and regenerate with the variable unset once the gate that needed it has run.`
     : `Logging: off (default). Set ${loggingVariable}=on to generate with the Worker's observability and the container's logs enabled for the B5 gate.`);

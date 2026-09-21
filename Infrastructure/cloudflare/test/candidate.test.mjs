@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {candidateConfigs,candidateLogging,candidateOrigin,loggingVariable,managerOrigin} from '../scripts/candidate-config.mjs';
+import {candidateConfigs,candidateLogging,candidateLogProbe,candidateLogStream,candidateOrigin,
+  logProbeVariable,loggingVariable,logStreamVariable,managerOrigin} from '../scripts/candidate-config.mjs';
 import {containerEnvironment} from '../src/config.mjs';
 
 // `environment` is supplied everywhere here so an ambient logging variable cannot
@@ -99,7 +100,12 @@ const notCarried=new Map([
   ['APPLE_BUNDLE_ID','Apple sign-in is not configured on the candidate'],
   ['APPLE_CLIENT_ID','Apple sign-in is not configured on the candidate'],
   ['APPLE_TEAM_ID','the Apple token exchange is not configured on the candidate'],
-  ['APPLE_KEY_ID','the Apple token exchange is not configured on the candidate']
+  ['APPLE_KEY_ID','the Apple token exchange is not configured on the candidate'],
+  // A one-run diagnostic marker, not a setting. The generator produces it only when
+  // SNAGLIST_CANDIDATE_LOG_PROBE names one for that generation, so a configuration
+  // generated without it is one with the probe off - which is the normal state and
+  // the state a deploy should return the Worker to once a run has been read.
+  ['LOG_STREAM_PROBE','the log-stream probe is per-run; the generator carries it only when asked']
 ]);
 
 test('the generated variable map is exactly the non-secret configuration the adapter reads',()=>{
@@ -215,5 +221,59 @@ test('an unset variable in the real process environment generates logging off',(
       assetsDirectory:'/synthetic/immutable/dist'}).backend.observability.enabled,true);
   } finally {
     if (previous===undefined) delete process.env[loggingVariable]; else process.env[loggingVariable]=previous;
+  }
+});
+
+// The stream the container logs on is a deployment decision and therefore lives in
+// the generated variable map: `wrangler deploy` replaces that map wholesale, so a
+// stream the generator does not produce is a stream the next deploy unsets. It is
+// written down in both states for the same reason the observability block is - so
+// the generated file says where the log goes rather than leaving it to a default.
+test('the container log stream is generated in both states and defaults to stdout',()=>{
+  assert.equal(configs().backend.vars.LOG_STREAM,'stdout','unset is today\'s behaviour, written down');
+  assert.equal(configs({[logStreamVariable]:'stdout'}).backend.vars.LOG_STREAM,'stdout');
+  assert.equal(configs({[logStreamVariable]:'stderr'}).backend.vars.LOG_STREAM,'stderr');
+  // Moving the log is not a licence to move anything else.
+  const out=configs({[logStreamVariable]:'stdout'}).backend;
+  const err=configs({[logStreamVariable]:'stderr'}).backend;
+  assert.deepEqual({...err,vars:null},{...out,vars:null});
+  assert.deepEqual({...err.vars,LOG_STREAM:null},{...out.vars,LOG_STREAM:null});
+});
+
+test('the log stream switch reads one variable, defaults to stdout, and refuses anything else',()=>{
+  assert.equal(candidateLogStream({}),'stdout');
+  assert.equal(candidateLogStream({[logStreamVariable]:''}),'stdout');
+  assert.equal(candidateLogStream({[logStreamVariable]:'stdout'}),'stdout');
+  assert.equal(candidateLogStream({[logStreamVariable]:'stderr'}),'stderr');
+  for(const value of ['STDERR','stderr ','2','both','/dev/stderr','on']) {
+    assert.throws(()=>candidateLogStream({[logStreamVariable]:value}));
+  }
+});
+
+// The probe is a diagnostic, not a setting: it exists to decide which stream the
+// store keeps, in one image build, and then to be turned back off. Off is therefore
+// absence - no variable, no marker, no probe line - and not a written-down `false`.
+test('the log-stream probe is absent unless a run names a marker',()=>{
+  assert.equal(configs().backend.vars.LOG_STREAM_PROBE,undefined);
+  assert.equal(configs({[logProbeVariable]:'STREAM-0921-A'}).backend.vars.LOG_STREAM_PROBE,'STREAM-0921-A');
+  // Naming a marker moves nothing else at all.
+  const off=configs().backend;
+  const on=configs({[logProbeVariable]:'STREAM-0921-A'}).backend;
+  assert.deepEqual({...on,vars:null},{...off,vars:null});
+  assert.deepEqual({...on.vars,LOG_STREAM_PROBE:null},{...off.vars,LOG_STREAM_PROBE:null});
+});
+
+test('a probe marker cannot carry a secret into a log line',()=>{
+  assert.equal(candidateLogProbe({}),undefined);
+  assert.equal(candidateLogProbe({[logProbeVariable]:''}),undefined);
+  for(const marker of ['SNAG0921A','A1B2C3D4','STREAM-0921-A','X'.repeat(48)]) {
+    assert.equal(candidateLogProbe({[logProbeVariable]:marker}),marker);
+  }
+  // Too short, too long, hyphen-edged, or outside the alphabet. The last four are the
+  // point of the alphabet: a base64 key, a bearer, a cookie value and a padded 32-byte
+  // key all carry lowercase or one of + / = and so none of them can pass through here.
+  for(const marker of ['SHORT7','Y'.repeat(49),'-SNAG0921','SNAG0921-','SNAG 0921',
+    'c25hZ2xpc3Qtc3ludGhldGlj','Bearer-abc123','sid=0123456789abcdef','A'.repeat(42)+'=']) {
+    assert.throws(()=>candidateLogProbe({[logProbeVariable]:marker}));
   }
 });

@@ -190,3 +190,27 @@ test('private media and account deletion install only for the candidate that can
     assert.throws(() => containerEnvironment({...sample(),...override}));
   }
 });
+
+test('the container log stream is optional, is one of two words, and defaults to nothing at all', () => {
+  // Absent is today's behaviour: the container is told nothing and logs where it always has.
+  assert.equal(containerEnvironment(sample()).LOG_STREAM, undefined);
+  assert.equal(containerEnvironment({...sample(), LOG_STREAM: 'stdout'}).LOG_STREAM, 'stdout');
+  assert.equal(containerEnvironment({...sample(), LOG_STREAM: 'stderr'}).LOG_STREAM, 'stderr');
+  for (const value of ['STDOUT', 'stderr ', '2', 'both', '', 'stdout,stderr', '/dev/stderr']) {
+    assert.throws(() => containerEnvironment({...sample(), LOG_STREAM: value}));
+  }
+});
+
+test('the log-stream probe marker is optional and cannot carry a secret', () => {
+  assert.equal(containerEnvironment(sample()).LOG_STREAM_PROBE, undefined);
+  for (const marker of ['SNAG0921A', 'A1B2C3D4', 'STREAM-0921-A', 'X'.repeat(48)]) {
+    assert.equal(containerEnvironment({...sample(), LOG_STREAM_PROBE: marker}).LOG_STREAM_PROBE, marker);
+  }
+  // Too short, too long, edged with a hyphen, or outside the alphabet. The last four are the
+  // point of the alphabet: a base64 key, a bearer, a cookie value and a Contractor link token
+  // all carry lowercase or one of + / = and so none of them can be routed into a log line here.
+  for (const marker of ['SHORT7', 'Y'.repeat(49), '-SNAG0921', 'SNAG0921-', 'SNAG 0921',
+    'c25hZ2xpc3Qtc3ludGhldGlj', 'Bearer-abc123', 'sid=0123456789abcdef', 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=']) {
+    assert.throws(() => containerEnvironment({...sample(), LOG_STREAM_PROBE: marker}));
+  }
+});

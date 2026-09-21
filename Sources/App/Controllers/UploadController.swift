@@ -134,7 +134,18 @@ struct UploadController: RouteCollection {
         }
         let thumbnailUrl = thumbnailGenerated ? allocation.plannedThumbnailURL : allocation.issuedURL
 
-        req.logger.info("Photo uploaded: \(allocation.filename), thumbnail: \(thumbnailGenerated ? "yes" : "fallback to original")")
+        // The filename is deliberately not in this line. It is `<uuid>.<ext>`, and the
+        // object it names is `uploads/photos/<filename>` in the *public* upload bucket
+        // — `issuedURL` is that bucket's base plus exactly this string. A bucket that
+        // serves without a signature is one where knowing the address is the whole of
+        // the access, so the line would put a capability into a seven-day log, on the
+        // success path of every completion photo upload rather than on a rare error
+        // branch. That is the same defect as the ZIP warning in `WebReportController`
+        // and it is more exposed, not less. What an operator needs from here survives:
+        // that a completion photo was stored, and whether its thumbnail was generated
+        // or fell back to the original. Which object it was is a question for the
+        // database, where `completion_upload_objects` holds the key.
+        req.logger.info("Completion photo stored, thumbnail: \(thumbnailGenerated ? "yes" : "fallback to original")")
 
         return UploadPhotoResponse(
             url: allocation.issuedURL,

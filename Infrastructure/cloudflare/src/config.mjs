@@ -85,8 +85,43 @@ export function containerEnvironment(env) {
     ...platformEnvironment(env),
     ...appleEnvironment(env, candidate),
     ...importPreparation(env, candidate, base),
-    ...privateStorage(env, candidate)
+    ...privateStorage(env, candidate),
+    ...logStream(env)
   };
+}
+
+// Where the container's log goes, and the marker that switches the one-run
+// log-stream diagnostic on. Both are optional; absent, the container logs on
+// standard output exactly as it always has and emits no probe line at all.
+//
+// This adapter is an allowlist - a key reaches the container only because it is
+// named here - so these two have to be named or the image could never see them.
+// Naming them is also what makes the fix deployable without a rebuild: moving
+// the log from one stream to the other is LOG_STREAM plus a Worker deploy.
+//
+// Neither value may be anything but the shapes below. LOG_STREAM is one of two
+// literal words. The probe marker's alphabet is uppercase letters, digits and
+// the hyphen, which is narrow enough that no base64 key, bearer, cookie or
+// Contractor link token can be routed through it - every one of those carries
+// lowercase or one of + / = - and that matters because the marker is written
+// into a log line verbatim.
+/** @returns {Record<string, string>} */
+function logStream(env) {
+  const selected = {};
+  if (env.LOG_STREAM !== undefined) {
+    if (env.LOG_STREAM !== 'stdout' && env.LOG_STREAM !== 'stderr') {
+      throw new Error('The container log stream must be stdout or stderr');
+    }
+    selected.LOG_STREAM = env.LOG_STREAM;
+  }
+  if (env.LOG_STREAM_PROBE !== undefined) {
+    if (typeof env.LOG_STREAM_PROBE !== 'string' ||
+        !/^[A-Z0-9][A-Z0-9-]{6,46}[A-Z0-9]$/.test(env.LOG_STREAM_PROBE)) {
+      throw new Error('A log-stream probe marker is 8 to 48 characters of A-Z, 0-9 and the hyphen');
+    }
+    selected.LOG_STREAM_PROBE = env.LOG_STREAM_PROBE;
+  }
+  return selected;
 }
 
 // Sign in with Apple. Two separable things: the audience staging is allowed to accept,

@@ -55,6 +55,16 @@ public func configure(_ app: Application,
     // returns. It names the variable and never its value. See `SigningSecretBoot`.
     try SigningSecretBoot.install(app: app, lookup: signingSecretLookup)
 
+    // MARK: - The log-stream probe
+    // Inert unless `LOG_STREAM_PROBE` carries a marker, and it carries one only
+    // in a deliberate diagnostic run. It sits after the two boot gates and not
+    // before them: those two are the first things a boot decides, and a test
+    // holds them there by requiring that a refused boot has registered no
+    // database at all. Nothing here touches a database, a store or the network —
+    // it reads one variable, keeps it, and writes three lines on two streams. See
+    // `LogStreamProbe` for what the three lines are and why there are three.
+    try LogStreamProbe.install(app: app)
+
     // MARK: - Database Configuration
     if let databaseURL = Environment.get("DATABASE_URL"),
        var config = try? SQLPostgresConfiguration(url: databaseURL) {

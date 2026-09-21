@@ -407,7 +407,17 @@ struct WebReportController: RouteCollection {
             let storageKey = photo.filePath.hasPrefix("/") ? String(photo.filePath.dropFirst()) : photo.filePath
 
             guard let fileData = try await StorageService.download(key: storageKey, app: req.application) else {
-                req.logger.warning("ZIP: skipping missing photo file: \(storageKey)")
+                // The key is deliberately not in this line. It addresses an
+                // object in the public upload bucket, and a bucket that serves
+                // without a signature is one where knowing the address is the
+                // whole of the access — so the line would put a capability into a
+                // log that is kept for seven days. It was harmless only for as
+                // long as nothing could read that log, which is the thing this
+                // change is undoing. The line itself is kept, not deleted: that a
+                // report's ZIP shipped without one of its photographs is the one
+                // fact an operator needs from here, and it is still countable per
+                // request. Which file it was is a question for the database.
+                req.logger.warning("ZIP: a report photo was missing from storage and was skipped")
                 continue
             }
 

@@ -4,6 +4,12 @@ import Vapor
 func routes(_ app: Application) throws {
     // MARK: - Health Check
     app.get("health") { req async -> HealthResponse in
+        // The request half of the log-stream probe. A no-op in every deployment
+        // that did not ask for one. Health is the right place for it: it is
+        // reached on a schedule and on demand, it takes no argument, and it
+        // carries nothing of anybody's, so driving the probe cannot put a path,
+        // a token or an identifier anywhere near a log line.
+        LogStreamProbe.emitRequest(req)
         return HealthResponse(
             status: "ok",
             version: "1.0.0",

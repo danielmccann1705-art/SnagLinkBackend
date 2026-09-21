@@ -13,7 +13,7 @@ enum Entrypoint {
         // `main` is not an exit: the runtime reports `Fatal error: Error raised
         // at top level` and traps, and a caught trap leaves the process alive —
         // a container that is up and never healthy, which is the failure D5 was
-        // about. These first three steps run before `LoggingSystem.bootstrap`
+        // about. These first four steps run before `LoggingSystem.bootstrap`
         // has given us anywhere to log, so they say what happened on standard
         // error — the stream the console logger writes to once it exists — and
         // exit non-zero themselves.
@@ -21,7 +21,16 @@ enum Entrypoint {
         do { env = try Environment.detect() }
         catch { refuseBeforeLogging("the command line could not be read", error) }
 
-        do { try LoggingSystem.bootstrap(from: &env) }
+        // Which stream the log goes out on. Default `stdout`, which is what
+        // `LoggingSystem.bootstrap(from:)` installs on its own, so an unset
+        // `LOG_STREAM` is today's behaviour and not a reimplementation of it. It
+        // is read here rather than in `configure` because the answer decides how
+        // the logging system is bootstrapped, and `configure` runs after that.
+        let stream: LogStreamBoot.Stream
+        do { stream = try LogStreamBoot.resolve(Environment.get(LogStreamBoot.variable)) }
+        catch { refuseBeforeLogging("the log stream could not be read", error) }
+
+        do { try LogStreamBoot.bootstrap(from: &env, stream: stream) }
         catch { refuseBeforeLogging("logging could not be configured from the command line", error) }
 
         let app: Application
@@ -83,12 +92,15 @@ enum Entrypoint {
     /// exiting rather than by throwing — for exactly the reason the catch above
     /// exits.
     ///
-    /// All three callers fail on the command line and nothing else:
+    /// Three of the four callers fail on the command line and nothing else:
     /// `Environment.detect` and `LoggingSystem.bootstrap(from:)` parse arguments,
-    /// and `Application.make` fails on resources. None of them reads an
-    /// environment variable, so the error's own description carries no configured
-    /// value — and `what` is a fixed sentence chosen here, not interpolated from
-    /// anything read.
+    /// and `Application.make` fails on resources; not one of them reads an
+    /// environment variable at all. The fourth, `LogStreamBoot.resolve`, does read
+    /// one — and its refusal is written to name `LOG_STREAM` and the two words it
+    /// accepts and never to repeat what it was given, for precisely this reason:
+    /// what it says here is written before there is any logger that could redact
+    /// it. In every case `what` is a fixed sentence chosen at the call site, not
+    /// interpolated from anything read.
     private static func refuseBeforeLogging(_ what: String, _ error: any Error) -> Never {
         fputs("Boot failed before logging was configured: \(what): \(error)\n", stderr)
         exit(1)
