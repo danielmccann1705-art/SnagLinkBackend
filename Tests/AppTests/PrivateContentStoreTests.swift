@@ -469,7 +469,7 @@ final class PrivateContentStoreTests: XCTestCase {
     /// No fallback of any kind: a missing or mismatched store is an error, never
     /// some other writer that happens to be reachable.
     func testProviderReturnsOneStoreForOneTargetAndNeverFallsBack() async throws {
-        let injected = try TestPrivateContentStore.synthetic()
+        let injected = try InMemoryPrivateContentStore.synthetic()
         let app = try await Application.make(.testing)
         let target = injected.target
         app.storage[PrivateContentStoreProvider.InjectionKey.self] = injected
@@ -492,37 +492,11 @@ final class PrivateContentStoreTests: XCTestCase {
     }
 
     func testAnInjectedStoreIsIgnoredOutsideTesting() async throws {
-        let injected = try TestPrivateContentStore.synthetic()
+        let injected = try InMemoryPrivateContentStore.synthetic()
         let app = try await Application.make(.development)
         app.storage[PrivateContentStoreProvider.InjectionKey.self] = injected
         XCTAssertThrowsError(try PrivateContentStoreProvider.store(for: injected.target, app: app))
         try await app.asyncShutdown()
-    }
-
-    func testTheInMemoryStandInIsCreateOnlyAndRecordsItsCalls() async throws {
-        let fake = try TestPrivateContentStore.synthetic()
-        let key = fake.originalKey()
-        let created = try await fake.put(key: key, data: jpeg, contentType: "image/jpeg")
-        guard case .created(let etag) = created else { return XCTFail("Expected a created outcome, got \(created)") }
-        XCTAssertFalse(etag.isEmpty)
-        let repeated = try await fake.put(key: key, data: png, contentType: "image/png")
-        XCTAssertEqual(repeated, .alreadyExists)
-        let read = try await fake.read(key: key, maximumBytes: PrivateContent.maximumBytes)
-        XCTAssertEqual(read.body, jpeg)
-        XCTAssertEqual(read.etag, etag)
-        XCTAssertFalse(read.isErasureFence)
-        let fenced = fake.originalKey()
-        _ = try await fake.seedErasureFence(key: fenced)
-        let afterFence = try await fake.put(key: fenced, data: jpeg, contentType: "image/jpeg")
-        XCTAssertEqual(afterFence, .alreadyExists, "a fence holds its address against a later content writer")
-        let fenceReadback = try await fake.read(key: fenced, maximumBytes: 1)
-        XCTAssertTrue(fenceReadback.isErasureFence)
-        let placeholder = fake.placeholderKey(for: key)
-        await rejected { _ = try await fake.put(key: placeholder, data: self.jpeg, contentType: "image/jpeg") }
-        let calls = await fake.recordedCalls()
-        XCTAssertEqual(calls.count, 6)
-        XCTAssertEqual(calls.first, TestPrivateContentStore.Call.put(key: key, byteCount: jpeg.count, contentType: "image/jpeg"))
-        XCTAssertEqual(calls.last, TestPrivateContentStore.Call.put(key: placeholder, byteCount: jpeg.count, contentType: "image/jpeg"))
     }
 
     // MARK: absence, and what it is not

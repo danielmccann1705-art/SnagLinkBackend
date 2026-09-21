@@ -25,7 +25,7 @@ final class PrivateObjectAllocationPolicyTests: XCTestCase {
 
     @discardableResult
     private func installNamespace() throws -> PrivateStorageTargetConfiguration {
-        let configuration = try TestPrivateContentStore.syntheticConfiguration()
+        let configuration = try InMemoryPrivateContentStore.syntheticConfiguration()
         app.storage[PrivateObjectAllocationPolicy.InjectionKey.self] = configuration
         return configuration
     }
@@ -217,7 +217,7 @@ final class PrivateObjectAllocationPolicyTests: XCTestCase {
         try installNamespace()
         let original = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: UUID(), projectID: UUID(), app: app)
         app.storage[PrivateObjectAllocationPolicy.InjectionKey.self] =
-            try TestPrivateContentStore.syntheticConfiguration(bucket: "synthetic-private-other")
+            try InMemoryPrivateContentStore.syntheticConfiguration(bucket: "synthetic-private-other")
         assertFails(.targetMismatch, "an allocation belongs to the target it was made against") {
             _ = try PrivateObjectAllocationPolicy.rendition(of: original, sha256: PrivateImageProcessor.digest(Data("x".utf8)), app: self.app)
         }
@@ -296,7 +296,7 @@ final class PrivateObjectAllocationPolicyTests: XCTestCase {
     /// row exists rather than after it.
     func testContentTheStoreWouldRefuseIsRefusedBeforeAnIntentExists() async throws {
         let configuration = try installNamespace()
-        let store = TestPrivateContentStore(configuration: configuration)
+        let store = InMemoryPrivateContentStore(configuration: configuration)
         // B2 took the `operation` closure away: the policy issues the PUT itself,
         // through the store that owns the allocation's target. So the store is
         // injected rather than called by hand, and "the store was never reached"

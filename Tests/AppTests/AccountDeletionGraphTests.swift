@@ -69,18 +69,6 @@ final class AccountDeletionGraphTests: XCTestCase {
     private func count(_ table: String, where clause: SQLQueryString) async throws -> Int {
         try await VerifiedIdentityService.sql(app.db).raw("SELECT count(*) AS n FROM \(unsafeRaw: table) WHERE \(clause)").first()!.decode(column:"n",as:Int.self)
     }
-    /// Creates synthetic pre-migration evidence in the isolated test database.
-    /// The access-exclusive lock and trigger toggle are transaction-local; a
-    /// failure rolls both the fixture row and DDL state back together.
-    private func historicalCompletionPhoto(completionID: UUID, url: String) async throws {
-        try await app.db.transaction { db in
-            let sql=try VerifiedIdentityService.sql(db)
-            try await sql.raw("LOCK TABLE completion_photos IN ACCESS EXCLUSIVE MODE").run()
-            try await sql.raw("ALTER TABLE completion_photos DISABLE TRIGGER completion_photo_trusted_insert").run()
-            try await sql.raw("INSERT INTO completion_photos(id,completion_id,url,uploaded_at) VALUES(\(bind:UUID()),\(bind:completionID),\(bind:url),NOW())").run()
-            try await sql.raw("ALTER TABLE completion_photos ENABLE TRIGGER completion_photo_trusted_insert").run()
-        }
-    }
 
     private struct Fixture {
         let target: User, personal: Project, company: Project, companySnag: Snag
@@ -117,7 +105,7 @@ final class AccountDeletionGraphTests: XCTestCase {
         try await sql.raw("INSERT INTO synced_photos(id,magic_link_token,snag_id,label,file_path,thumbnail_file_path,created_at) VALUES(\(bind:UUID()),\(bind:privateLink.1),\(bind:personalSnag.requireID()),'before',\(bind:legacyPhoto),\(bind:legacyThumb),NOW())").run()
         try await sql.raw("INSERT INTO synced_drawings(id,magic_link_token,drawing_id,file_path,file_name,created_at) VALUES(\(bind:UUID()),\(bind:privateLink.1),\(bind:UUID()),\(bind:legacyDrawing),'plan.pdf',NOW())").run()
         try await sql.raw("INSERT INTO completions(id,snag_id,magic_link_id,contractor_name,status,submitted_at) VALUES(\(bind:privateCompletion),\(bind:personalSnag.requireID()),\(bind:privateLink.0),'Synthetic contractor','pending',NOW())").run()
-        try await historicalCompletionPhoto(completionID:privateCompletion,url:completionPhoto)
+        try await HistoricalCompletionPhotoFixture.insert(completionID:privateCompletion,url:completionPhoto,on:app.db)
 
         let commentID = UUID()
         try await sql.raw("""
@@ -306,7 +294,7 @@ final class AccountDeletionGraphTests: XCTestCase {
         let f=try await fixture(), owner=try await user(), companyLink=try await link(project:f.company,creator:owner), completion=UUID()
         let sql=try VerifiedIdentityService.sql(app.db)
         try await sql.raw("INSERT INTO completions(id,snag_id,magic_link_id,contractor_name,status,submitted_at) VALUES(\(bind:completion),\(bind:f.companySnag.requireID()),\(bind:companyLink.0),'Company contractor','pending',NOW())").run()
-        try await historicalCompletionPhoto(completionID:completion,url:f.completionPhoto)
+        try await HistoricalCompletionPhotoFixture.insert(completionID:completion,url:f.completionPhoto,on:app.db)
         _=try await AccountDeletionService.request(userID:f.target.requireID(),body:.init(confirmation:"DELETE",receiptReference:reference()),app:app)
         let job=try await sql.raw("SELECT id,object_cleanup_state,last_error_kind FROM account_deletion_jobs WHERE user_id=\(bind:f.target.requireID())").first()!
         XCTAssertEqual(try job.decode(column:"object_cleanup_state",as:String.self),"blocked")
@@ -397,6 +385,18 @@ final class AccountDeletionGraphTests: XCTestCase {
         // a signed-in upload has none. That guard is the first layer. The fixture
         // synthesises the row it exists to prevent, so that the manifest's own
         // negative test is proved to hold on its own rather than by relying on it.
+        //
+        // The second deliberate exception to the rule that a test never disables a
+        // production trigger — `HistoricalCompletionPhotoFixture` is the other — and
+        // the only one that is not a pre-migration row. It cannot be written any
+        // other way. The uploader branch keys on `uploaded_by_user_id`, which only a
+        // `.user` allocation sets, and `CompletionUploadObjectService.attach`, the
+        // sole product writer of `completion_photos`, takes a Contractor link and so
+        // can only ever attach a link-owned upload. Building `displayed` from a link
+        // instead would let the insert through and leave the assertion passing for
+        // the wrong reason: a link-owned object is excluded from the manifest because
+        // it is not uploader-rooted at all, which is not what the negative existence
+        // test over retained completions is about.
         try await app.db.transaction { db in
             let scoped = try VerifiedIdentityService.sql(db)
             try await scoped.raw("LOCK TABLE completion_photos IN ACCESS EXCLUSIVE MODE").run()

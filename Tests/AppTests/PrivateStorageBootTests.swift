@@ -203,7 +203,7 @@ final class PrivateStorageBootTests: XCTestCase {
     func testTheBootStateIsTheInstallationWithItsConfigurationDropped() throws {
         XCTAssertEqual(PrivateStorageBoot.State(.absent), .absent)
         XCTAssertEqual(PrivateStorageBoot.State(.unusable), .unusable)
-        let configuration = try TestPrivateContentStore.syntheticConfiguration()
+        let configuration = try InMemoryPrivateContentStore.syntheticConfiguration()
         XCTAssertEqual(PrivateStorageBoot.State(.installed(configuration)), .installed)
         XCTAssertEqual(Set(PrivateStorageBoot.State.allCases.map(\.rawValue)), ["installed", "absent", "unusable"])
     }

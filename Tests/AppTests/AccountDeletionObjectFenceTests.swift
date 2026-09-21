@@ -321,7 +321,7 @@ final class AccountDeletionObjectFenceTests: XCTestCase {
     /// string that happens to look right.
     @discardableResult
     private func installedNamespace() throws -> PrivateStorageTargetConfiguration {
-        let configuration = try TestPrivateContentStore.syntheticConfiguration(namespace: "fences-v1/")
+        let configuration = try InMemoryPrivateContentStore.syntheticConfiguration(namespace: "fences-v1/")
         app.storage[PrivateObjectAllocationPolicy.InjectionKey.self] = configuration
         return configuration
     }

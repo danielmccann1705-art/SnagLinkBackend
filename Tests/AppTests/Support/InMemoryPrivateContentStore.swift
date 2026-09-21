@@ -135,8 +135,20 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
                      metadata: ["snaglist-erasure": ObjectErasureFenceService.marker])
     }
 
-    /// Every stored object gets a distinct etag, so a fence's etag never collides
-    /// with the etag of the content it replaced.
+    /// Every object this double stores gets a distinct etag. **Real storage does
+    /// not**: B5a measured R2 against a live bucket and found that every fence
+    /// carries the same ETag, because R2 answers a zero-byte object with the MD5
+    /// of the empty string. The conclusion the old comment drew still holds — a
+    /// fence's etag cannot collide with the etag of the content it replaced — but
+    /// only because content is never empty, not because storage hands out
+    /// distinct etags.
+    ///
+    /// Two rules follow, and they are about tests rather than about this type. No
+    /// test may assert that two fences have distinct etags: on R2 they do not. And
+    /// no "is this the fence I placed" check may be written against an ETag: on R2
+    /// that comparison is true of every fence in the bucket, so it would identify
+    /// nothing. The distinctness below is an artefact of the counter, kept only so
+    /// a test can tell a fence from the content it replaced.
     private func place(key: String, data: Data, contentType: String, metadata: [String: String]) -> String {
         written += 1
         let etag = "\"memory-\(written)\""

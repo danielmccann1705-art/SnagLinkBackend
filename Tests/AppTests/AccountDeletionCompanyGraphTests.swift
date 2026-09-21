@@ -76,13 +76,7 @@ final class AccountDeletionCompanyGraphTests: XCTestCase {
         let sql=try VerifiedIdentityService.sql(app.db), completion=UUID()
         try await sql.raw("INSERT INTO synced_photos(id,magic_link_token,snag_id,label,file_path,created_at) VALUES(\(bind:UUID()),\(bind:graph.linkToken),\(bind:graph.snag.requireID()),'evidence','/uploads/synced-photos/company.jpg',NOW())").run()
         try await sql.raw("INSERT INTO completions(id,snag_id,magic_link_id,contractor_name,status,submitted_at) VALUES(\(bind:completion),\(bind:graph.snag.requireID()),\(bind:graph.linkID),'Synthetic contractor','pending',NOW())").run()
-        try await app.db.transaction { db in
-            let scoped=try VerifiedIdentityService.sql(db)
-            try await scoped.raw("LOCK TABLE completion_photos IN ACCESS EXCLUSIVE MODE").run()
-            try await scoped.raw("ALTER TABLE completion_photos DISABLE TRIGGER completion_photo_trusted_insert").run()
-            try await scoped.raw("INSERT INTO completion_photos(id,completion_id,url,uploaded_at) VALUES(\(bind:UUID()),\(bind:completion),'/uploads/photos/historical-company.jpg',NOW())").run()
-            try await scoped.raw("ALTER TABLE completion_photos ENABLE TRIGGER completion_photo_trusted_insert").run()
-        }
+        try await HistoricalCompletionPhotoFixture.insert(completionID:completion,url:"/uploads/photos/historical-company.jpg",on:app.db)
         let parentID=try await parent(owner:graph.owner.requireID()), childID=try await child(graph:graph,parentID:parentID)
         try await app.db.transaction { try await AccountDeletionGraphService.eraseCompany(workspaceID:graph.workspace.requireID(),closureJobID:childID,parentJobID:parentID,on:$0) }
         let erasedTeam=try await Team.find(graph.workspace.requireID(),on:app.db)
