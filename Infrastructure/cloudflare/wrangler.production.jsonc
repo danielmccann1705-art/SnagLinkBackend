@@ -11,8 +11,9 @@
   "vars": {
     "PRODUCTION_ENABLED": "false",
     "PRODUCTION_LEGACY_IMPORT_ENABLED": "false",
-    // Account deletion stays off here. Turning it on is a separate reviewed step.
-    "ACCOUNT_DELETION_ENABLED": "false",
+    // Account deletion is on for production (Dan's approval, 23 Sep 2026). It is reachable
+    // only with the pinned private namespace below; production-config.mjs refuses otherwise.
+    "ACCOUNT_DELETION_ENABLED": "true",
     "PLATFORM_ENVIRONMENT": "production",
     "PRODUCTION_DATABASE_HOST": "",
     "PRODUCTION_DATABASE_NAME": "",
@@ -28,6 +29,7 @@
     "EMAIL_FROM": "Snaglist <notifications@mail.usesnaglist.com>",
     "APPLE_BUNDLE_ID": "com.snaglist.app",
     "APPLE_CLIENT_ID": "com.snaglist.app",
+    "APPLE_TEAM_ID": "52ZZHYHM62",
     "GOOGLE_AUTH_ENVIRONMENT": "production"
   },
   "triggers": {"crons": ["0 * * * *"]},
