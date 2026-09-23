@@ -120,12 +120,14 @@ enum AccountDeletionService {
             let credentialCount = try await sql.raw("SELECT count(*) AS total FROM apple_credentials WHERE user_id=\(bind: userID)").first()?.decode(column: "total", as: Int.self) ?? 0
             let appleState = credentialCount > 0 ? "pending" : (hasApple ? "unavailable" : "not_applicable")
             let jobID = UUID(), now = Date()
+            // Every job created here carries the RevenueCat step as `pending`. The
+            // column's default, `not_requested`, exists only for rows older than it.
             try await sql.raw("""
                 INSERT INTO account_deletion_jobs
                 (id,user_id,receipt_hash,requested_at,state,available_at,database_cleanup_state,apple_revocation_state,
-                 apple_credential_ciphertext,apple_client_id,object_cleanup_state,last_error_kind)
+                 apple_credential_ciphertext,apple_client_id,object_cleanup_state,last_error_kind,revenuecat_state)
                 VALUES (\(bind: jobID),\(bind: userID),\(bind: hash),\(bind: now),'ready',\(bind: now),'blocked',\(bind: appleState),
-                        NULL,NULL,'blocked',\(DeletionReasonKind.databaseErasurePending.sql))
+                        NULL,NULL,'blocked',\(DeletionReasonKind.databaseErasurePending.sql),'pending')
                 """).run()
             try await CompanyDeletionPreparationService.closeEmpty(emptyCompanies, userID: userID, jobID: jobID, on: db)
             try await CompanyClosureLifecycleService.create(companyClosures, parentJobID: jobID, on: db)

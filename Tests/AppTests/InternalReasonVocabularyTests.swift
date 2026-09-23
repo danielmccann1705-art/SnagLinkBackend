@@ -13,10 +13,10 @@ import FluentSQL
 /// the one thing this must not do.
 final class InternalReasonVocabularyTests: XCTestCase {
 
-    /// Every durable reason, spelled out. Exactly the seventeen literals that
-    /// stood in `AccountDeletionWorker`, `AccountDeletionGraphService`,
+    /// Every durable reason, spelled out. The seventeen literals that stood in
+    /// `AccountDeletionWorker`, `AccountDeletionGraphService`,
     /// `AccountDeletionObjectFenceService` and `AccountDeletionService` before
-    /// they were collected.
+    /// they were collected, and the three the RevenueCat deletion step added.
     private let deletionReasons: [DeletionReasonKind: String] = [
         .workerUnavailable: "worker_unavailable",
         .objectWriteScopeAmbiguous: "object_write_scope_ambiguous",
@@ -35,6 +35,9 @@ final class InternalReasonVocabularyTests: XCTestCase {
         .fenceNotEligible: "fence_not_eligible",
         .fenceConfiguration: "fence_configuration",
         .fenceUnavailable: "fence_unavailable",
+        .revenueCatConfiguration: "revenuecat_configuration",
+        .revenueCatUnavailable: "revenuecat_unavailable",
+        .revenueCatPending: "revenuecat_pending",
     ]
 
     /// B2's four write kinds and B3's read kind, as one set.

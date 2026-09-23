@@ -201,6 +201,10 @@ enum AccountDeletionWorker {
         // Never delete evidence until the graph transaction has demonstrated it
         // is no longer referenced and recorded the exact deletion manifest.
         guard try await CompanyClosureLifecycleService.prepareObjects(lease, on: db, transactionMode: transactionMode) else { return }
+        // The person's RevenueCat customer, only once their own graph is erased and
+        // only for this job's account. Idempotent, lease-fenced and retried like the
+        // Apple child above; its outcome gates completion in `finish`.
+        try await RevenueCatCustomerDeletionService.perform(lease, app: app, on: db, transactionMode: transactionMode)
         // Before any physical delete. A key whose writers use the create-only
         // protocol is fenced, never deleted, even when its known intents are all
         // settled: the ordinary branch below excludes anything that has a fence row
@@ -297,12 +301,15 @@ enum AccountDeletionWorker {
             UPDATE account_deletion_jobs SET
                 state=CASE WHEN database_cleanup_state='completed' AND object_cleanup_state='completed'
                         AND apple_revocation_state IN ('not_applicable','revoked','already_revoked')
+                        AND revenuecat_state IN ('not_requested','deleted','not_found','skipped_environment')
                         AND NOT EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND state<>'completed') THEN 'completed'
                     WHEN (database_cleanup_state<>'completed' AND NOT EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND mode='explicit' AND state IN ('pending','erasing'))) OR object_cleanup_state='blocked'
                         OR EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND state='blocked')
-                        OR apple_revocation_state IN ('misconfigured','unavailable') THEN 'blocked' ELSE 'ready' END,
+                        OR apple_revocation_state IN ('misconfigured','unavailable')
+                        OR revenuecat_state='misconfigured' THEN 'blocked' ELSE 'ready' END,
                 completed_at=CASE WHEN database_cleanup_state='completed' AND object_cleanup_state='completed'
                         AND apple_revocation_state IN ('not_applicable','revoked','already_revoked')
+                        AND revenuecat_state IN ('not_requested','deleted','not_found','skipped_environment')
                         AND NOT EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND state<>'completed') THEN NOW() ELSE NULL END,
                 last_error_kind=CASE WHEN EXISTS(SELECT 1 FROM account_deletion_unresolved_objects WHERE job_id=\(bind: lease.id)) THEN \(DeletionReasonKind.unresolvedLegacyObjectOwnership.sql)
                     WHEN EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
@@ -319,7 +326,10 @@ enum AccountDeletionWorker {
                     -- condition, one branch: a second copy of a rule is a place for
                     -- the two copies to stop agreeing.
                     WHEN \(AccountDeletionGraphService.targetAmbiguous(jobID: lease.id)) THEN \(DeletionReasonKind.objectTargetAmbiguous.sql)
-                    WHEN object_cleanup_state<>'completed' THEN \(DeletionReasonKind.objectCleanupPending.sql) ELSE NULL END,
+                    WHEN revenuecat_state='misconfigured' THEN \(DeletionReasonKind.revenueCatConfiguration.sql)
+                    WHEN revenuecat_state='failing' THEN \(DeletionReasonKind.revenueCatUnavailable.sql)
+                    WHEN object_cleanup_state<>'completed' THEN \(DeletionReasonKind.objectCleanupPending.sql)
+                    WHEN revenuecat_state='pending' THEN \(DeletionReasonKind.revenueCatPending.sql) ELSE NULL END,
                 available_at=clock_timestamp()+make_interval(secs => \(bind: delay)),lease_token=NULL,lease_expires_at=NULL
             WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp() RETURNING state
             """).first()

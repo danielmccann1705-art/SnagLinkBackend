@@ -12,6 +12,7 @@ struct MaintenanceController: RouteCollection {
         let maintenance = routes.grouped("internal", "maintenance")
         maintenance.post("cleanup", use: cleanup)
         maintenance.get("cleanup", use: status)
+        maintenance.get("account-deletion-health", use: deletionHealth)
     }
 
     /// Runs one pass. Returns counts, never rows. Safe to call more often than needed:
@@ -38,6 +39,15 @@ struct MaintenanceController: RouteCollection {
             hoursSinceLastRun: last.map { Int(Date().timeIntervalSince($0) / 3600) },
             overdue: last.map { Date().timeIntervalSince($0) > 26 * 3600 } ?? true
         )
+    }
+
+    /// Blocked and overdue account deletions, by reason, read on demand without
+    /// running a pass. Counts and closed-vocabulary reasons only
+    /// (`AccountDeletionHealth.Report`); the same secret and the same 404 as above.
+    @Sendable
+    func deletionHealth(req: Request) async throws -> AccountDeletionHealth.Report {
+        try MaintenanceAuthority.authorise(req)
+        return try await AccountDeletionHealth.report(on: req.db)
     }
 }
 

@@ -24,6 +24,10 @@ struct CleanupService {
         var expiredPreviewLinks = 0
         var accountDeletionJobs = AccountDeletionWorker.Counts()
         var appleWebCredentials = AppleWebCredentialEscrowService.Counts()
+        /// The deletion health flag this pass computed after its work: blocked and
+        /// overdue jobs by reason, counts only (`AccountDeletionHealth.Flag`).
+        /// Optional so that records written before it existed still decode.
+        var accountDeletionHealth: AccountDeletionHealth.Flag? = nil
     }
 
     /// `schedule` is the external scheduler reaching us through the maintenance route.
@@ -135,6 +139,17 @@ struct CleanupService {
             try await MagicLink.query(on: db).filter(\.$id ~~ ids).delete()
             removed.expiredPreviewLinks = expiredPreviews.count
         }
+
+        // Last, after every piece of work above, so reading health can never stop
+        // that work. A pass that cannot read it records `failed`, which is itself
+        // the signal. The previous successful pass is read before this one is
+        // recorded, so the gap says whether hourly firings were lost.
+        let now = Date()
+        let groups = try await AccountDeletionHealth.groups(on: db, now: now)
+        let previousPass = try await lastSuccessfulRun(on: db)
+        let health = AccountDeletionHealth.flag(groups, now: now, previousPass: previousPass)
+        removed.accountDeletionHealth = health
+        AccountDeletionHealth.log(health, logger: app.logger)
 
         return removed
     }

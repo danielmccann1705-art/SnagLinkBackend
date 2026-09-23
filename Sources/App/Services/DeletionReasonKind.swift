@@ -64,6 +64,20 @@ enum DeletionReasonKind: String, Sendable, Equatable, CaseIterable {
     /// Apple answered, and not in a way that completes the revocation. Retried.
     case appleUnavailable = "apple_unavailable"
 
+    // MARK: - RevenueCat
+
+    /// The deleted account's RevenueCat customer cannot be deleted by this
+    /// deployment: the secret key is absent where it is required, or RevenueCat
+    /// refused the key or the request. Durable: it will not resolve by waiting.
+    case revenueCatConfiguration = "revenuecat_configuration"
+
+    /// RevenueCat did not answer, or answered with a transient failure. Retried.
+    case revenueCatUnavailable = "revenuecat_unavailable"
+
+    /// Everything else is finished and the RevenueCat step has not run yet (its
+    /// pass lost the lease before reaching it). The next pass runs it.
+    case revenueCatPending = "revenuecat_pending"
+
     // MARK: - Objects: the manifest has not finished
 
     /// Objects remain in the manifest and nothing above explains why. The ordinary
