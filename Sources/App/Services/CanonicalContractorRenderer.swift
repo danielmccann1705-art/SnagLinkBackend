@@ -20,7 +20,7 @@ extension WebReportRenderer {
         <script src="/assets/contractor/v2/contractor.js?v=\(version)" defer></script></head><body>
         <header class="brand-bar"><img src="/assets/contractor/v2/wordmark-light.svg" alt="Snaglist" width="126" height="54"><span>Contractor link</span></header>
         <main id="content" tabindex="-1"><div class="loading" role="status">Loading your snag list…</div></main>
-        <footer class="page-footer">Spot it. Fix it. Sign it off.</footer>
+        <footer class="page-footer">Spot it. Fix it. Sign it off.<br><a href="https://usesnaglist.com/privacy" target="_blank" rel="noopener noreferrer">Privacy</a> · <a href="https://usesnaglist.com/terms" target="_blank" rel="noopener noreferrer">Terms</a></footer>
         <dialog id="photo-viewer" aria-label="Enlarged evidence photo"><button class="secondary close-photo" type="button">Close photo</button><img alt=""></dialog>
         <noscript><p>Enable JavaScript to view the current snag list and submit evidence.</p></noscript>
         </body></html>
