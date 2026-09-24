@@ -155,6 +155,7 @@ public func configure(_ app: Application,
         app.migrations.add(CreateObjectErasureFences())
         app.migrations.add(BindMediaAssetKeysAtUpload())
         app.migrations.add(AddRevenueCatCustomerDeletion())
+        app.migrations.add(CreateAppSessionRevocations())
 
         try await app.autoMigrate()
     } else {

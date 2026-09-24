@@ -18,6 +18,9 @@ struct AuthController: RouteCollection {
         magicLink.post("request", use: requestMagicLink)
         magicLink.post("verify", use: verifyMagicLink)
         auth.get("recognise", use: recogniseEmail)
+
+        // Per-device sign-out: ends the presented app session and no other.
+        auth.grouped(JWTAuthMiddleware()).post("logout", use: logout)
     }
 
     // MARK: - Sign in with Apple
@@ -176,6 +179,32 @@ struct AuthController: RouteCollection {
         return try issueAuthResponse(for: user, on: req)
     }
 
+    // MARK: - Sign out on this device
+
+    /// `POST /api/v1/auth/logout`, bearer-authenticated, empty body.
+    ///
+    /// * `204`: the presented app session is signed out. Other app sessions of the same
+    ///   account, and portal sessions, are untouched.
+    /// * `401`: the token was already invalid, expired, signed out, or its account has
+    ///   gone (`JWTAuthMiddleware` refuses it before this runs). From the app's side a
+    ///   repeat is therefore harmless: either way the session no longer works.
+    ///
+    /// A token issued before per-session sign-out has no `jti`; it is signed out by the
+    /// identifier derived from its own signed part, and also gets `204`
+    /// (`AppSessionRevocationService.legacySessionID`). "Sign out everywhere" remains
+    /// `POST /api/v2/auth/logout-all`.
+    @Sendable
+    func logout(req: Request) async throws -> Response {
+        let payload = try req.auth.require(UserJWTPayload.self)
+        guard let token = req.headers.bearerAuthorization?.token else {
+            throw Abort(.unauthorized, reason: "Missing authorization header")
+        }
+        try await AppSessionRevocationService.revoke(payload, token: token, on: req.db)
+        let response = Response(status: .noContent)
+        response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        return response
+    }
+
     // MARK: - Email recognition
 
     /// Compatibility response. Unauthenticated email recognition must not expose
@@ -201,14 +230,17 @@ struct AuthController: RouteCollection {
     }
 
     /// Builds the standard authenticated session response (30-day JWT), shared by all
-    /// auth methods so they stay shape-compatible.
+    /// auth methods so they stay shape-compatible. Each token names its own session
+    /// (`jti`), so signing out on one device ends that session alone.
     func issueAuthResponse(for user: User, on req: Request) throws -> AuthResponse {
         let jwtPayload = UserJWTPayload(
             subject: SubjectClaim(value: user.id!.uuidString),
             expiration: ExpirationClaim(value: Date().addingTimeInterval(30 * 24 * 60 * 60)), // 30 days
             userId: user.id!,
             authVersion: user.authVersion,
-            authenticatedAt: Date()
+            authenticatedAt: Date(),
+            // A new session every time: this is what one device signs out.
+            sessionID: UUID()
         )
         let token = try req.jwt.sign(jwtPayload)
 

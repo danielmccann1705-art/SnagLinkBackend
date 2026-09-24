@@ -146,7 +146,9 @@ enum AccountDeletionService {
             try await sql.raw("UPDATE users SET lifecycle_state='deleted',auth_version=auth_version+1,email=NULL,name=NULL,apple_user_id=NULL,subscription_tier='free',subscription_verified_until=NULL,updated_at=\(bind: now) WHERE id=\(bind: userID)").run()
             try await sql.raw("UPDATE ownership_transfer_offers SET state='cancelled',resolved_at=NOW() WHERE state='pending' AND (owner_user_id=\(bind: userID) OR target_user_id=\(bind: userID))").run()
             try await sql.raw("DELETE FROM google_identity_challenges WHERE target_user_id=\(bind: userID)").run()
-            for table in ["browser_sessions", "device_tokens", "magic_link_sends", "analytics_events", "user_identities"] {
+            // `auth_version` (bumped above) already refuses every app session; the
+            // per-session sign-out rows have nothing left to do.
+            for table in ["browser_sessions", "device_tokens", "magic_link_sends", "analytics_events", "user_identities", "app_session_revocations"] {
                 try await sql.raw("DELETE FROM \(unsafeRaw: table) WHERE user_id=\(bind: userID)").run()
             }
             try await sql.raw("DELETE FROM identity_challenges WHERE target_user_id=\(bind: userID)").run()

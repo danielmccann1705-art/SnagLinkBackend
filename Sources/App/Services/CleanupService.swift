@@ -2,8 +2,8 @@ import Vapor
 import Fluent
 import FluentSQL
 
-/// Periodic removal of expired rate limits, old audit logs, spent magic-link tokens
-/// and expired preview links.
+/// Periodic removal of expired rate limits, old audit logs, spent magic-link tokens,
+/// expired preview links and the sign-out rows of expired app sessions.
 ///
 /// The work here was always correct. What was missing was anything that ran it: the
 /// lifecycle loop below waits before its first pass, inside a container that sleeps
@@ -28,6 +28,9 @@ struct CleanupService {
         /// overdue jobs by reason, counts only (`AccountDeletionHealth.Flag`).
         /// Optional so that records written before it existed still decode.
         var accountDeletionHealth: AccountDeletionHealth.Flag? = nil
+        /// Signed-out app sessions whose tokens have expired
+        /// (`AppSessionRevocationService.removeExpired`). Optional for the same reason.
+        var appSessionRevocations: Int? = nil
     }
 
     /// `schedule` is the external scheduler reaching us through the maintenance route.
@@ -139,6 +142,9 @@ struct CleanupService {
             try await MagicLink.query(on: db).filter(\.$id ~~ ids).delete()
             removed.expiredPreviewLinks = expiredPreviews.count
         }
+
+        // Per-device sign-out rows, once the token each one names has expired.
+        removed.appSessionRevocations = try await AppSessionRevocationService.removeExpired(on: db)
 
         // Last, after every piece of work above, so reading health can never stop
         // that work. A pass that cannot read it records `failed`, which is itself

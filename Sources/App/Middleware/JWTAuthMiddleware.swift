@@ -8,6 +8,11 @@ struct UserJWTPayload: JWTPayload, Authenticatable {
     var userId: UUID
     var authVersion: Int? = nil
     var authenticatedAt: Date? = nil
+    /// Names this app session so it can be signed out on its own
+    /// (`POST /api/v1/auth/logout`, `AppSessionRevocationService`). Every token issued
+    /// from per-session sign-out on carries one; tokens issued before it do not, and
+    /// keep working until they expire.
+    var sessionID: UUID? = nil
 
     enum CodingKeys: String, CodingKey {
         case subject = "sub"
@@ -15,6 +20,7 @@ struct UserJWTPayload: JWTPayload, Authenticatable {
         case userId = "user_id"
         case authVersion = "auth_version"
         case authenticatedAt = "authenticated_at"
+        case sessionID = "jti"
     }
 
     func verify(using signer: JWTSigner) throws {
@@ -42,10 +48,18 @@ struct JWTAuthMiddleware: AsyncMiddleware {
         } catch {
             throw Abort(.unauthorized, reason: "Invalid or expired token")
         }
-        guard let user = try await User.find(payload.userId, on: database ?? request.db),
-              user.lifecycleState == "active", user.authVersion == (payload.authVersion ?? 0),
-              payload.subject.value == payload.userId.uuidString else {
+        // The account and this session's sign-out are read together: one query, one
+        // primary-key probe for the session. `auth_version` still ends every session
+        // at once (sign out everywhere, account deletion); a revocation row ends one.
+        let sessionID = AppSessionRevocationService.sessionID(for: payload, token: authHeader.token)
+        guard payload.subject.value == payload.userId.uuidString,
+              let account = try await AppSessionRevocationService.accountState(
+                  userID: payload.userId, sessionID: sessionID, on: database ?? request.db),
+              account.lifecycleState == "active", account.authVersion == (payload.authVersion ?? 0) else {
             throw Abort(.unauthorized, reason: "Account is no longer available")
+        }
+        guard !account.sessionRevoked else {
+            throw Abort(.unauthorized, reason: "This session has been signed out")
         }
         return payload
     }
