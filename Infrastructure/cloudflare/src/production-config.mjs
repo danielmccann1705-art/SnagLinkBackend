@@ -2,6 +2,10 @@
 // the checked-in deployment is disabled and contains no database or provider keys.
 export const productionAPIOrigin = 'https://api.snaglist.dev';
 export const productionPortalOrigin = 'https://app.usesnaglist.com';
+// Sign in with Apple on the web: the Services ID registered for the portal origin
+// above and grouped under the shipping bundle. It is a second audience the container
+// accepts beside `APPLE_CLIENT_ID=com.snaglist.app`, never a replacement for it.
+export const productionAppleWebClientID = 'com.snaglist.app.web';
 
 /** @returns {Record<string, string>} */
 export function productionContainerEnvironment(env) {
@@ -63,6 +67,11 @@ export function productionContainerEnvironment(env) {
       !required('APPLE_PRIVATE_KEY').includes('BEGIN PRIVATE KEY')) {
     throw new Error('Production Apple sign-in and revocation must use the shipping bundle and team credential');
   }
+  // Apple on the web is decided here, after the native audience and the team
+  // credential above are known good: the web flow signs its client secret with that
+  // same key (`sub` = the Services ID rather than the bundle) and escrows the refresh
+  // token under the same credential key, so it cannot be on without them.
+  const appleWeb = appleWebEnvironment(env);
   const googleID = value => typeof value === 'string' && value.length <= 200 &&
     /^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(value);
   if (env.GOOGLE_AUTH_ENVIRONMENT !== 'production' || !googleID(env.GOOGLE_WEB_CLIENT_ID) ||
@@ -86,7 +95,7 @@ export function productionContainerEnvironment(env) {
     JWT_SECRET: jwt, MAINTENANCE_SECRET: maintenance, LINK_GRANT_TOKEN_KEY: link,
     APPLE_BUNDLE_ID: env.APPLE_BUNDLE_ID, APPLE_CLIENT_ID: env.APPLE_CLIENT_ID,
     APPLE_TEAM_ID: env.APPLE_TEAM_ID, APPLE_KEY_ID: env.APPLE_KEY_ID,
-    APPLE_PRIVATE_KEY: env.APPLE_PRIVATE_KEY, APPLE_CREDENTIAL_KEY: apple,
+    APPLE_PRIVATE_KEY: env.APPLE_PRIVATE_KEY, APPLE_CREDENTIAL_KEY: apple, ...appleWeb,
     GOOGLE_AUTH_ENVIRONMENT: 'production', GOOGLE_WEB_CLIENT_ID: env.GOOGLE_WEB_CLIENT_ID,
     GOOGLE_IOS_CLIENT_ID: env.GOOGLE_IOS_CLIENT_ID,
     RESEND_API_KEY: env.RESEND_API_KEY, EMAIL_FROM: env.EMAIL_FROM,
@@ -120,6 +129,34 @@ export function productionContainerEnvironment(env) {
     for (const key of pushKeys) values[key] = env[key];
   }
   return values;
+}
+
+// Sign in with Apple on the web. Three names, all-or-nothing, and every one an exact
+// literal: the switch is 'true' or 'false' (absent reads as 'false'), the environment
+// is this deployment's own, and the client is the one Services ID registered for the
+// portal origin. The identity cannot be configured with the switch off — an identity
+// lying in the map without its switch is an ambiguity, not a default — and the switch
+// cannot be on with a missing, foreign or bundle-shaped identity. The container
+// itself refuses the web flow (503, and the portal hides the button) unless all
+// three arrive together and agree with `PLATFORM_ENVIRONMENT` and `PORTAL_ORIGIN`,
+// so a refusal here is the same answer given earlier, before a Worker boots.
+/** @returns {Record<string, string>} */
+function appleWebEnvironment(env) {
+  const enabled = env.APPLE_WEB_ENABLED === undefined ? 'false' : env.APPLE_WEB_ENABLED;
+  if (enabled !== 'true' && enabled !== 'false') {
+    throw new Error('Apple web sign-in is switched by an exact true or false');
+  }
+  if (enabled === 'false') {
+    if (env.APPLE_WEB_AUTH_ENVIRONMENT !== undefined || env.APPLE_WEB_CLIENT_ID !== undefined) {
+      throw new Error('The Apple web Services ID cannot be configured without its explicit switch');
+    }
+    return {};
+  }
+  if (env.APPLE_WEB_AUTH_ENVIRONMENT !== 'production' || env.APPLE_WEB_CLIENT_ID !== productionAppleWebClientID ||
+      env.APPLE_WEB_CLIENT_ID === env.APPLE_CLIENT_ID || env.APPLE_WEB_CLIENT_ID === env.APPLE_BUNDLE_ID) {
+    throw new Error('Production Apple web sign-in requires its registered Services ID beside, never instead of, the shipping bundle');
+  }
+  return {APPLE_WEB_ENABLED: 'true', APPLE_WEB_AUTH_ENVIRONMENT: 'production', APPLE_WEB_CLIENT_ID: productionAppleWebClientID};
 }
 
 function capabilityKey(value) {

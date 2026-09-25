@@ -30,6 +30,14 @@
     "APPLE_BUNDLE_ID": "com.snaglist.app",
     "APPLE_CLIENT_ID": "com.snaglist.app",
     "APPLE_TEAM_ID": "52ZZHYHM62",
+    // Sign in with Apple on the web: the Services ID grouped under the bundle above,
+    // for the portal origin's /api/v2/auth/apple/callback. A second audience beside
+    // APPLE_CLIENT_ID, never a replacement for it; production-config.mjs refuses the
+    // identity without its switch, the switch without this exact identity, and either
+    // without the team credential. Unreachable while PRODUCTION_ENABLED is false.
+    "APPLE_WEB_ENABLED": "true",
+    "APPLE_WEB_AUTH_ENVIRONMENT": "production",
+    "APPLE_WEB_CLIENT_ID": "com.snaglist.app.web",
     "GOOGLE_AUTH_ENVIRONMENT": "production"
   },
   "triggers": {"crons": ["0 * * * *"]},

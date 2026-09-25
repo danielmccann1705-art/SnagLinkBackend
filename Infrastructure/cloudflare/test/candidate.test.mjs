@@ -9,10 +9,16 @@ import {containerEnvironment} from '../src/config.mjs';
 // decide what the rest of this file sees; the switch has its own tests below.
 const configs=(environment={})=>candidateConfigs({imageDigest:'sha256:'+'a'.repeat(64),
   assetsDirectory:'/synthetic/immutable/dist',environment});
+// The encrypted bindings the live candidate Worker carries beside the generated map
+// (21 and 23 September readbacks): the six Apple bindings are what the generated
+// APPLE_WEB_* names lean on. Synthetic stand-ins only; no provider account exists.
 const enabled=()=>({...configs().backend.vars,STAGING_ENABLED:'true',
   DATABASE_URL:'postgresql://synthetic:synthetic@ep-solitary-union-zav239mi.c-2.eu-west-2.aws.neon.tech/snaglist_platform_test_0910222943_fc44?sslmode=require',
   JWT_SECRET:'synthetic-only-jwt-at-least-32-characters',LINK_GRANT_TOKEN_KEY:btoa('z'.repeat(32)),
-  R2_ACCESS_KEY_ID:'synthetic',R2_SECRET_ACCESS_KEY:'synthetic'});
+  R2_ACCESS_KEY_ID:'synthetic',R2_SECRET_ACCESS_KEY:'synthetic',
+  APPLE_BUNDLE_ID:'com.snaglist.app.staging',APPLE_CLIENT_ID:'com.snaglist.app.staging',
+  APPLE_TEAM_ID:'SYNTHETIC1',APPLE_KEY_ID:'SYNTHETIC2',
+  APPLE_PRIVATE_KEY:'-----BEGIN PRIVATE KEY----- synthetic only',APPLE_CREDENTIAL_KEY:btoa('a'.repeat(32))});
 
 test('candidate and portal configurations are disabled, digest-pinned and isolated from recovery',()=>{
   const {backend,portal}=configs();
@@ -59,6 +65,17 @@ test('candidate accepts only its pinned synthetic DB, origins and independent bu
   assert.equal(output.R2_PRIVATE_BUCKET_NAME,'snaglist-staging-private');
   assert.equal(output.R2_BUCKET_NAME,'snaglist-unified-staging-uploads');
   assert.equal(output.STAGING_DEPLOYMENT,undefined);
+  // The generated Apple web identity reaches the container whole, beside the
+  // staging bundle the encrypted bindings name and never instead of it.
+  assert.equal(output.APPLE_WEB_ENABLED,'true');
+  assert.equal(output.APPLE_WEB_AUTH_ENVIRONMENT,'staging');
+  assert.equal(output.APPLE_WEB_CLIENT_ID,'com.snaglist.app.staging.web');
+  assert.equal(output.APPLE_CLIENT_ID,'com.snaglist.app.staging');
+  assert.equal(output.APPLE_BUNDLE_ID,'com.snaglist.app.staging');
+  // Without the Apple bindings the generated switch is a refusal, not a silent off.
+  const unbound=enabled();
+  for(const key of ['APPLE_BUNDLE_ID','APPLE_CLIENT_ID','APPLE_TEAM_ID','APPLE_KEY_ID','APPLE_PRIVATE_KEY','APPLE_CREDENTIAL_KEY']) delete unbound[key];
+  assert.throws(()=>containerEnvironment(unbound));
   for(const override of [
     {STAGING_DEPLOYMENT:'production'}, {STAGING_DEPLOYMENT:undefined},
     {STAGING_PLATFORM_ENABLED:'false'},
@@ -97,10 +114,13 @@ const refusedInStaging=['REVENUECAT_SECRET_API_KEY','APNS_PRIVATE_KEY'];
 const notCarried=new Map([
   ['EMAIL_FROM','candidate email is disabled; STAGING_EMAIL_ENABLED is false'],
   ['EMAIL_ALLOWED_RECIPIENTS','candidate email is disabled'],
-  ['APPLE_BUNDLE_ID','Apple sign-in is not configured on the candidate'],
-  ['APPLE_CLIENT_ID','Apple sign-in is not configured on the candidate'],
-  ['APPLE_TEAM_ID','the Apple token exchange is not configured on the candidate'],
-  ['APPLE_KEY_ID','the Apple token exchange is not configured on the candidate'],
+  // Public identifiers, but installed on the candidate Worker as encrypted bindings
+  // beside the key they belong with (21 September readback), which a deploy does
+  // not replace. The generated map carries the web Services ID instead.
+  ['APPLE_BUNDLE_ID','installed as an encrypted binding beside the Apple key; a deploy does not replace it'],
+  ['APPLE_CLIENT_ID','installed as an encrypted binding beside the Apple key; a deploy does not replace it'],
+  ['APPLE_TEAM_ID','installed as an encrypted binding beside the Apple key; a deploy does not replace it'],
+  ['APPLE_KEY_ID','installed as an encrypted binding beside the Apple key; a deploy does not replace it'],
   // A one-run diagnostic marker, not a setting. The generator produces it only when
   // SNAGLIST_CANDIDATE_LOG_PROBE names one for that generation, so a configuration
   // generated without it is one with the probe off - which is the normal state and

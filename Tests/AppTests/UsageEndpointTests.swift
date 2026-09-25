@@ -255,7 +255,7 @@ final class UsageEndpointTests: XCTestCase {
     func testMalformedProviderResponseCannotUpgradeFreeUser() async throws {
         try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
         let (user, token) = try await makeUser()
-        for body in ["not-json", "{\"subscriber\":{}}", #"{"subscriber":{"entitlements":{"pro":{}}}}"#] {
+        for body in ["not-json", "{\"subscriber\":{}}", #"{"subscriber":{"entitlements":{"Snaglist Pro":{}}}}"#] {
             let stub = provider(userID: user.id!, json: body)
             try await app.test(.PATCH, "api/v1/users/me", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: token)
@@ -304,7 +304,8 @@ final class UsageEndpointTests: XCTestCase {
         try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
         let (user, token) = try await makeUser()
         let expiry = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3600))
-        let json = "{\"subscriber\":{\"entitlements\":{\"pro\":{\"expires_date\":\"\(expiry)\",\"grace_period_expires_date\":null}}}}"
+        // RevenueCat's entitlement Identifier is exactly "Snaglist Pro".
+        let json = "{\"subscriber\":{\"entitlements\":{\"Snaglist Pro\":{\"expires_date\":\"\(expiry)\",\"grace_period_expires_date\":null}}}}"
         let stub = provider(userID: user.id!, json: json)
         let before = Date()
         try await claimPro(token: token, expectedStatus: .ok)
@@ -314,6 +315,21 @@ final class UsageEndpointTests: XCTestCase {
         let verifiedUntil = try XCTUnwrap(persisted?.subscriptionVerifiedUntil)
         XCTAssertGreaterThanOrEqual(verifiedUntil, before.addingTimeInterval(299))
         XCTAssertLessThanOrEqual(verifiedUntil, Date().addingTimeInterval(300))
+    }
+
+    /// An active entitlement under any other identifier, including the older `pro`,
+    /// is not Pro: the claim is answered, verified and recorded as Free.
+    func testProviderEntitlementNamedOnlyProDoesNotUpgrade() async throws {
+        try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
+        let (user, token) = try await makeUser()
+        let expiry = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3600))
+        let json = "{\"subscriber\":{\"entitlements\":{\"pro\":{\"expires_date\":\"\(expiry)\",\"grace_period_expires_date\":null}}}}"
+        let stub = provider(userID: user.id!, json: json)
+        try await claimPro(token: token, expectedStatus: .ok)
+        XCTAssertEqual(stub.requestCount, 1)
+        let persisted = try await User.find(user.id, on: app.db)
+        XCTAssertEqual(persisted?.subscriptionTier, "free")
+        XCTAssertNil(persisted?.subscriptionVerifiedUntil)
     }
 }
 

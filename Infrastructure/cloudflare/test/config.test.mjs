@@ -150,6 +150,86 @@ const candidate = () => ({...sample(),...platform(),STAGING_DEPLOYMENT:'unified-
 const importOptIn = () => ({STAGED_LEGACY_IMPORT_ENABLED:'true',
   IMPORT_PREVIEW_API_ORIGIN:'https://snaglist-api-unified-staging.danielmccann1705.workers.dev'});
 
+// Sign in with Apple. Synthetic identifiers and key material only; the audience is
+// the staging bundle, the exchange is the team credential the container signs its
+// client secrets with, and the web trio is the staging Services ID beside that bundle.
+const appleAudience = () => ({APPLE_BUNDLE_ID:'com.snaglist.app.staging', APPLE_CLIENT_ID:'com.snaglist.app.staging'});
+const appleExchange = () => ({APPLE_TEAM_ID:'SYNTHETIC1', APPLE_KEY_ID:'SYNTHETIC2',
+  APPLE_PRIVATE_KEY:'-----BEGIN PRIVATE KEY----- synthetic only', APPLE_CREDENTIAL_KEY: btoa('a'.repeat(32))});
+const appleWeb = () => ({APPLE_WEB_ENABLED:'true', APPLE_WEB_AUTH_ENVIRONMENT:'staging',
+  APPLE_WEB_CLIENT_ID:'com.snaglist.app.staging.web'});
+const appleWebNames = Object.keys(appleWeb());
+
+test('staging Apple audience and token exchange install only for the enabled candidate, each all-or-nothing', () => {
+  const none = containerEnvironment(candidate());
+  for (const key of [...Object.keys(appleAudience()), ...Object.keys(appleExchange()), ...appleWebNames]) {
+    assert.equal(none[key], undefined);
+  }
+  const audience = containerEnvironment({...candidate(), ...appleAudience()});
+  assert.equal(audience.APPLE_CLIENT_ID, 'com.snaglist.app.staging');
+  assert.equal(audience.APPLE_TEAM_ID, undefined);
+  const exchange = containerEnvironment({...candidate(), ...appleAudience(), ...appleExchange()});
+  for (const [key, value] of Object.entries({...appleAudience(), ...appleExchange()})) assert.equal(exchange[key], value);
+  for (const override of [{APPLE_CLIENT_ID:'com.snaglist.app'}, {APPLE_BUNDLE_ID:'com.snaglist.app'},
+    {APPLE_CLIENT_ID:undefined}, {APPLE_BUNDLE_ID:undefined}]) {
+    assert.throws(() => containerEnvironment({...candidate(), ...appleAudience(), ...override}));
+  }
+  for (const key of Object.keys(appleExchange())) {
+    const env = {...candidate(), ...appleAudience(), ...appleExchange()}; delete env[key];
+    assert.throws(() => containerEnvironment(env), `${key} missing must fail closed`);
+  }
+  assert.throws(() => containerEnvironment({...candidate(), ...appleAudience(), ...appleExchange(), APPLE_CREDENTIAL_KEY: platform().LINK_GRANT_TOKEN_KEY}));
+  // The recovery deployment and a platform-disabled candidate accept no Apple configuration.
+  assert.throws(() => containerEnvironment({...sample(), ...appleAudience()}));
+  assert.throws(() => containerEnvironment({...sample(), ...platform(), ...appleAudience()}));
+  assert.throws(() => containerEnvironment({...candidate(), STAGING_PLATFORM_ENABLED:'false', ...appleAudience()}));
+});
+
+test('staging Apple web sign-in needs its exact Services ID, the switch and the token exchange together', () => {
+  const on = containerEnvironment({...candidate(), ...appleAudience(), ...appleExchange(), ...appleWeb()});
+  assert.deepEqual(Object.fromEntries(appleWebNames.map(name => [name, on[name]])), appleWeb());
+  assert.equal(on.APPLE_CLIENT_ID, 'com.snaglist.app.staging', 'a Services ID never replaces the bundle audience');
+  assert.equal(on.APPLE_BUNDLE_ID, 'com.snaglist.app.staging');
+  // Turning the web flow on moves nothing else.
+  const off = containerEnvironment({...candidate(), ...appleAudience(), ...appleExchange()});
+  assert.deepEqual({...on, APPLE_WEB_ENABLED:null, APPLE_WEB_AUTH_ENVIRONMENT:null, APPLE_WEB_CLIENT_ID:null},
+                   {...off, APPLE_WEB_ENABLED:null, APPLE_WEB_AUTH_ENVIRONMENT:null, APPLE_WEB_CLIENT_ID:null});
+  // Written-down off forwards nothing and needs nothing else.
+  for (const env of [candidate(), {...candidate(), ...appleAudience()}, sample(), {...sample(), ...platform()}]) {
+    const result = containerEnvironment({...env, APPLE_WEB_ENABLED:'false'});
+    for (const name of appleWebNames) assert.equal(result[name], undefined);
+  }
+  const base = {...candidate(), ...appleAudience(), ...appleExchange()};
+  for (const override of [
+    // Switch without identity, identity without switch, every one-of-three.
+    {APPLE_WEB_ENABLED:'true'}, {APPLE_WEB_ENABLED:'true', APPLE_WEB_AUTH_ENVIRONMENT:'staging'},
+    {APPLE_WEB_ENABLED:'true', APPLE_WEB_CLIENT_ID:'com.snaglist.app.staging.web'},
+    {APPLE_WEB_AUTH_ENVIRONMENT:'staging', APPLE_WEB_CLIENT_ID:'com.snaglist.app.staging.web'},
+    {APPLE_WEB_CLIENT_ID:'com.snaglist.app.staging.web'}, {APPLE_WEB_AUTH_ENVIRONMENT:'staging'},
+    {APPLE_WEB_ENABLED:'false', APPLE_WEB_CLIENT_ID:'com.snaglist.app.staging.web'},
+    {APPLE_WEB_ENABLED:'false', APPLE_WEB_AUTH_ENVIRONMENT:'staging'},
+    {...appleWeb(), APPLE_WEB_ENABLED:'false'},
+    // Exact literals only.
+    {...appleWeb(), APPLE_WEB_ENABLED:'1'}, {...appleWeb(), APPLE_WEB_ENABLED:'TRUE'}, {...appleWeb(), APPLE_WEB_ENABLED:''},
+    {APPLE_WEB_ENABLED:''}, {APPLE_WEB_ENABLED:'yes'},
+    // Staging's own environment and the staging Services ID, nothing else.
+    {...appleWeb(), APPLE_WEB_AUTH_ENVIRONMENT:'production'}, {...appleWeb(), APPLE_WEB_AUTH_ENVIRONMENT:'local'},
+    {...appleWeb(), APPLE_WEB_CLIENT_ID:'com.snaglist.app.web'}, {...appleWeb(), APPLE_WEB_CLIENT_ID:'com.snaglist.app.staging'},
+    {...appleWeb(), APPLE_WEB_CLIENT_ID:'com.snaglist.app.staging.web.evil'}, {...appleWeb(), APPLE_WEB_CLIENT_ID:''},
+    // The Services ID may not take the bundle's place.
+    {...appleWeb(), APPLE_CLIENT_ID:'com.snaglist.app.staging.web'},
+    {...appleWeb(), APPLE_BUNDLE_ID:'com.snaglist.app.staging.web', APPLE_CLIENT_ID:'com.snaglist.app.staging.web'}
+  ]) {
+    assert.throws(() => containerEnvironment({...base, ...override}), JSON.stringify(override));
+  }
+  // Web without the exchange, without the audience, or outside the enabled candidate.
+  assert.throws(() => containerEnvironment({...candidate(), ...appleAudience(), ...appleWeb()}), 'web needs the exchange');
+  assert.throws(() => containerEnvironment({...candidate(), ...appleExchange(), ...appleWeb()}), 'web needs the audience');
+  assert.throws(() => containerEnvironment({...candidate(), ...appleWeb()}), 'web alone');
+  assert.throws(() => containerEnvironment({...sample(), ...platform(), ...appleAudience(), ...appleExchange(), ...appleWeb()}), 'recovery deployment');
+  assert.throws(() => containerEnvironment({...base, ...appleWeb(), STAGING_PLATFORM_ENABLED:'false'}), 'platform disabled');
+});
+
 test('legacy import preparation stays off unless the enabled candidate opts in on its own origin', () => {
   const off=containerEnvironment(candidate());
   assert.equal(off.STAGED_LEGACY_IMPORT_ENABLED,undefined);

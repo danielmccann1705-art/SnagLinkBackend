@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {productionContainerEnvironment, productionAPIOrigin as api, productionPortalOrigin as portal} from '../src/production-config.mjs';
+import {productionContainerEnvironment, productionAPIOrigin as api, productionPortalOrigin as portal,
+  productionAppleWebClientID as appleWeb} from '../src/production-config.mjs';
 import {containerEnvironment} from '../src/config.mjs';
 import {productionResponse, productionMaintenance} from '../src/production-backend.mjs';
 import {productionPortalResponse, portalResponse} from '../src/portal-proxy.mjs';
@@ -98,6 +99,85 @@ test('production refuses partial identity, mail, purchase and encryption configu
   assert.equal(result.DATABASE_TLS_DISABLE, 'false');
   assert.equal(result.UNRELATED_SECRET, undefined);
   assert.equal(result.PRODUCTION_ENABLED, undefined);
+});
+
+// Sign in with Apple on the web. The Services ID is a second audience the container
+// accepts beside the bundle, and the three names that install it are all-or-nothing:
+// the switch is an exact literal, the identity cannot be configured with the switch
+// off, and the switch cannot be on with a missing, foreign or bundle-shaped identity.
+// The bundle audience for the app stays exactly what it was in every case.
+const appleWebOn = {APPLE_WEB_ENABLED: 'true', APPLE_WEB_AUTH_ENVIRONMENT: 'production', APPLE_WEB_CLIENT_ID: appleWeb};
+const appleWebNames = Object.keys(appleWebOn);
+
+test('production Apple web sign-in is off until all three names arrive, and the bundle audience never moves', () => {
+  for (const env of [configured(), configured({APPLE_WEB_ENABLED: 'false'})]) {
+    const off = productionContainerEnvironment(env);
+    for (const name of appleWebNames) assert.equal(off[name], undefined, `${name} must not be forwarded while off`);
+    assert.equal(off.APPLE_CLIENT_ID, 'com.snaglist.app');
+    assert.equal(off.APPLE_BUNDLE_ID, 'com.snaglist.app');
+  }
+  const on = productionContainerEnvironment(configured(appleWebOn));
+  assert.deepEqual(Object.fromEntries(appleWebNames.map(name => [name, on[name]])), appleWebOn);
+  assert.equal(on.APPLE_CLIENT_ID, 'com.snaglist.app', 'a Services ID never replaces the bundle audience');
+  assert.equal(on.APPLE_BUNDLE_ID, 'com.snaglist.app');
+  assert.equal(on.APPLE_TEAM_ID, '52ZZHYHM62');
+  // Turning the web flow on moves nothing else at all.
+  const off = productionContainerEnvironment(configured());
+  assert.deepEqual({...on, APPLE_WEB_ENABLED: null, APPLE_WEB_AUTH_ENVIRONMENT: null, APPLE_WEB_CLIENT_ID: null},
+                   {...off, APPLE_WEB_ENABLED: null, APPLE_WEB_AUTH_ENVIRONMENT: null, APPLE_WEB_CLIENT_ID: null});
+});
+
+test('production Apple web sign-in refuses partial, foreign, bundle-shaped and unswitched identities', () => {
+  const partial = [
+    // Switch without identity, identity without switch, and every one-of-three.
+    {APPLE_WEB_ENABLED: 'true'},
+    {APPLE_WEB_ENABLED: 'true', APPLE_WEB_AUTH_ENVIRONMENT: 'production'},
+    {APPLE_WEB_ENABLED: 'true', APPLE_WEB_CLIENT_ID: appleWeb},
+    {APPLE_WEB_AUTH_ENVIRONMENT: 'production', APPLE_WEB_CLIENT_ID: appleWeb},
+    {APPLE_WEB_CLIENT_ID: appleWeb}, {APPLE_WEB_AUTH_ENVIRONMENT: 'production'},
+    {APPLE_WEB_ENABLED: 'false', APPLE_WEB_CLIENT_ID: appleWeb},
+    {APPLE_WEB_ENABLED: 'false', APPLE_WEB_AUTH_ENVIRONMENT: 'production'},
+    {APPLE_WEB_ENABLED: 'false', APPLE_WEB_AUTH_ENVIRONMENT: 'production', APPLE_WEB_CLIENT_ID: appleWeb},
+    // The switch is an exact literal.
+    {...appleWebOn, APPLE_WEB_ENABLED: '1'}, {...appleWebOn, APPLE_WEB_ENABLED: 'TRUE'},
+    {...appleWebOn, APPLE_WEB_ENABLED: ''}, {...appleWebOn, APPLE_WEB_ENABLED: 'yes'},
+    {APPLE_WEB_ENABLED: ''}, {APPLE_WEB_ENABLED: '0'},
+    // The environment is production's own and the client is the production Services ID.
+    {...appleWebOn, APPLE_WEB_AUTH_ENVIRONMENT: 'staging'}, {...appleWebOn, APPLE_WEB_AUTH_ENVIRONMENT: ''},
+    {...appleWebOn, APPLE_WEB_CLIENT_ID: 'com.snaglist.app.staging.web'},
+    {...appleWebOn, APPLE_WEB_CLIENT_ID: 'com.snaglist.app'},
+    {...appleWebOn, APPLE_WEB_CLIENT_ID: 'com.snaglist.app.web.evil'},
+    {...appleWebOn, APPLE_WEB_CLIENT_ID: ' com.snaglist.app.web'}, {...appleWebOn, APPLE_WEB_CLIENT_ID: ''},
+    // The Services ID may not take the bundle's place, and the web flow cannot run
+    // without the team credential it signs its client secret with.
+    {...appleWebOn, APPLE_CLIENT_ID: appleWeb}, {...appleWebOn, APPLE_BUNDLE_ID: appleWeb},
+    {...appleWebOn, APPLE_CLIENT_ID: appleWeb, APPLE_BUNDLE_ID: appleWeb},
+    {...appleWebOn, APPLE_PRIVATE_KEY: undefined}, {...appleWebOn, APPLE_KEY_ID: undefined},
+    {...appleWebOn, APPLE_CREDENTIAL_KEY: undefined}
+  ];
+  for (const override of partial) {
+    assert.throws(() => productionContainerEnvironment(configured(override)), JSON.stringify(override));
+  }
+});
+
+// The checked-in template is what the next disabled production candidate is derived
+// from. Its public Apple web names, with the installed secrets, must be exactly what
+// the adapter forwards — and it must still carry the bundle for the app.
+test('the production template carries the Apple web identity beside the bundle and the adapter accepts it whole', () => {
+  const source = readFileSync(new URL('../wrangler.production.jsonc', import.meta.url), 'utf8');
+  const template = JSON.parse(source.replace(/^\s*\/\/.*$/gm, '')).vars;
+  assert.equal(template.PRODUCTION_ENABLED, 'false');
+  assert.equal(template.APPLE_CLIENT_ID, 'com.snaglist.app');
+  assert.equal(template.APPLE_BUNDLE_ID, 'com.snaglist.app');
+  assert.deepEqual(Object.fromEntries(appleWebNames.map(name => [name, template[name]])), appleWebOn);
+  // Public template names plus synthetic secrets and the separately supplied database.
+  const env = configured({...template, PRODUCTION_ENABLED: 'true',
+    PRODUCTION_DATABASE_HOST: configured().PRODUCTION_DATABASE_HOST, PRODUCTION_DATABASE_NAME: configured().PRODUCTION_DATABASE_NAME});
+  const forwarded = productionContainerEnvironment(env);
+  assert.deepEqual(Object.fromEntries(appleWebNames.map(name => [name, forwarded[name]])), appleWebOn);
+  assert.equal(forwarded.APPLE_CLIENT_ID, 'com.snaglist.app');
+  // The template still parses as a disabled deployment: the adapter refuses it as-is.
+  assert.throws(() => productionContainerEnvironment(configured(template)));
 });
 
 test('production guard rejects all public maintenance spellings and unsafe legacy uploads before container access', async () => {

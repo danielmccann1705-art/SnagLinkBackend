@@ -69,4 +69,78 @@ final class SubscriptionVerificationTests: XCTestCase {
         XCTAssertEqual(try SubscriptionVerificationService.verifiedUntil(lifetime, now: now),
                        now.addingTimeInterval(300))
     }
+
+    // MARK: - The entitlement identifier, against a RevenueCat v1 subscriber response
+
+    /// RevenueCat's only entitlement has the Identifier `Snaglist Pro`. Pinned as a
+    /// literal here so a rename of the constant cannot pass unnoticed.
+    func testTheProEntitlementIdentifierIsExactlyRevenueCats() {
+        XCTAssertEqual(SubscriptionVerificationService.proEntitlementIdentifier, "Snaglist Pro")
+    }
+
+    func testAnActiveSnaglistProEntitlementIsPro() throws {
+        let customer = try subscriber(entitlements: ["Snaglist Pro": active(for: 30 * 86_400)])
+        XCTAssertEqual(try SubscriptionVerificationService.proVerifiedUntil(customer, now: now),
+                       now.addingTimeInterval(300))
+    }
+
+    func testALifetimeSnaglistProEntitlementIsPro() throws {
+        let customer = try subscriber(entitlements: ["Snaglist Pro": #"{"expires_date":null,"grace_period_expires_date":null,"product_identifier":"synthetic_lifetime","purchase_date":"2026-09-25T10:00:00Z"}"#])
+        XCTAssertEqual(try SubscriptionVerificationService.proVerifiedUntil(customer, now: now),
+                       now.addingTimeInterval(300))
+    }
+
+    /// The identifier the backend used before 25 September 2026. RevenueCat has no
+    /// entitlement by that name, so an active one must not grant Pro on its own.
+    func testAnActiveEntitlementNamedOnlyProIsFree() throws {
+        let customer = try subscriber(entitlements: ["pro": active(for: 30 * 86_400)])
+        XCTAssertNil(try SubscriptionVerificationService.proVerifiedUntil(customer, now: now))
+    }
+
+    func testTheIdentifierMatchIsExact() throws {
+        for key in ["snaglist pro", "SNAGLIST PRO", "Snaglist Pro ", " Snaglist Pro", "SnaglistPro", "Snaglist_Pro", "Pro"] {
+            let customer = try subscriber(entitlements: [key: active(for: 30 * 86_400)])
+            XCTAssertNil(try SubscriptionVerificationService.proVerifiedUntil(customer, now: now), key)
+        }
+    }
+
+    func testAnExpiredSnaglistProIsFreeEvenBesideAnActivePro() throws {
+        let customer = try subscriber(entitlements: ["Snaglist Pro": active(for: -60), "pro": active(for: 30 * 86_400)])
+        XCTAssertNil(try SubscriptionVerificationService.proVerifiedUntil(customer, now: now))
+    }
+
+    func testNoEntitlementsIsFree() throws {
+        XCTAssertNil(try SubscriptionVerificationService.proVerifiedUntil(try subscriber(entitlements: [:]), now: now))
+    }
+
+    /// One entitlement object as RevenueCat v1 returns it, expiring `offset` seconds from `now`.
+    private func active(for offset: TimeInterval) -> String {
+        let formatter = ISO8601DateFormatter()
+        let expiry = formatter.string(from: now.addingTimeInterval(offset))
+        let purchase = formatter.string(from: now.addingTimeInterval(-86_400))
+        return #"{"expires_date":"\#(expiry)","grace_period_expires_date":null,"product_identifier":"synthetic_pro_monthly","purchase_date":"\#(purchase)"}"#
+    }
+
+    /// A synthetic `GET /v1/subscribers/{app_user_id}` body in RevenueCat's v1 shape.
+    /// No real customer, receipt or transaction.
+    private func subscriber(entitlements: [String: String]) throws -> SubscriptionVerificationService.Customer {
+        let formatter = ISO8601DateFormatter()
+        let expiry = formatter.string(from: now.addingTimeInterval(30 * 86_400))
+        let purchase = formatter.string(from: now.addingTimeInterval(-86_400))
+        // Keys here never contain a quote or backslash, so they need no escaping.
+        let keyed = entitlements.keys.sorted().map { "\"\($0)\":" + entitlements[$0]! }.joined(separator: ",")
+        let json = """
+            {"request_date":"\(formatter.string(from: now))","request_date_ms":\(Int(now.timeIntervalSince1970 * 1000)),
+             "subscriber":{"entitlements":{\(keyed)},
+              "first_seen":"\(purchase)","last_seen":"\(purchase)","management_url":null,"non_subscriptions":{},
+              "original_app_user_id":"00000000-0000-4000-8000-000000000000","original_application_version":null,
+              "original_purchase_date":null,"other_purchases":{},
+              "subscriptions":{"synthetic_pro_monthly":{"auto_resume_date":null,"billing_issues_detected_at":null,
+                "expires_date":"\(expiry)","grace_period_expires_date":null,"is_sandbox":true,
+                "original_purchase_date":"\(purchase)","ownership_type":"PURCHASED","period_type":"normal",
+                "purchase_date":"\(purchase)","refunded_at":null,"store":"app_store",
+                "store_transaction_id":"synthetic-0","unsubscribe_detected_at":null}}}}
+            """
+        return try JSONDecoder().decode(SubscriptionVerificationService.Customer.self, from: Data(json.utf8))
+    }
 }

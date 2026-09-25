@@ -3,6 +3,12 @@ import Vapor
 
 /// Short-lived, server-verified entitlements. A client tier string is only a refresh hint.
 struct SubscriptionVerificationService {
+    /// The Identifier of RevenueCat's one Pro entitlement, exactly as the project
+    /// defines it (Entitlements -> Identifier), space and capitals included.
+    /// RevenueCat keys `subscriber.entitlements` by this string, so the match is exact:
+    /// any other spelling, including the older `pro`, reads every paying customer as Free.
+    static let proEntitlementIdentifier = "Snaglist Pro"
+
     struct Customer: Decodable {
         struct Subscriber: Decodable {
             struct Entitlement: Decodable {
@@ -48,6 +54,12 @@ struct SubscriptionVerificationService {
         return expiry > now ? min(expiry, cap) : nil
     }
 
+    /// The Pro entitlement in a RevenueCat v1 subscriber response, looked up by
+    /// `proEntitlementIdentifier` only.
+    static func proVerifiedUntil(_ customer: Customer, now: Date) throws -> Date? {
+        try verifiedUntil(customer.subscriber.entitlements[proEntitlementIdentifier], now: now)
+    }
+
     @discardableResult
     static func refresh(user: User, on req: Request) async throws -> SubscriptionTier {
         guard let key = Environment.get("REVENUECAT_SECRET_API_KEY"), !key.isEmpty else {
@@ -67,7 +79,7 @@ struct SubscriptionVerificationService {
         } catch {
             throw Abort(.badGateway, reason: "Invalid subscription verification response")
         }
-        let until = try verifiedUntil(customer.subscriber.entitlements["pro"], now: Date())
+        let until = try proVerifiedUntil(customer, now: Date())
         user.subscriptionTier = until == nil ? "free" : "pro"
         user.subscriptionVerifiedUntil = until
         try await user.save(on: req.db)

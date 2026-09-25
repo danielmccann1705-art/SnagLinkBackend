@@ -183,6 +183,18 @@ export function candidateConfigs({imageDigest, assetsDirectory, environment = pr
         GOOGLE_AUTH_ENVIRONMENT:'staging',
         GOOGLE_WEB_CLIENT_ID:'853801285577-3dmk0mtkjf9gcummuq374urgim0ohgp9.apps.googleusercontent.com',
         GOOGLE_IOS_CLIENT_ID:'853801285577-umo2ith1f73rvn8g7802hj9a1sjevmd0.apps.googleusercontent.com',
+        // Sign in with Apple on the web: the staging Services ID for the manager
+        // origin, beside the staging bundle the Worker's encrypted Apple bindings
+        // name and never instead of it. Public identifiers, like the Google clients
+        // above. src/config.mjs refuses the identity without its switch, the switch
+        // without the exact identity, and either without the Apple token exchange
+        // the web flow signs its client secret with; the container additionally
+        // reports the web flow disabled unless all three agree with PORTAL_ORIGIN.
+        // The Services ID is a registration in Apple Developer that the deployer
+        // reads back before a deploy carrying this; an unregistered ID fails
+        // visibly at Apple's authorize page and never at the callback.
+        APPLE_WEB_ENABLED:'true',APPLE_WEB_AUTH_ENVIRONMENT:'staging',
+        APPLE_WEB_CLIENT_ID:'com.snaglist.app.staging.web',
         R2_ACCOUNT_ID:'387d49014cd0d45f9e6434196ab513c0',R2_BUCKET_NAME:'snaglist-unified-staging-uploads',
         R2_PUBLIC_URL:'https://pub-d7c456d4b396462fb5ee8ef008dcf93b.r2.dev',
         R2_PRIVATE_BUCKET_NAME:'snaglist-staging-private',R2_PRIVATE_NAMESPACE:'private-v1/',

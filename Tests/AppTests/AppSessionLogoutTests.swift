@@ -67,10 +67,12 @@ final class AppSessionRevocationRulesTests: XCTestCase {
                                               olderThan25Days: 9_999_999, oldestOpenAgeDays: 99_999, reasons: reasons,
                                               previousPassGapHours: 99_999)
         removed.appSessionRevocations = 9_999_999
+        removed.signInChallenges = .init(appleWeb: 9_999_999, appleWebEscrow: 9_999_999, google: 9_999_999, emailLink: 9_999_999)
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
         let body = try encoder.encode(MaintenanceCleanupResponse(ran: true, removed: removed, lastSuccessfulRun: Date()))
         XCTAssertLessThan(body.count, 4_096, "\(body.count) bytes")
         XCTAssertTrue(String(decoding: body, as: UTF8.self).contains("\"appSessionRevocations\":9999999"))
+        XCTAssertTrue(String(decoding: body, as: UTF8.self).contains("\"emailLink\":9999999"))
     }
 }
 

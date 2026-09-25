@@ -3,7 +3,8 @@ import Fluent
 import FluentSQL
 
 /// Periodic removal of expired rate limits, old audit logs, spent magic-link tokens,
-/// expired preview links and the sign-out rows of expired app sessions.
+/// expired preview links, the sign-out rows of expired app sessions and spent
+/// sign-in challenges.
 ///
 /// The work here was always correct. What was missing was anything that ran it: the
 /// lifecycle loop below waits before its first pass, inside a container that sleeps
@@ -31,7 +32,35 @@ struct CleanupService {
         /// Signed-out app sessions whose tokens have expired
         /// (`AppSessionRevocationService.removeExpired`). Optional for the same reason.
         var appSessionRevocations: Int? = nil
+        /// Sign-in challenges removed a day after they expired
+        /// (`removeSpentSignInChallenges`). Optional for the same reason.
+        var signInChallenges: SignInChallengeCounts? = nil
     }
+
+    /// Counts only, by table.
+    struct SignInChallengeCounts: Codable, Sendable, Equatable {
+        /// `apple_web_challenges`.
+        var appleWeb = 0
+        /// Finished `apple_web_credential_escrow` records (adopted or revoked, so no
+        /// credential left in them) removed so their challenge could go too.
+        var appleWebEscrow = 0
+        /// `google_identity_challenges`, both surfaces and both purposes.
+        var google = 0
+        /// `identity_challenges`: the email-link browser sign-in, verify and
+        /// reauthenticate challenges, the only ones that carry an address.
+        var emailLink = 0
+    }
+
+    /// How long a sign-in challenge is kept after `expires_at`. Every consume path
+    /// requires `expires_at > now`, so once a challenge has expired nothing reads it
+    /// again: a replayed state, nonce or link finds no usable row whether or not the
+    /// row still exists, and removing it changes no answer. The day is slack for
+    /// clock skew and for anyone reading a recent failure, not a requirement.
+    static let signInChallengeRetentionAfterExpiry: TimeInterval = 24 * 60 * 60
+
+    /// Rows per table per pass. The scheduler awaits the whole pass; a backlog
+    /// drains over successive hours instead of making one pass long.
+    static let signInChallengeBatch = 5_000
 
     /// `schedule` is the external scheduler reaching us through the maintenance route.
     /// `fallback` is the in-process loop, which cannot be relied on in a container that
@@ -146,6 +175,10 @@ struct CleanupService {
         // Per-device sign-out rows, once the token each one names has expired.
         removed.appSessionRevocations = try await AppSessionRevocationService.removeExpired(on: db)
 
+        // Spent sign-in challenges, a day after they expired. After the escrow worker
+        // above, so an Apple credential it has just finished with is already terminal.
+        removed.signInChallenges = try await removeSpentSignInChallenges(on: db)
+
         // Last, after every piece of work above, so reading health can never stop
         // that work. A pass that cannot read it records `failed`, which is itself
         // the signal. The previous successful pass is read before this one is
@@ -158,6 +191,72 @@ struct CleanupService {
         AccountDeletionHealth.log(health, logger: app.logger)
 
         return removed
+    }
+
+    /// Removes Apple web, Google and email-link sign-in challenges whose `expires_at`
+    /// is more than `signInChallengeRetentionAfterExpiry` ago, consumed or not. Each
+    /// statement deletes by predicate on its own, so a pass stopped part-way is simply
+    /// finished by the next one.
+    ///
+    /// An Apple challenge whose credential escrow record is still in flight (`held`,
+    /// `ready`, `leased` or `blocked`, i.e. it may still hold a refresh token awaiting
+    /// revocation) is never touched, however old. A finished escrow record (`adopted`
+    /// or `revoked`, which by constraint holds no credential) is removed first, a day
+    /// after it finished, because it references its challenge and would otherwise
+    /// keep every successful Apple web sign-in's challenge forever.
+    ///
+    /// New escrow records are only written after `AppleWebChallengeService.consume`,
+    /// which refuses an expired challenge, so none can appear for a row this removes.
+    static func removeSpentSignInChallenges(on db: Database, now: Date = Date(),
+                                            limit: Int = signInChallengeBatch) async throws -> SignInChallengeCounts {
+        let sql = try VerifiedIdentityService.sql(db)
+        let cutoff = now.addingTimeInterval(-signInChallengeRetentionAfterExpiry)
+        let batch = max(0, limit)
+        var counts = SignInChallengeCounts()
+
+        func total(_ query: SQLQueryString) async throws -> Int {
+            try await sql.raw(query).first()?.decode(column: "total", as: Int.self) ?? 0
+        }
+
+        counts.appleWebEscrow = try await total("""
+            WITH removed AS (
+                DELETE FROM apple_web_credential_escrow WHERE challenge_id IN (
+                    SELECT e.challenge_id FROM apple_web_credential_escrow e
+                    JOIN apple_web_challenges c ON c.id = e.challenge_id
+                    WHERE e.state IN ('adopted','revoked') AND e.completed_at < \(bind: cutoff)
+                      AND c.expires_at < \(bind: cutoff)
+                    ORDER BY c.expires_at LIMIT \(bind: batch))
+                  AND state IN ('adopted','revoked')
+                RETURNING 1)
+            SELECT count(*) AS total FROM removed
+            """)
+        counts.appleWeb = try await total("""
+            WITH removed AS (
+                DELETE FROM apple_web_challenges WHERE id IN (
+                    SELECT c.id FROM apple_web_challenges c
+                    WHERE c.expires_at < \(bind: cutoff)
+                      AND NOT EXISTS (SELECT 1 FROM apple_web_credential_escrow e WHERE e.challenge_id = c.id)
+                    ORDER BY c.expires_at LIMIT \(bind: batch))
+                RETURNING 1)
+            SELECT count(*) AS total FROM removed
+            """)
+        counts.google = try await total("""
+            WITH removed AS (
+                DELETE FROM google_identity_challenges WHERE id IN (
+                    SELECT id FROM google_identity_challenges WHERE expires_at < \(bind: cutoff)
+                    ORDER BY expires_at LIMIT \(bind: batch))
+                RETURNING 1)
+            SELECT count(*) AS total FROM removed
+            """)
+        counts.emailLink = try await total("""
+            WITH removed AS (
+                DELETE FROM identity_challenges WHERE id IN (
+                    SELECT id FROM identity_challenges WHERE expires_at < \(bind: cutoff)
+                    ORDER BY expires_at LIMIT \(bind: batch))
+                RETURNING 1)
+            SELECT count(*) AS total FROM removed
+            """)
+        return counts
     }
 
     private static func record(trigger: Trigger, started: Date, state: String, removed: Removed?, errorKind: String?, on sql: SQLDatabase) async throws {

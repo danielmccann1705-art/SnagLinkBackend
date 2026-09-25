@@ -124,15 +124,17 @@ function logStream(env) {
   return selected;
 }
 
-// Sign in with Apple. Two separable things: the audience staging is allowed to accept,
-// and the team credential that turns an authorization code into a refresh token so a
-// deleted account's Apple grant can be revoked. Both are optional, both are all-or-
-// nothing, and the audience is named explicitly — never widened to make a build work.
+// Sign in with Apple. Three separable things: the audience staging is allowed to accept,
+// the team credential that turns an authorization code into a refresh token so a
+// deleted account's Apple grant can be revoked, and the web Services ID the portal
+// signs in with beside that audience. All are optional, all are all-or-nothing, and
+// each audience is named explicitly — never widened to make a build work.
 /** @returns {Record<string, string>} */
 function appleEnvironment(env, candidate) {
   const keys = ['APPLE_BUNDLE_ID', 'APPLE_CLIENT_ID', 'APPLE_TEAM_ID', 'APPLE_KEY_ID',
     'APPLE_PRIVATE_KEY', 'APPLE_CREDENTIAL_KEY', 'APPLE_CREDENTIAL_PREVIOUS_KEY'];
-  if (keys.every(key => env[key] === undefined)) return {};
+  const web = appleWebEnvironment(env);
+  if (web === null && keys.every(key => env[key] === undefined)) return {};
   if (!candidate || env.STAGING_PLATFORM_ENABLED !== 'true') {
     throw new Error('Apple sign-in configuration requires the enabled unified candidate');
   }
@@ -167,7 +169,41 @@ function appleEnvironment(env, candidate) {
       apple.APPLE_CREDENTIAL_PREVIOUS_KEY = env.APPLE_CREDENTIAL_PREVIOUS_KEY;
     }
   }
+  if (web !== null) {
+    // The web flow signs its client secret with the team key above (`sub` = the
+    // Services ID rather than the bundle) and escrows the refresh token under the
+    // same credential key, so it cannot be on without the whole exchange group.
+    if (exchange.some(key => apple[key] === undefined) || web.APPLE_WEB_CLIENT_ID === apple.APPLE_CLIENT_ID) {
+      throw new Error('Apple web sign-in requires the staging token exchange beside its own Services ID');
+    }
+    Object.assign(apple, web);
+  }
   return apple;
+}
+
+// Sign in with Apple on the web. Three names, all-or-nothing, and every one an exact
+// literal: the switch is 'true' or 'false' (absent reads as 'false'), the environment
+// is staging's own, and the client is the one Services ID registered for the staging
+// portal origin. The identity cannot be configured with the switch off — an identity
+// lying in the map without its switch is an ambiguity, not a default — and the
+// switch cannot be on with a missing, foreign or bundle-shaped identity. Null means
+// off and nothing forwarded; the container then reports the web flow disabled.
+/** @returns {Record<string, string> | null} */
+function appleWebEnvironment(env) {
+  const enabled = env.APPLE_WEB_ENABLED === undefined ? 'false' : env.APPLE_WEB_ENABLED;
+  if (enabled !== 'true' && enabled !== 'false') {
+    throw new Error('Apple web sign-in is switched by an exact true or false');
+  }
+  if (enabled === 'false') {
+    if (env.APPLE_WEB_AUTH_ENVIRONMENT !== undefined || env.APPLE_WEB_CLIENT_ID !== undefined) {
+      throw new Error('The Apple web Services ID cannot be configured without its explicit switch');
+    }
+    return null;
+  }
+  if (env.APPLE_WEB_AUTH_ENVIRONMENT !== 'staging' || env.APPLE_WEB_CLIENT_ID !== 'com.snaglist.app.staging.web') {
+    throw new Error('Staging Apple web sign-in requires the staging Services ID in the staging environment');
+  }
+  return {APPLE_WEB_ENABLED: 'true', APPLE_WEB_AUTH_ENVIRONMENT: 'staging', APPLE_WEB_CLIENT_ID: env.APPLE_WEB_CLIENT_ID};
 }
 
 // Private legacy import preparation/publication is an explicit staging opt-in for the
