@@ -750,8 +750,8 @@ struct MagicLinkController: RouteCollection {
             <title>Snag Report - \(projectName.htmlEscaped)</title>
             <style>
                 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 40px; color: #1f2937; }
-                .header { border-bottom: 2px solid #f97316; padding-bottom: 20px; margin-bottom: 30px; }
-                .header h1 { color: #f97316; margin: 0 0 8px 0; font-size: 28px; }
+                .header { border-bottom: 2px solid #d8321e; padding-bottom: 20px; margin-bottom: 30px; }
+                .header h1 { color: #1a1d23; margin: 0 0 8px 0; font-size: 28px; }
                 .header .subtitle { color: #6b7280; font-size: 14px; }
                 .project-info { background: #f9fafb; padding: 20px; border-radius: 8px; margin-bottom: 30px; }
                 .project-info h2 { margin: 0 0 8px 0; font-size: 18px; }

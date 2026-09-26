@@ -60,6 +60,7 @@ struct NotificationService {
         let to: [String]
         let subject: String
         let html: String
+        let text: String
     }
 
     private struct ResendEmailResponse: Content {
@@ -73,14 +74,14 @@ struct NotificationService {
 
     // MARK: - Public Methods
 
-    /// Sends an email notification when a magic link is created and shared with a contractor
+    /// Sends the Contractor link email when a link is created and shared with a contractor.
     /// - Parameters:
     ///   - email: Contractor's email address
     ///   - contractorName: Name of the contractor
     ///   - projectName: Name of the project
     ///   - projectAddress: Address of the project (optional)
     ///   - snagCount: Number of snags shared
-    ///   - magicLinkURL: The full magic link URL
+    ///   - magicLinkURL: The full Contractor link URL
     ///   - createdByName: Name of the person who created the link
     ///   - client: HTTP client for making requests
     static func sendMagicLinkEmail(
@@ -98,65 +99,28 @@ struct NotificationService {
             return
         }
 
-        let subject = "You have \(snagCount) snag\(snagCount == 1 ? "" : "s") to review - \(projectName)"
-
-        let addressLine = projectAddress.map { "<p style=\"color: #6b7280; margin: 0;\">\($0)</p>" } ?? ""
-
-        let html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        </head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <div style="background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
-                <h1 style="color: white; margin: 0; font-size: 24px;">Snaglist</h1>
-            </div>
-
-            <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 12px 12px;">
-                <p style="font-size: 18px; margin-top: 0;">Hi \(contractorName),</p>
-
-                <p>\(createdByName) has shared <strong>\(snagCount) snag\(snagCount == 1 ? "" : "s")</strong> with you that need attention.</p>
-
-                <div style="background: #f9fafb; border-radius: 8px; padding: 20px; margin: 20px 0;">
-                    <p style="font-weight: 600; color: #111827; margin: 0 0 5px 0;">\(projectName)</p>
-                    \(addressLine)
-                </div>
-
-                <div style="text-align: center; margin: 30px 0;">
-                    <a href="\(magicLinkURL)" style="display: inline-block; background: #f97316; color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px;">View Snags</a>
-                </div>
-
-                <p style="color: #6b7280; font-size: 14px;">You can view details, add photos, and mark items as complete directly from the link above.</p>
-
-                <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
-
-                <p style="color: #9ca3af; font-size: 12px; margin-bottom: 0;">This email was sent by Snaglist. If you weren't expecting this email, you can safely ignore it.</p>
-            </div>
-        </body>
-        </html>
-        """
-
-        try await sendEmail(
-            to: email,
-            subject: subject,
-            html: html,
-            apiKey: apiKey,
-            client: client
+        let rendered = contractorLinkEmail(
+            contractorName: contractorName,
+            projectName: projectName,
+            projectAddress: projectAddress,
+            snagCount: snagCount,
+            magicLinkURL: magicLinkURL,
+            createdByName: createdByName
         )
+
+        try await sendEmail(to: email, rendered: rendered, apiKey: apiKey, client: client)
     }
 
-    /// Sends an email notification when a contractor marks a snag as complete
+    /// Sends an email notification when a contractor submits work on a snag for review
     /// - Parameters:
     ///   - email: Project manager's email address
     ///   - pmName: Name of the project manager
-    ///   - contractorName: Name of the contractor who completed the work
-    ///   - snagTitle: Title of the completed snag
+    ///   - contractorName: Name of the contractor who submitted the work
+    ///   - snagTitle: Title of the snag
     ///   - projectName: Name of the project
     ///   - completionNotes: Optional notes from the contractor
     ///   - hasPhotos: Whether completion photos were uploaded
-    ///   - reviewURL: URL to review the completion (optional)
+    ///   - reviewURL: URL to review the submission (optional)
     ///   - client: HTTP client for making requests
     static func sendCompletionEmail(
         to email: String,
@@ -174,82 +138,26 @@ struct NotificationService {
             return
         }
 
-        let subject = "Snag completed: \(snagTitle) - \(projectName)"
-
-        let notesSection = completionNotes.map { notes in
-            """
-            <div style="background: #f9fafb; border-radius: 8px; padding: 15px; margin: 15px 0;">
-                <p style="font-weight: 600; color: #6b7280; margin: 0 0 5px 0; font-size: 12px; text-transform: uppercase;">Contractor Notes</p>
-                <p style="color: #1f2937; margin: 0;">\(notes)</p>
-            </div>
-            """
-        } ?? ""
-
-        let photosIndicator = hasPhotos ? """
-            <p style="color: #059669; font-size: 14px; margin: 10px 0;">
-                <span style="display: inline-block; width: 8px; height: 8px; background: #059669; border-radius: 50%; margin-right: 6px;"></span>
-                Completion photos attached
-            </p>
-        """ : ""
-
-        let reviewButton = reviewURL.map { url in
-            """
-            <div style="text-align: center; margin: 25px 0;">
-                <a href="\(url)" style="display: inline-block; background: #f97316; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600;">Review Completion</a>
-            </div>
-            """
-        } ?? ""
-
-        let html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        </head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <div style="background: linear-gradient(135deg, #059669 0%, #047857 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
-                <h1 style="color: white; margin: 0; font-size: 24px;">Completion Submitted</h1>
-            </div>
-
-            <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 12px 12px;">
-                <p style="font-size: 18px; margin-top: 0;">Hi \(pmName),</p>
-
-                <p><strong>\(contractorName)</strong> has marked a snag as complete and is awaiting your review.</p>
-
-                <div style="background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; padding: 20px; margin: 20px 0;">
-                    <p style="font-weight: 600; color: #065f46; margin: 0 0 5px 0;">\(snagTitle)</p>
-                    <p style="color: #047857; margin: 0; font-size: 14px;">\(projectName)</p>
-                </div>
-
-                \(notesSection)
-                \(photosIndicator)
-                \(reviewButton)
-
-                <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
-
-                <p style="color: #9ca3af; font-size: 12px; margin-bottom: 0;">This notification was sent by Snaglist.</p>
-            </div>
-        </body>
-        </html>
-        """
-
-        try await sendEmail(
-            to: email,
-            subject: subject,
-            html: html,
-            apiKey: apiKey,
-            client: client
+        let rendered = completionEmail(
+            pmName: pmName,
+            contractorName: contractorName,
+            snagTitle: snagTitle,
+            projectName: projectName,
+            completionNotes: completionNotes,
+            hasPhotos: hasPhotos,
+            reviewURL: reviewURL
         )
+
+        try await sendEmail(to: email, rendered: rendered, apiKey: apiKey, client: client)
     }
 
-    /// Sends a passwordless ("magic link") sign-in email to a Project Manager (B1).
+    /// Sends a passwordless sign-in email to a Project Manager (B1).
     /// No-ops (logs and returns) when `RESEND_API_KEY` is unconfigured, matching the
     /// other senders — keeps staging/dev functional without transactional-email creds.
     /// - Parameters:
     ///   - email: Recipient email address.
     ///   - name: Optional display name for the greeting.
-    ///   - magicLinkURL: The full `https://snaglist.dev/auth/{token}` sign-in URL.
+    ///   - magicLinkURL: The full sign-in URL (`…/auth/{token}` or a browser `#token=` URL).
     ///   - client: HTTP client for making requests.
     static func sendMagicSignInEmail(
         to email: String,
@@ -262,47 +170,9 @@ struct NotificationService {
             return
         }
 
-        let subject = "Sign in to Snaglist — one-tap link"
-        let greetingName = (name?.isEmpty == false) ? name! : "there"
+        let rendered = signInEmail(name: name, magicLinkURL: magicLinkURL)
 
-        let html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        </head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <div style="background: linear-gradient(135deg, #f97316 0%, #ea580c 100%); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
-                <h1 style="color: white; margin: 0; font-size: 24px;">Snaglist</h1>
-            </div>
-
-            <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 12px 12px;">
-                <p style="font-size: 18px; margin-top: 0;">Hi \(greetingName),</p>
-
-                <p>Tap the button below to sign in to Snaglist. No password needed.</p>
-
-                <div style="text-align: center; margin: 30px 0;">
-                    <a href="\(magicLinkURL)" style="display: inline-block; background: #f97316; color: white; padding: 14px 28px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px;">Sign in to Snaglist</a>
-                </div>
-
-                <p style="color: #6b7280; font-size: 14px;">This link expires in 15 minutes and can only be used once.</p>
-
-                <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
-
-                <p style="color: #9ca3af; font-size: 12px; margin-bottom: 0;">If you didn't request this, you can safely ignore this email — no one can sign in without the link above.</p>
-            </div>
-        </body>
-        </html>
-        """
-
-        try await sendEmail(
-            to: email,
-            subject: subject,
-            html: html,
-            apiKey: apiKey,
-            client: client
-        )
+        try await sendEmail(to: email, rendered: rendered, apiKey: apiKey, client: client)
     }
 
     /// Notifies a contractor of a PM's approval decision (B5). No-ops without `RESEND_API_KEY`.
@@ -326,49 +196,122 @@ struct NotificationService {
             return
         }
 
-        let subject = approved
-            ? "Approved: \(snagTitle)"
-            : "Sent back: \(snagTitle)"
-        let headline = approved ? "Work approved" : "Changes needed"
-        let accent = approved ? "#168A45" : "#D63B1F"
-        let bodyLine = approved
-            ? "Your work on <strong>\(snagTitle.htmlEscaped)</strong> has been approved. Nothing more to do — thanks!"
-            : "Your submission for <strong>\(snagTitle.htmlEscaped)</strong> was sent back. Please review and re-submit."
-        let noteBlock = (note?.isEmpty == false) ? """
-            <div style="background: #f9fafb; border-radius: 8px; padding: 15px; margin: 15px 0;">
-                <p style="font-weight: 600; color: #6b7280; margin: 0 0 5px 0; font-size: 12px; text-transform: uppercase;">Note</p>
-                <p style="color: #1f2937; margin: 0;">\(note!.htmlEscaped)</p>
-            </div>
-            """ : ""
+        let rendered = approvalDecisionEmail(
+            contractorName: contractorName,
+            snagTitle: snagTitle,
+            approved: approved,
+            note: note
+        )
 
-        let html = """
-        <!DOCTYPE html>
-        <html>
-        <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
-        <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #1f2937; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <div style="background: \(accent); padding: 30px; border-radius: 12px 12px 0 0; text-align: center;">
-                <h1 style="color: white; margin: 0; font-size: 24px;">\(headline)</h1>
-            </div>
-            <div style="background: #ffffff; padding: 30px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 12px 12px;">
-                <p style="font-size: 18px; margin-top: 0;">Hi \(contractorName.htmlEscaped),</p>
-                <p>\(bodyLine)</p>
-                \(noteBlock)
-                <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 30px 0;">
-                <p style="color: #9ca3af; font-size: 12px; margin-bottom: 0;">This notification was sent by Snaglist.</p>
-            </div>
-        </body>
-        </html>
-        """
+        try await sendEmail(to: email, rendered: rendered, apiKey: apiKey, client: client)
+    }
 
-        try await sendEmail(to: email, subject: subject, html: html, apiKey: apiKey, client: client)
+    // MARK: - Rendering
+
+    // Pure functions: subject, HTML and plain text for each email, all through the
+    // shared `EmailLayout`, which escapes every interpolated value. Links, expiry
+    // wording and subjects are exactly what the senders used before the rebrand.
+
+    static func contractorLinkEmail(
+        contractorName: String,
+        projectName: String,
+        projectAddress: String?,
+        snagCount: Int,
+        magicLinkURL: String,
+        createdByName: String
+    ) -> EmailLayout.Rendered {
+        let snags = "\(snagCount) snag\(snagCount == 1 ? "" : "s")"
+        let subject = "You have \(snagCount) snag\(snagCount == 1 ? "" : "s") to review - \(projectName)"
+        let address = projectAddress.flatMap { $0.isEmpty ? nil : $0 }
+        return EmailLayout.render(subject: subject, EmailLayout.Message(
+            preheader: "\(createdByName) has shared \(snags) with you on \(projectName).",
+            heading: "You have \(snags) to review",
+            blocks: [
+                .greeting(contractorName),
+                .paragraph([.strong(createdByName), .text(" has shared "), .strong(snags), .text(" with you that need attention.")]),
+                .summary(title: projectName, detail: address),
+                .button(label: "View snags", url: magicLinkURL),
+                .small("Open the Contractor link to see each snag, add photos and submit your work for review."),
+            ],
+            closing: "This email was sent by Snaglist. If you weren't expecting it, you can safely ignore it."
+        ))
+    }
+
+    static func completionEmail(
+        pmName: String,
+        contractorName: String,
+        snagTitle: String,
+        projectName: String,
+        completionNotes: String?,
+        hasPhotos: Bool,
+        reviewURL: String?
+    ) -> EmailLayout.Rendered {
+        var blocks: [EmailLayout.Block] = [
+            .greeting(pmName),
+            .paragraph([.strong(contractorName), .text(" has submitted work on this snag. It is awaiting your review.")]),
+            .summary(title: snagTitle, detail: projectName),
+        ]
+        if let notes = completionNotes, !notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            blocks.append(.note(label: "Contractor notes", text: notes))
+        }
+        if hasPhotos {
+            blocks.append(.status("Completion photos attached", tone: .success))
+        }
+        if let url = reviewURL {
+            blocks.append(.button(label: "Review submission", url: url))
+        }
+        return EmailLayout.render(subject: "Snag completed: \(snagTitle) - \(projectName)", EmailLayout.Message(
+            preheader: "\(contractorName) submitted work on \(snagTitle) for your review.",
+            heading: "Work submitted for review",
+            blocks: blocks,
+            closing: "This notification was sent by Snaglist."
+        ))
+    }
+
+    static func signInEmail(name: String?, magicLinkURL: String) -> EmailLayout.Rendered {
+        let greetingName = (name?.isEmpty == false) ? name! : "there"
+        return EmailLayout.render(subject: "Sign in to Snaglist — one-tap link", EmailLayout.Message(
+            preheader: "Your Snaglist sign-in link. It expires in 15 minutes.",
+            heading: "Sign in to Snaglist",
+            blocks: [
+                .greeting(greetingName),
+                .paragraph([.text("Use the button below to sign in to Snaglist. No password needed.")]),
+                .button(label: "Sign in to Snaglist", url: magicLinkURL),
+                .small("This link expires in 15 minutes and can only be used once."),
+            ],
+            closing: "If you didn't request this, you can safely ignore this email. No one can sign in without the link above."
+        ))
+    }
+
+    static func approvalDecisionEmail(
+        contractorName: String,
+        snagTitle: String,
+        approved: Bool,
+        note: String?
+    ) -> EmailLayout.Rendered {
+        let decision: [EmailLayout.Inline]
+        if approved {
+            decision = [.text("Your work on "), .strong(snagTitle), .text(" has been approved. Nothing more to do — thanks!")]
+        } else {
+            decision = [.text("Your submission for "), .strong(snagTitle), .text(" was sent back. Please review and re-submit.")]
+        }
+        var blocks: [EmailLayout.Block] = [.greeting(contractorName), .paragraph(decision)]
+        if let note, !note.isEmpty {
+            blocks.append(.note(label: "Note", text: note))
+        }
+        return EmailLayout.render(subject: approved ? "Approved: \(snagTitle)" : "Sent back: \(snagTitle)", EmailLayout.Message(
+            preheader: approved ? "Your work on \(snagTitle) has been approved." : "Your submission for \(snagTitle) was sent back.",
+            heading: approved ? "Work approved" : "Changes needed",
+            blocks: blocks,
+            closing: "This notification was sent by Snaglist."
+        ))
     }
 
     // MARK: - Private Methods
 
     private static func sendEmail(
         to email: String,
-        subject: String,
-        html: String,
+        rendered: EmailLayout.Rendered,
         apiKey: String,
         client: Client
     ) async throws {
@@ -378,8 +321,9 @@ struct NotificationService {
         let request = ResendEmailRequest(
             from: fromEmail,
             to: [email],
-            subject: subject,
-            html: html
+            subject: rendered.subject,
+            html: rendered.html,
+            text: rendered.text
         )
 
         let response = try await client.post(URI(string: "\(resendBaseURL)/emails")) { req in
