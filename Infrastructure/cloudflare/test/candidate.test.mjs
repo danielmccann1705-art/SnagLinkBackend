@@ -95,7 +95,9 @@ test('candidate accepts only its pinned synthetic DB, origins and independent bu
 // it by hand on the Worker, and this fails until the generator produces it too.
 // Every name src/config.mjs mentions must land in exactly one of the four buckets
 // below, so a new one cannot pass unnoticed as "something else".
-const adapterSource=readFileSync(new URL('../src/config.mjs',import.meta.url),'utf8');
+// The backend Worker also reads its browser security headers mode (F15).
+const adapterSource=readFileSync(new URL('../src/config.mjs',import.meta.url),'utf8')+
+  readFileSync(new URL('../src/security-headers.mjs',import.meta.url),'utf8');
 const adapterReads=new Set([
   ...adapterSource.matchAll(/\benv\.([A-Z][A-Z0-9_]*)/g),
   // Names reached through env[key] appear only as string literals in the arrays the

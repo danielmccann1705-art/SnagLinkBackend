@@ -1,4 +1,5 @@
 import {backendRequest, privateResponse} from './proxy.mjs';
+import {portalSecurityResponse} from './security-headers.mjs';
 
 export const portalOrigin = 'https://staging-app.usesnaglist.com';
 export const productionPortalOrigin = 'https://app.usesnaglist.com';
@@ -18,6 +19,13 @@ export async function productionPortalResponse(request, env) {
 
 async function responseFor(request, env, expectedOrigin, enabled) {
   const url = new URL(request.url);
+  const api = url.pathname.startsWith('/api/v2/') || url.pathname === '/health';
+  // Browser security headers on every response (F15); API responses already carry
+  // the API Worker's policy and gain only the transport/sniffing controls here.
+  return portalSecurityResponse(await portalRoute(request, env, expectedOrigin, enabled, url), env, {api});
+}
+
+async function portalRoute(request, env, expectedOrigin, enabled, url) {
   if (!enabled || env.PORTAL_ORIGIN !== expectedOrigin ||
       !env.BACKEND?.fetch || !env.ASSETS?.fetch) {
     return privateResponse(new Response('Snaglist is awaiting configuration.', {status:503}));

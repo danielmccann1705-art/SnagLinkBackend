@@ -38,7 +38,10 @@
     "APPLE_WEB_ENABLED": "true",
     "APPLE_WEB_AUTH_ENVIRONMENT": "production",
     "APPLE_WEB_CLIENT_ID": "com.snaglist.app.web",
-    "GOOGLE_AUTH_ENVIRONMENT": "production"
+    "GOOGLE_AUTH_ENVIRONMENT": "production",
+    // Browser security headers (F15, src/security-headers.mjs). Enforced only after the
+    // same policy was observed in report-only and then enforced on staging.
+    "BROWSER_SECURITY_HEADERS": "enforce"
   },
   "triggers": {"crons": ["0 * * * *"]},
   "containers": [{

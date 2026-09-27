@@ -1,7 +1,13 @@
 import {productionContainerEnvironment, productionAPIOrigin, productionPortalOrigin} from './production-config.mjs';
 import {backendRequest, privateResponse} from './proxy.mjs';
+import {apiSecurityResponse} from './security-headers.mjs';
 
 export async function productionResponse(request, env) {
+  // Browser security headers on every response (F15).
+  return apiSecurityResponse(await productionRoute(request, env), env);
+}
+
+async function productionRoute(request, env) {
   try { productionContainerEnvironment(env); }
   catch { return privateResponse(new Response('Snaglist is awaiting configuration.', {status: 503})); }
   const url = new URL(request.url);

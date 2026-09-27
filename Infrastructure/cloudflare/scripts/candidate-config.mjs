@@ -142,6 +142,21 @@ export function candidateLogProbe(environment = process.env) {
   return setting;
 }
 
+export const securityHeadersVariable = 'SNAGLIST_BROWSER_SECURITY_HEADERS';
+
+// Browser security headers (F15, src/security-headers.mjs) for both staging Workers.
+// `enforce` unless a generation asks for `report-only`, which is the observation step
+// before enforcing: a regenerated configuration must never quietly stop enforcing.
+// Anything else is refused, like the logging switches above.
+export function candidateSecurityHeaders(environment = process.env) {
+  const setting = environment[securityHeadersVariable];
+  if (setting === undefined || setting === '') return 'enforce';
+  if (setting !== 'enforce' && setting !== 'report-only') {
+    throw new Error(`${securityHeadersVariable} accepts only 'enforce' or 'report-only'; it is enforce when unset`);
+  }
+  return setting;
+}
+
 // Produces disabled configurations only. No secrets, live Worker mutation,
 // registry push, database creation or resource inference happens here.
 //
@@ -159,6 +174,7 @@ export function candidateConfigs({imageDigest, assetsDirectory, environment = pr
   const logging = candidateLogging(environment);
   const logStream = candidateLogStream(environment);
   const logProbe = candidateLogProbe(environment);
+  const securityHeaders = candidateSecurityHeaders(environment);
   return {
     backend: {
       $schema:join(infrastructure,'node_modules/wrangler/config-schema.json'),
@@ -209,6 +225,8 @@ export function candidateConfigs({imageDigest, assetsDirectory, environment = pr
         // instead of leaving that to a default a reader has to know. The reason the
         // variable exists at all is recorded on `logStreamVariable` above.
         LOG_STREAM:logStream,
+        // Browser security headers mode, read by src/security-headers.mjs (F15).
+        BROWSER_SECURITY_HEADERS:securityHeaders,
         // Present only for a deliberate one-run diagnostic. Absent is the normal
         // state, and a configuration generated without it is one with the probe off.
         ...(logProbe ? {LOG_STREAM_PROBE:logProbe} : {})},
@@ -227,7 +245,7 @@ export function candidateConfigs({imageDigest, assetsDirectory, environment = pr
       name:'snaglist-portal-unified-staging', main:join(infrastructure,'src/portal.ts'),
       compatibility_date:'2026-09-09',workers_dev:false,preview_urls:false,observability:{enabled:false},
       routes:[{pattern:'staging-app.usesnaglist.com',custom_domain:true}],
-      vars:{STAGING_PORTAL_ENABLED:'false',PORTAL_ORIGIN:managerOrigin},
+      vars:{STAGING_PORTAL_ENABLED:'false',PORTAL_ORIGIN:managerOrigin,BROWSER_SECURITY_HEADERS:securityHeaders},
       services:[{binding:'BACKEND',service:'snaglist-api-unified-staging'}],
       assets:{directory:assetsDirectory,binding:'ASSETS',not_found_handling:'single-page-application',run_worker_first:true}
     }
@@ -246,6 +264,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const logStream = candidateLogStream();
   const logProbe = candidateLogProbe();
   console.log('Prepared disabled candidate configurations. No deployment or resource change performed.');
+  console.log(`Browser security headers: ${candidateSecurityHeaders()} (${securityHeadersVariable}${process.env[securityHeadersVariable] ? '=' + process.env[securityHeadersVariable] : ' unset'}).`);
   console.log(`Container log stream: ${logStream} (${logStreamVariable}${logStream === 'stdout' ? ' unset' : '=' + logStream}).`);
   console.log(logProbe
     ? `Log-stream probe: ON, marker ${logProbe}. Boot and every /health request emit one line per stream. Regenerate with ${logProbeVariable} unset once the run has been read.`
