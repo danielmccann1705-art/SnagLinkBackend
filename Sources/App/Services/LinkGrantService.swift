@@ -90,8 +90,16 @@ enum LinkGrantService {
         try await WorkspaceAccessService.lock(found.decode(column: "workspace_id", as: UUID.self), on: db)
         let row = try await self.row(found.decode(column: "id", as: UUID.self), projectID: found.decode(column: "project_id", as: UUID.self), on: db)
         guard try row.decode(column: "state", as: String.self) == "active", try row.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "This Contractor link expired or was revoked. Ask the project manager for a new link") }
-        // Revoked issuer membership/access also invalidates an old capability.
-        let (project, _) = try await ProjectAccessService.require(.share, projectID: row.decode(column: "project_id", as: UUID.self), actorID: row.decode(column: "creator_id", as: UUID.self), on: db)
+        // Revoked issuer membership/access also invalidates an old capability. This is the
+        // secure default (audit F09) and stays: a link never outlives its issuer's right to
+        // share. The contractor is told what happened in their terms rather than being shown
+        // the issuer's project-role refusal; every outcome is still a refusal.
+        let project: Project
+        do {
+            project = try await ProjectAccessService.require(.share, projectID: row.decode(column: "project_id", as: UUID.self), actorID: row.decode(column: "creator_id", as: UUID.self), on: db).0
+        } catch let error as AbortError where [.notFound, .forbidden, .unauthorized].contains(error.status) {
+            throw Abort(.gone, reason: "This Contractor link is no longer active because the person who issued it can no longer share this project. Ask the project manager for a new link", identifier: "contractor_link_issuer_inactive")
+        }
         try PlatformMutationService.requireManaged(project)
         if let contractorID = try row.decode(column: "contractor_id", as: UUID?.self) {
             guard let contractor = try await Contractor.find(contractorID, on: db), !contractor.isArchived else { throw Abort(.gone, reason: "This contractor assignment is no longer active") }

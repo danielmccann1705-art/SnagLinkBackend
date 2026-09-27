@@ -342,6 +342,8 @@ final class ContractorGrantTests: XCTestCase {
         let sql = try VerifiedIdentityService.sql(app.db)
         try await sql.raw("UPDATE workspace_memberships SET state = 'removed' WHERE workspace_id = \(bind: project.workspaceId) AND user_id = \(bind: owner.requireID())").run()
         let unavailable = try await call(.GET, "api/v2/contractor/\(token)", nil); XCTAssertNotEqual(unavailable.status, .ok)
+        // F09: still refused, and explained to the contractor as an inactive link, not as the issuer's role error.
+        XCTAssertEqual(unavailable.status, .gone); XCTAssertTrue(unavailable.body.string.contains("contractor_link_issuer_inactive"))
         let photo = try await call(.GET, "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media/\(nextAsset)/content", nil); XCTAssertNotEqual(photo.status, .ok)
         let grant = try await sql.raw("SELECT state FROM link_grants WHERE id = \(bind: activation.grant.id)").first()!.decode(column: "state", as: String.self); XCTAssertEqual(grant, "active")
     }
