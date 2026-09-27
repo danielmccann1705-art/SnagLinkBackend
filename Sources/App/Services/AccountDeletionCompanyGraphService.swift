@@ -237,6 +237,7 @@ extension AccountDeletionGraphService {
             "DELETE FROM drawing_assets WHERE project_id IN (SELECT id FROM account_deletion_projects)",
             "DELETE FROM media_assets WHERE project_id IN (SELECT id FROM account_deletion_projects)",
             "DELETE FROM assignment_history WHERE project_id IN (SELECT id FROM account_deletion_projects)",
+            "DELETE FROM issued_reports WHERE project_id IN (SELECT id FROM account_deletion_projects)",
             "DELETE FROM project_comments WHERE project_id IN (SELECT id FROM account_deletion_projects)",
             "DELETE FROM snag_send_backs WHERE snag_id IN (SELECT id FROM snags WHERE project_id IN (SELECT id FROM account_deletion_projects))",
             "DELETE FROM snag_deletions WHERE project_id IN (SELECT id FROM account_deletion_projects)",

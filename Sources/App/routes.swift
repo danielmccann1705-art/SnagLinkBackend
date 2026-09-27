@@ -183,6 +183,7 @@ func routes(_ app: Application) throws {
     try app.register(collection: ImportedProjectController())
     try app.register(collection: PlatformProjectController())
     try app.register(collection: PlatformSnagController())
+    try app.register(collection: IssuedReportController())
     try app.register(collection: PrivateMediaController())
     try app.register(collection: CanonicalWorkflowController())
     try app.register(collection: LinkGrantController())

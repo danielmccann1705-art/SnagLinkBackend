@@ -156,6 +156,7 @@ public func configure(_ app: Application,
         app.migrations.add(BindMediaAssetKeysAtUpload())
         app.migrations.add(AddRevenueCatCustomerDeletion())
         app.migrations.add(CreateAppSessionRevocations())
+        app.migrations.add(CreateIssuedReports())
 
         try await app.autoMigrate()
     } else {

@@ -3142,7 +3142,7 @@
       "get": {
         "operationId": "listSnags",
         "summary": "Read a bounded filtered register page",
-        "description": "Current authorised managed-project view, 50 rows/page. Case-insensitive literal substring search covers reference, title, description and location. Filters apply on the server. Due filters use the workspace calendar: overdue excludes closed; next7 includes today and ends before day 7. Sort ties use display number and UUID; missing dates sort last in either direction. Rows, matching total and unfiltered project summary share the access transaction. This is live offset pagination, not an immutable sync snapshot; concurrent edits can move rows between pages. Empty results never imply deletion. Contractor labels describe only contractors used on this page, including archived directory entries.",
+        "description": "Current authorised managed-project view, 50 rows/page. Case-insensitive literal substring search covers reference, title, description and location. Filters apply on the server. Due filters use the workspace calendar: overdue means contractor-owed work past due (open, in_progress, changes_requested; never awaiting_review, closed or unreconciled legacy states); next7 includes today and ends before day 7. Sort ties use display number and UUID; missing dates sort last in either direction. Rows, matching total and unfiltered project summary share the access transaction. This is live offset pagination, not an immutable sync snapshot; concurrent edits can move rows between pages. Empty results never imply deletion. Contractor labels describe only contractors used on this page, including archived directory entries.",
         "security": [
           {
             "browserSession": []
@@ -13295,6 +13295,678 @@
           }
         ]
       }
+    },
+    "/api/v2/projects/{projectId}/reports/preview": {
+      "post": {
+        "operationId": "previewReport",
+        "summary": "Build a report for a scope without storing it",
+        "description": "Needs project read. Same filters and overdue rule as the register; at most 2,000 snags (422 report_scope_too_large). Nothing is stored.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportPreviewCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Built, not stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedReportDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/reports": {
+      "get": {
+        "operationId": "listReports",
+        "summary": "Issued report history, newest first",
+        "description": "Needs project read. 50 per page.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "History page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedReportPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "issueReport",
+        "summary": "Issue an immutable project report",
+        "description": "Needs the review action (personal owner, company owner/admin, project manager). Builds the snapshot from current authorised state, stores it with its SHA-256, author and time, and never changes it. Idempotent by mutation.operationId; a reused id with a different body is 409 operation_reused. No name of a person is stored in the snapshot; people are resolved when read.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReportIssueCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/reports/{reportId}": {
+      "get": {
+        "operationId": "getReport",
+        "summary": "One issued report with its stored snapshot",
+        "description": "Needs project read. The stored bytes are re-hashed on every read; a mismatch is 500 report_integrity_failed rather than served.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "reportId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Issued report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedReportDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/projects/{projectId}/reports/{reportId}/download": {
+      "get": {
+        "operationId": "downloadReport",
+        "summary": "Download an issued report as HTML",
+        "description": "Needs project read. Names resolved at download time.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "reportId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Print-ready HTML of the stored snapshot (attachment). X-Snaglist-Report-Sha256 carries snapshotSha256; its CSP loads nothing.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -15357,12 +16029,30 @@
           },
           "overdue": {
             "type": "integer",
-            "minimum": 0
+            "minimum": 0,
+            "description": "Trade overdue: contractor-owed canonical work (open, in_progress, changes_requested) with dueOn before today in the workspace calendar. Excludes awaiting_review, closed and unreconciled legacy states (F06)."
           },
           "legacyUnverified": {
             "type": "integer",
             "minimum": 0,
             "description": "Imported snags whose historical status is unverified. Not part of awaitingReview."
+          },
+          "reviewPastDue": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Manager review ageing: canonical awaiting_review snags whose dueOn passed while they wait for the manager decision. Never part of overdue."
+          },
+          "oldestAwaitingReviewSince": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Submission time of the oldest pending canonical attempt awaiting review; absent when none."
           }
         },
         "required": [
@@ -19669,6 +20359,514 @@
           "folders",
           "tags"
         ]
+      },
+      "ReportScope": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "q": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "in_progress",
+              "awaiting_review",
+              "changes_requested",
+              "closed"
+            ]
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "contractorId": {
+            "type": "string",
+            "description": "Workspace contractor UUID or unassigned."
+          },
+          "location": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "due": {
+            "type": "string",
+            "enum": [
+              "overdue",
+              "today",
+              "next7",
+              "none"
+            ]
+          }
+        }
+      },
+      "ReportSummary": {
+        "type": "object",
+        "required": [
+          "total",
+          "open",
+          "overdue",
+          "awaitingReview",
+          "closed",
+          "legacyUnverified"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "open": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "overdue": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "awaitingReview": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "closed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "legacyUnverified": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "description": "open = contractor-owed canonical work; overdue is a subset of open; awaitingReview = canonical submissions waiting for the manager; closed = canonical closure; legacyUnverified = imported states needing reconciliation, counted in none of the other four."
+      },
+      "ReportPerson": {
+        "type": "object",
+        "required": [
+          "userId",
+          "former"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "former": {
+            "type": "boolean"
+          }
+        },
+        "description": "Resolved when read; a deleted member reads Former member."
+      },
+      "ReportPreviewCommand": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ReportScope"
+          }
+        }
+      },
+      "ReportIssueCommand": {
+        "type": "object",
+        "required": [
+          "mutation"
+        ],
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ReportScope"
+          }
+        }
+      },
+      "IssuedReport": {
+        "type": "object",
+        "required": [
+          "id",
+          "projectId",
+          "workspaceId",
+          "number",
+          "reference",
+          "title",
+          "issuedAt",
+          "issuedBy",
+          "scope",
+          "summary",
+          "snagCount",
+          "snapshotSha256",
+          "formatVersion"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reference": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "issuedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "issuedBy": {
+            "$ref": "#/components/schemas/ReportPerson"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ReportScope"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ReportSummary"
+          },
+          "snagCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2000
+          },
+          "snapshotSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "formatVersion": {
+            "const": 1
+          }
+        }
+      },
+      "ReportSnapshot": {
+        "type": "object",
+        "required": [
+          "formatVersion",
+          "title",
+          "project",
+          "generatedAt",
+          "asOfDate",
+          "scope",
+          "summary",
+          "items"
+        ],
+        "properties": {
+          "formatVersion": {
+            "const": 1
+          },
+          "title": {
+            "type": "string"
+          },
+          "project": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "timezone"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "reference": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "address": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "timezone": {
+                "type": "string"
+              }
+            }
+          },
+          "generatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "asOfDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ReportScope"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/ReportSummary"
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 2000,
+            "items": {
+              "type": "object",
+              "required": [
+                "snagId",
+                "reference",
+                "title",
+                "priority",
+                "status",
+                "statusLabel",
+                "legacyUnverified",
+                "overdue",
+                "evidence"
+              ],
+              "properties": {
+                "snagId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "reference": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "description": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "location": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "priority": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "statusLabel": {
+                  "type": "string"
+                },
+                "legacyUnverified": {
+                  "type": "boolean"
+                },
+                "dueOn": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "overdue": {
+                  "type": "boolean"
+                },
+                "closedAt": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "contractor": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "companyName"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "companyName": {
+                          "type": "string"
+                        },
+                        "contactName": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "acceptance": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "kind",
+                        "decidedAt",
+                        "reviewerUserId"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "accept",
+                            "internal_fix",
+                            "waiver"
+                          ]
+                        },
+                        "decidedAt": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "reviewerUserId": {
+                          "type": "string",
+                          "format": "uuid"
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "evidence": {
+                  "type": "object",
+                  "required": [
+                    "captureAssetIds",
+                    "completionAssetIds"
+                  ],
+                  "properties": {
+                    "captureAssetIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "uuid"
+                      }
+                    },
+                    "completionAssetIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "format": "uuid"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "IssuedReportDetail": {
+        "type": "object",
+        "required": [
+          "snapshot",
+          "people"
+        ],
+        "properties": {
+          "report": {
+            "$ref": "#/components/schemas/IssuedReport"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/ReportSnapshot"
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReportPerson"
+            }
+          }
+        },
+        "description": "report is absent for a preview."
+      },
+      "IssuedReportPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "hasMore"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/IssuedReport"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        }
       }
     }
   }
