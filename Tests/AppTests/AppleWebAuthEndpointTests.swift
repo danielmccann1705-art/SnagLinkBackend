@@ -180,6 +180,27 @@ final class AppleWebAuthEndpointTests: XCTestCase {
         let stored = try await AppleCredentialService.load(userID: user.requireID(), clientID: clientID, app: app, on: app.db)
         XCTAssertNil(stored)
     }
+    func testPrivateRelayAddressHeldElsewhereIsRefusedAndAFreshOneIsAdopted() async throws {
+        // F21: web and native share one rule, and a Hide My Email relay is an address like any other.
+        let held = "r" + UUID().uuidString.prefix(10).lowercased() + "@privaterelay.appleid.com"
+        _ = try await app.db.transaction { db in try await VerifiedIdentityService.resolveEmail(held, name: "Link user", on: db) }
+        let refused = try await start(), blocked = "relay-held-" + UUID().uuidString
+        fixture.configure(token: try token(refused, subject: blocked, email: held))
+        let result = try await callback(refused)
+        assertPrivateFailure(result, status: .conflict)
+        XCTAssertTrue(result.body.string.contains("identity_proof_required"))
+        let blockedRow = try await VerifiedIdentityService.sql(app.db).raw("SELECT id FROM user_identities WHERE provider='apple' AND subject=\(bind: blocked)").first()
+        XCTAssertNil(blockedRow)
+        let fresh = "r" + UUID().uuidString.prefix(10).lowercased() + "@privaterelay.appleid.com"
+        let started = try await start(), subject = "relay-fresh-" + UUID().uuidString
+        fixture.configure(token: try token(started, subject: subject, email: fresh))
+        let created = try await callback(started)
+        XCTAssertEqual(created.status, .seeOther, created.body.string)
+        let row = try await VerifiedIdentityService.sql(app.db).raw("SELECT user_id FROM user_identities WHERE provider='apple' AND subject=\(bind: subject)").first()
+        let userID = try XCTUnwrap(try row?.decode(column: "user_id", as: UUID.self))
+        let adopted = try await VerifiedIdentityService.verifiedEmails(for: userID, on: app.db)
+        XCTAssertEqual(adopted, [fresh])
+    }
     func testOnlyProviderVerifiedAddressBecomesInvitationAuthority() async throws {
         for verified in [true, false] {
             let subject = "email-proof-" + UUID().uuidString

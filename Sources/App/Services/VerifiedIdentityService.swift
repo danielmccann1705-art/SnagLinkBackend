@@ -48,11 +48,35 @@ struct VerifiedIdentityService {
         if let existing = try await User.query(on: db).filter(\.$appleUserId == subject).first() {
             user = try await activeUser(existing.requireID(), on: db)
         } else {
+            try await refuseAddressHeldElsewhere(email, on: db)
             user = User(appleUserId: subject, email: email, name: name)
             try await user.save(on: db)
         }
         try await addIdentity(provider: "apple", subject: subject, userID: user.requireID(), on: db)
         return user
+    }
+
+    /// First sign-in for an Apple subject (audit F21, D1 §7 "F2"): an address that
+    /// already belongs to another account — a verified email identity or a legacy
+    /// profile email — is refused before anything is created, so native Apple follows
+    /// the same rule as email links, Google and web Apple. Nothing is merged: the
+    /// person signs in the way they first did. A Hide My Email relay address is an
+    /// address like any other. Deleted accounts hold no email, so they never block.
+    /// A known subject never reaches this check, and a sign-in without an email
+    /// creates the account as before.
+    static func refuseAddressHeldElsewhere(_ value: String?, on db: Database) async throws {
+        guard let value else { return }
+        let email = EmailValidator.normalize(value)
+        guard !email.isEmpty else { return }
+        try await lock("identity-email:" + email, on: db)
+        let held = try await sql(db).raw("""
+            SELECT id FROM users WHERE lower(btrim(email)) = \(bind: email)
+            UNION SELECT user_id AS id FROM user_identities WHERE provider = 'email' AND subject = \(bind: email)
+            LIMIT 1
+            """).first()
+        guard held == nil else {
+            throw Abort(.conflict, reason: "This email already belongs to a Snaglist account. Sign in the way you first did — with Google, or with a sign-in link to that address", identifier: "identity_proof_required")
+        }
     }
 
     /// Requires both authenticated account control and a challenge sent to the
