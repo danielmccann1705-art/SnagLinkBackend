@@ -1,61 +1,32 @@
-name: Deploy to Hetzner
+name: Deploy to Hetzner (retired)
 
+# RETIRED 27 September 2026 (audit F23). Kept for its history, not run.
+#
+# The backend no longer runs on the Hetzner VPS. Staging and production run on
+# Cloudflare Workers + Containers from `Infrastructure/cloudflare`, deployed by
+# pinned image digest through the reviewed promotion jobs (see
+# `Infrastructure/cloudflare/README.md` and `scripts/verify.sh`).
+#
+# Before this change the workflow ran automatically after every successful
+# "Build and Push Docker Image" run on `main` and replaced the app on the VPS
+# over SSH. Its last runs were in March 2026 (last success 22 March, last
+# attempt 30 March, skipped). `feature/unified-platform` has not been merged,
+# so nothing has triggered it since; merging it would have. The automatic
+# trigger is therefore removed here, in the branch that will be merged, rather
+# than left to be noticed afterwards.
+#
+# It is not deleted: the SSH secrets it names (HETZNER_HOST, HETZNER_SSH_KEY)
+# and the VPS itself should be decommissioned deliberately first. Delete this
+# file once the owner confirms the VPS and those secrets are gone.
 on:
-  workflow_run:
-    workflows: ["Build and Push Docker Image"]
-    types: [completed]
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  deploy:
-    name: Deploy to VPS
+  retired:
+    name: Retired Hetzner deploy (does nothing)
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    concurrency: deploy-group
-
     steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.HETZNER_HOST }}
-          username: snaglist
-          key: ${{ secrets.HETZNER_SSH_KEY }}
-          script_stop: false
-          script: |
-            set -e
-            cd /home/snaglist/app
-
-            # Save current image digest for rollback
-            PREV_IMAGE=$(docker compose -f docker-compose.prod.yml images app -q 2>/dev/null || echo "")
-
-            # Pull latest image and restart app service
-            docker compose -f docker-compose.prod.yml pull app
-            docker compose -f docker-compose.prod.yml up -d app
-
-            # Health check gate: 3 attempts, 5s apart
-            HEALTHY=false
-            for i in 1 2 3; do
-              sleep 5
-              if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-                echo "Health check passed on attempt $i"
-                HEALTHY=true
-                break
-              fi
-              echo "Health check attempt $i failed, retrying..."
-            done
-
-            if [ "$HEALTHY" = true ]; then
-              # Clean up old images
-              docker image prune -f
-              echo "Deploy successful"
-              exit 0
-            fi
-
-            # Health check failed — rollback
-            echo "HEALTH CHECK FAILED — rolling back"
-            if [ -n "$PREV_IMAGE" ]; then
-              docker compose -f docker-compose.prod.yml down app
-              docker tag "$PREV_IMAGE" ghcr.io/danielmccann1705-art/snaglinkbackend:rollback
-              IMAGE_TAG=rollback docker compose -f docker-compose.prod.yml up -d app
-            fi
-            exit 1
+      - name: Explain
+        run: |
+          echo "This workflow is retired. The backend deploys to Cloudflare from Infrastructure/cloudflare."
+          echo "No SSH connection is made and nothing is deployed."
