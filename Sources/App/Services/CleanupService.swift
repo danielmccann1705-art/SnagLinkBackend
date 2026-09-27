@@ -3,8 +3,8 @@ import Fluent
 import FluentSQL
 
 /// Periodic removal of expired rate limits, old audit logs, spent magic-link tokens,
-/// expired preview links, the sign-out rows of expired app sessions and spent
-/// sign-in challenges.
+/// expired preview links, the sign-out rows of expired app sessions, spent
+/// sign-in challenges and the M1 retention sweeps (`RetentionMaintenanceService`).
 ///
 /// The work here was always correct. What was missing was anything that ran it: the
 /// lifecycle loop below waits before its first pass, inside a container that sleeps
@@ -35,6 +35,9 @@ struct CleanupService {
         /// Sign-in challenges removed a day after they expired
         /// (`removeSpentSignInChallenges`). Optional for the same reason.
         var signInChallenges: SignInChallengeCounts? = nil
+        /// Retention maintenance packet M1 (`RetentionMaintenanceService`). Optional
+        /// for the same reason; older images ignore it.
+        var retention: RetentionMaintenanceService.Counts? = nil
     }
 
     /// Counts only, by table.
@@ -178,6 +181,10 @@ struct CleanupService {
         // Spent sign-in challenges, a day after they expired. After the escrow worker
         // above, so an Apple credential it has just finished with is already terminal.
         removed.signInChallenges = try await removeSpentSignInChallenges(on: db)
+
+        // M1 retention sweeps. Each sweep is isolated: a failure is recorded by name in
+        // `retention.failed` and never stops the deletion health read below.
+        removed.retention = try await RetentionMaintenanceService.run(on: db, logger: app.logger)
 
         // Last, after every piece of work above, so reading health can never stop
         // that work. A pass that cannot read it records `failed`, which is itself

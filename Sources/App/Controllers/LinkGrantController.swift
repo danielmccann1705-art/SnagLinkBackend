@@ -49,8 +49,14 @@ struct LinkGrantController: RouteCollection {
         return try await req.db.transaction { db in
             try await PlatformMutationService.lock(actorID: actor, mutation: body.mutation, on: db)
             let (project, _) = try await ProjectAccessService.require(.share, projectID: projectID, actorID: actor, on: db)
-            if let saved = try await VerifiedIdentityService.sql(db).raw("SELECT request_hash, result_json FROM mutation_receipts WHERE actor_id = \(bind: actor) AND operation_id = \(bind: body.mutation.operationId)").first() {
+            if let saved = try await VerifiedIdentityService.sql(db).raw("SELECT request_hash, result_json, account_deletion_redacted_at, result_purged_at FROM mutation_receipts WHERE actor_id = \(bind: actor) AND operation_id = \(bind: body.mutation.operationId)").first() {
                 guard hashes.contains(try saved.decode(column: "request_hash", as: String.self)) else { throw Abort(.conflict, reason: "Keep the original request when retrying this link", identifier: "operation_reused") }
+                // Same rule as `PlatformMutationService.replay`: a removed body is still a
+                // recognised, applied operation, answered as such rather than decoded.
+                guard try saved.decode(column: "account_deletion_redacted_at", as: Date?.self) == nil,
+                      try saved.decode(column: "result_purged_at", as: Date?.self) == nil else {
+                    throw Abort(.conflict, reason: "This action was already applied. Refresh the current state before continuing", identifier: "already_applied_refresh_required")
+                }
                 return try PlatformMutationService.decode(LinkGrantResponse.self, saved.decode(column: "result_json", as: String.self))
             }
             let result = try await LinkGrantService.prepare(body, pinHash: pinHash, project: project, actorID: actor, on: db)

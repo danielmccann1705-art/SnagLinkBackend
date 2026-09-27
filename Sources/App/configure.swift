@@ -157,6 +157,7 @@ public func configure(_ app: Application,
         app.migrations.add(AddRevenueCatCustomerDeletion())
         app.migrations.add(CreateAppSessionRevocations())
         app.migrations.add(CreateIssuedReports())
+        app.migrations.add(AddRetentionMaintenanceM1())
 
         try await app.autoMigrate()
     } else {
