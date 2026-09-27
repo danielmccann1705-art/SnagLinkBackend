@@ -10775,6 +10775,152 @@
         }
       }
     },
+    "/api/v2/workspaces/{workspaceId}/administration/members/{userId}/links": {
+      "get": {
+        "operationId": "companyMemberLinks",
+        "summary": "List the active Contractor links a company member issued",
+        "description": "Current company Owner/Admin only. Unexpired active Contractor links whose issuer is this member, across the company, 50 per page, searched by literal project name, ordered by project then expiry. Each such link stops working (410 link_issuer_inactive to the contractor) as soon as the member can no longer share its project: removal, demotion to Member, project access removal or account deletion. The member may be active or removed, so links stay listable after removal for reissue. Metadata only: no token, PIN, contractor URL or snag content (F09).",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000,
+              "default": 1
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Literal case-insensitive substring of the project name."
+          },
+          {
+            "name": "userId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanyMemberLinkPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/auth/google/configuration": {
       "get": {
         "operationId": "googleConfiguration",
@@ -17007,6 +17153,11 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          "creatorId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Issuer whose live right to share the project the link depends on (F09). The link stops working as soon as this person can no longer share the project. Absent only in replays of receipts recorded before the field existed."
           }
         },
         "required": [
@@ -20867,6 +21018,114 @@
             "type": "boolean"
           }
         }
+      },
+      "CompanyMemberLink": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "projectName": {
+            "type": "string"
+          },
+          "projectArchived": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "completion",
+              "read_only",
+              "preview"
+            ]
+          },
+          "requiresPIN": {
+            "type": "boolean"
+          },
+          "contractorId": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contractorName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "activatedAt": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "projectName",
+          "projectArchived",
+          "mode",
+          "requiresPIN",
+          "expiresAt"
+        ]
+      },
+      "CompanyMemberLinkPage": {
+        "type": "object",
+        "properties": {
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceResponse"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompanyMemberLink"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "member": {
+            "$ref": "#/components/schemas/WorkspaceMember"
+          }
+        },
+        "required": [
+          "workspace",
+          "items",
+          "page",
+          "hasMore",
+          "member"
+        ],
+        "additionalProperties": false
       }
     }
   }

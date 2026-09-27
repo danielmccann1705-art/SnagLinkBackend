@@ -17,6 +17,9 @@ struct LinkGrantResponse: Content {
     let state: String; let revision: Int64; let requiresPIN: Bool; let createdAt: Date
     let activatedAt: Date?; let expiresAt: Date; let revokedAt: Date?
     let selectedSnagIds: [UUID]; let activeSnagIds: [UUID]; let requiredAssetIds: [UUID]
+    /// The issuer whose live right to share the project the link depends on (audit F09).
+    /// Optional so receipts recorded before this field was added still replay.
+    let creatorId: UUID?
     init(_ row: SQLRow, selected: [UUID], active: [UUID], assets: [UUID]) throws {
         id = try row.decode(column: "id", as: UUID.self); projectId = try row.decode(column: "project_id", as: UUID.self)
         contractorId = try row.decode(column: "contractor_id", as: UUID?.self); mode = try row.decode(column: "mode", as: String.self)
@@ -25,6 +28,7 @@ struct LinkGrantResponse: Content {
         createdAt = try row.decode(column: "created_at", as: Date.self); activatedAt = try row.decode(column: "activated_at", as: Date?.self)
         expiresAt = try row.decode(column: "expires_at", as: Date.self); revokedAt = try row.decode(column: "revoked_at", as: Date?.self)
         selectedSnagIds = selected; activeSnagIds = active; requiredAssetIds = assets
+        creatorId = try row.decode(column: "creator_id", as: UUID?.self)
     }
 }
 struct LinkActivationResponse: Content { let grant: LinkGrantResponse; let contractorPath: String? }

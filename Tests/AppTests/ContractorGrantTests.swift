@@ -343,9 +343,42 @@ final class ContractorGrantTests: XCTestCase {
         try await sql.raw("UPDATE workspace_memberships SET state = 'removed' WHERE workspace_id = \(bind: project.workspaceId) AND user_id = \(bind: owner.requireID())").run()
         let unavailable = try await call(.GET, "api/v2/contractor/\(token)", nil); XCTAssertNotEqual(unavailable.status, .ok)
         // F09: still refused, and explained to the contractor as an inactive link, not as the issuer's role error.
-        XCTAssertEqual(unavailable.status, .gone); XCTAssertTrue(unavailable.body.string.contains("contractor_link_issuer_inactive"))
+        XCTAssertEqual(unavailable.status, .gone); XCTAssertTrue(unavailable.body.string.contains("link_issuer_inactive"))
         let photo = try await call(.GET, "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media/\(nextAsset)/content", nil); XCTAssertNotEqual(photo.status, .ok)
         let grant = try await sql.raw("SELECT state FROM link_grants WHERE id = \(bind: activation.grant.id)").first()!.decode(column: "state", as: String.self); XCTAssertEqual(grant, "active")
     }
 
+    func testAdministratorListsLinksAMemberIssuedAndRemovalStillStopsThem() async throws {
+        // F09: an Owner/Admin sees the active links a manager issued before removing them; the
+        // secure default is unchanged (removal stops them) and they stay listed for reissue.
+        let owner = try await user(), project = try await project(owner), contractor = try await contractor(owner, project)
+        let manager = try await user(); try await join(manager, owner: owner, project: project, role: "manager")
+        let snag = try await assign(owner, project, logged(owner, project), contractor)
+        let grant = try await prepared(manager, project, snags: [snag.snag.id], contractor: contractor)
+        XCTAssertEqual(grant.creatorId, try manager.requireID())
+        let (activation, token) = try await activate(manager, project, grant)
+        XCTAssertEqual(activation.grant.creatorId, try manager.requireID())
+        let base = "api/v2/workspaces/\(project.workspaceId)/administration/members/\(try manager.requireID())/links"
+        let listed = try await call(.GET, base, owner); XCTAssertEqual(listed.status, .ok, listed.body.string)
+        let page = try listed.content.decode(CompanyAdministrationController.MemberLinkPage.self)
+        XCTAssertEqual(page.items.map(\.id), [grant.id]); XCTAssertEqual(page.items.first?.projectName, "Plot 12")
+        XCTAssertEqual(page.items.first?.contractorName, "Alder Joinery"); XCTAssertEqual(page.items.first?.mode, "completion")
+        XCTAssertEqual(page.items.first?.projectArchived, false); XCTAssertEqual(page.member.state, "active")
+        XCTAssertFalse(listed.body.string.contains(token)); XCTAssertFalse(listed.body.string.contains("c2_"))
+        let own = try await call(.GET, "api/v2/workspaces/\(project.workspaceId)/administration/members/\(try owner.requireID())/links", owner)
+        XCTAssertEqual(own.status, .ok); XCTAssertEqual(try own.content.decode(CompanyAdministrationController.MemberLinkPage.self).items.count, 0)
+        let notAdmin = try await call(.GET, base, manager); XCTAssertNotEqual(notAdmin.status, .ok)
+        let outsider = try await user(), stranger = try await call(.GET, base, outsider); XCTAssertNotEqual(stranger.status, .ok)
+        let sql = try VerifiedIdentityService.sql(app.db)
+        try await sql.raw("UPDATE workspace_memberships SET state = 'removed' WHERE workspace_id = \(bind: project.workspaceId) AND user_id = \(bind: manager.requireID())").run()
+        let refused = try await call(.GET, "api/v2/contractor/\(token)", nil)
+        XCTAssertEqual(refused.status, .gone); XCTAssertTrue(refused.body.string.contains("link_issuer_inactive"))
+        let after = try await call(.GET, base, owner); XCTAssertEqual(after.status, .ok, after.body.string)
+        let afterPage = try after.content.decode(CompanyAdministrationController.MemberLinkPage.self)
+        XCTAssertEqual(afterPage.member.state, "removed"); XCTAssertEqual(afterPage.items.map(\.id), [grant.id])
+        let revoked = try await call(.POST, "api/v2/projects/\(project.project.id)/links/\(grant.id)/revoke", owner, body: ["mutation": meta(), "expectedRevision": activation.grant.revision])
+        XCTAssertEqual(revoked.status, .ok, revoked.body.string)
+        let cleared = try await call(.GET, base, owner)
+        XCTAssertEqual(try cleared.content.decode(CompanyAdministrationController.MemberLinkPage.self).items.count, 0)
+    }
 }

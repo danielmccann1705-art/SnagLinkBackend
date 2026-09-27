@@ -55,6 +55,27 @@ struct CompanyAdministrationController: RouteCollection {
         let page: Int
         let hasMore: Bool
     }
+    /// An active Contractor link a member issued. Metadata only: never the token, PIN,
+    /// contractor URL or snag content.
+    struct MemberLink: Content {
+        let id: UUID
+        let projectId: UUID
+        let projectName: String
+        let projectArchived: Bool
+        let mode: String
+        let requiresPIN: Bool
+        let contractorId: UUID?
+        let contractorName: String?
+        let activatedAt: Date?
+        let expiresAt: Date
+    }
+    struct MemberLinkPage: Content {
+        let workspace: WorkspaceResponse
+        let member: WorkspaceMemberResponse
+        let items: [MemberLink]
+        let page: Int
+        let hasMore: Bool
+    }
     struct Query {
         let page: Int
         let search: String
@@ -74,6 +95,7 @@ struct CompanyAdministrationController: RouteCollection {
         company.get("invitations", use: invitations)
         company.get("administration", "activity", use: activity)
         company.get("administration", "members", ":userId", "projects", use: memberProjects)
+        company.get("administration", "members", ":userId", "links", use: memberLinks)
     }
     private func context(_ req: Request, on db: Database) async throws -> WorkspaceResponse {
         guard let raw = req.parameters.get("workspaceId"), let id = UUID(uuidString: raw) else { throw Abort(.badRequest) }
@@ -154,6 +176,42 @@ struct CompanyAdministrationController: RouteCollection {
                 let id = try row.decode(column: "id", as: UUID.self)
                 let state = try row.decode(column: "state", as: String?.self) ?? "absent"
                 return try MemberProject(id: id, name: row.decode(column: "name", as: String.self), access: .init(projectId: id, userId: target, role: state == "active" ? row.decode(column: "role", as: String?.self) : nil, state: state, revision: row.decode(column: "revision", as: Int64.self)))
+            }
+            return .init(workspace: workspace, member: member, items: items, page: query.page, hasMore: rows.count > 50)
+        }
+    }
+    /// Audit F09: the unexpired active Contractor links this member issued in the company.
+    /// Every one stops working as soon as the member can no longer share its project
+    /// (removal, demotion to Member, project access removal, account deletion); the link
+    /// guard itself is unchanged. The removal dialog lists these first, and they stay
+    /// listable after removal so an administrator can reissue them. Owner/Admin only.
+    @Sendable func memberLinks(req: Request) async throws -> MemberLinkPage {
+        let query = try Query(req, states: ["all"])
+        guard let raw = req.parameters.get("userId"), let target = UUID(uuidString: raw) else { throw Abort(.badRequest) }
+        return try await req.db.transaction { db in
+            let workspace = try await context(req, on: db)
+            let sql = try VerifiedIdentityService.sql(db)
+            guard let row = try await sql.raw("SELECT u.name, m.role, m.state, m.revision FROM workspace_memberships m JOIN users u ON u.id = m.user_id WHERE m.workspace_id = \(bind: workspace.id) AND m.user_id = \(bind: target)").first() else {
+                throw Abort(.notFound, reason: "Company member unavailable")
+            }
+            let member = try WorkspaceMemberResponse(userId: target, name: row.decode(column: "name", as: String?.self), role: row.decode(column: "role", as: String.self), state: row.decode(column: "state", as: String.self), revision: row.decode(column: "revision", as: Int64.self))
+            let rows = try await sql.raw("""
+                SELECT g.id, g.project_id, p.name AS project_name, (p.archived_at IS NOT NULL) AS project_archived,
+                    g.mode, (g.pin_hash IS NOT NULL) AS requires_pin, g.contractor_id, c.company_name AS contractor_name,
+                    g.activated_at, g.expires_at
+                FROM link_grants g JOIN projects p ON p.id = g.project_id AND p.workspace_id = g.workspace_id
+                    LEFT JOIN contractors c ON c.id = g.contractor_id
+                WHERE g.workspace_id = \(bind: workspace.id) AND g.creator_id = \(bind: target)
+                    AND g.state = 'active' AND g.expires_at > \(bind: Date())
+                    AND position(lower(\(bind: query.search)) in lower(p.name)) > 0
+                ORDER BY lower(p.name), p.id, g.expires_at, g.id LIMIT 51 OFFSET \(bind: (query.page - 1) * 50)
+                """).all()
+            let items = try rows.prefix(50).map { row in
+                try MemberLink(id: row.decode(column: "id", as: UUID.self), projectId: row.decode(column: "project_id", as: UUID.self),
+                               projectName: row.decode(column: "project_name", as: String.self), projectArchived: row.decode(column: "project_archived", as: Bool.self),
+                               mode: row.decode(column: "mode", as: String.self), requiresPIN: row.decode(column: "requires_pin", as: Bool.self),
+                               contractorId: row.decode(column: "contractor_id", as: UUID?.self), contractorName: row.decode(column: "contractor_name", as: String?.self),
+                               activatedAt: row.decode(column: "activated_at", as: Date?.self), expiresAt: row.decode(column: "expires_at", as: Date.self))
             }
             return .init(workspace: workspace, member: member, items: items, page: query.page, hasMore: rows.count > 50)
         }

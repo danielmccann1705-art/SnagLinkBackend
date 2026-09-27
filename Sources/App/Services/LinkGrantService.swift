@@ -98,7 +98,7 @@ enum LinkGrantService {
         do {
             project = try await ProjectAccessService.require(.share, projectID: row.decode(column: "project_id", as: UUID.self), actorID: row.decode(column: "creator_id", as: UUID.self), on: db).0
         } catch let error as AbortError where [.notFound, .forbidden, .unauthorized].contains(error.status) {
-            throw Abort(.gone, reason: "This Contractor link is no longer active because the person who issued it can no longer share this project. Ask the project manager for a new link", identifier: "contractor_link_issuer_inactive")
+            throw Abort(.gone, reason: "This Contractor link is no longer active. Ask the project manager for a new link.", identifier: "link_issuer_inactive")
         }
         try PlatformMutationService.requireManaged(project)
         if let contractorID = try row.decode(column: "contractor_id", as: UUID?.self) {
