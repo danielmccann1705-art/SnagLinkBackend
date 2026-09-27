@@ -40,6 +40,14 @@ final class SnagStatusUnitTests: XCTestCase {
         XCTAssertFalse(SnagStatus.isOverdue(dueDate: past, status: "approved")) // approved is never overdue
         XCTAssertFalse(SnagStatus.isOverdue(dueDate: future, status: "sent"))
         XCTAssertFalse(SnagStatus.isOverdue(dueDate: nil, status: "sent"))
+        // F06: work waiting for the manager's decision is not overdue for the trade,
+        // and neither is an unsent draft; sent-back work is owed again.
+        for waiting in ["submitted", "awaitingApproval", "readyForInspection", "complete", "draft"] {
+            XCTAssertFalse(SnagStatus.isOverdue(dueDate: past, status: waiting), waiting)
+        }
+        for owed in ["open", "opened", "cold", "in_progress", "sentBack", "rejected", "inProgress"] {
+            XCTAssertTrue(SnagStatus.isOverdue(dueDate: past, status: owed), owed)
+        }
     }
 }
 

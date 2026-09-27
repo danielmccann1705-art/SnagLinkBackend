@@ -65,14 +65,19 @@ enum SnagStatus: String, Codable, CaseIterable {
     /// `overdue` is fully derivable server-side; `cold` requires a magic-link "sent" timestamp
     /// that the server `Snag` model does not track, so cold remains client-derived only (the
     /// client derives both at read time — see F2).
+    ///
+    /// Overdue means the contractor still owes work past its due date. A submission
+    /// awaiting the manager's decision (`submitted`, `awaitingApproval`), approved
+    /// work and an unsent draft are never overdue for the trade. This mirrors the v2
+    /// register rule (`SnagRegisterService.contractorOwedStatuses`, F06).
     static func isOverdue(dueDate: Date?, status: String, now: Date = Date()) -> Bool {
         guard let dueDate = dueDate else { return false }
-        return dueDate < now && status != SnagStatus.approved.rawValue
+        return dueDate < now && contractorCanSubmit(status)
     }
 }
 
 extension Snag {
-    /// True when past due and not yet approved. Derived (not stored) — see `SnagStatus`.
+    /// True when past due and the contractor still owes work. Derived (not stored) — see `SnagStatus`.
     var isOverdue: Bool {
         SnagStatus.isOverdue(dueDate: dueDate, status: status)
     }

@@ -38,33 +38,31 @@ enum SnagRegisterService {
     }
     /// `awaitingReview` counts only actionable canonical submissions; imported legacy
     /// states are reported separately and never enter the review queue count.
-    struct Summary: Content { let total: Int; let awaitingReview: Int; let overdue: Int; var legacyUnverified: Int = 0 }
-    struct EvidencePreview: Content { let snagId: UUID; let asset: MediaAssetResponse; let count: Int }
-    struct Page: Content {
-        let items: [PlatformSnagResponse]; let page: Int; let hasMore: Bool
-        let total: Int; let summary: Summary; let contractors: [ContractorLabel]
-        let evidence: [EvidencePreview]
+    ///
+    /// `overdue` is trade overdue: contractor-owed canonical work (`contractorOwedStatuses`)
+    /// whose `dueOn` is before today in the workspace calendar. Work awaiting the
+    /// manager's decision is never overdue for the trade; how long it has waited is
+    /// the manager's review ageing, reported separately as `reviewPastDue` (its
+    /// deadline passed while it waits for review) and `oldestAwaitingReviewSince`
+    /// (when the oldest pending submission arrived). Both are optional so older
+    /// clients and stored receipts still decode.
+    struct Summary: Content {
+        let total: Int; let awaitingReview: Int; let overdue: Int; var legacyUnverified: Int = 0
+        var reviewPastDue: Int? = nil
+        var oldestAwaitingReviewSince: Date? = nil
     }
-    static func list(_ filters: SnagRegisterQuery, project: Project, on db: Database, now: Date = Date()) async throws -> Page {
-        try filters.validate()
-        try PlatformMutationService.requireManaged(project)
-        let projectID = try project.requireID(), page = filters.page ?? 1
-        let timezone = try await CanonicalValueService.timezone(project, on: db)
-        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timezone
-        let formatter = CanonicalValueService.dateFormatter(timezone: timezone)
-        let today = formatter.string(from: now)
-        let nextWeek = formatter.string(from: calendar.date(byAdding: .day, value: 7, to: now)!)
-        func base() -> QueryBuilder<Snag> {
-            let result = Snag.query(on: db).filter(\.$projectId == projectID)
-            return filters.archived == true ? result.filter(\.$archivedAt != nil) : result.filter(\.$archivedAt == nil)
-        }
-        func overdue(_ query: QueryBuilder<Snag>) -> QueryBuilder<Snag> {
-            query.filter(\.$dueOn < today).filter(\.$status != "closed")
-        }
-        let summary = try await Summary(total: base().count(),
-            awaitingReview: base().filter(\.$status == "awaiting_review").filter(\.$workflowQualification == nil).count(), overdue: overdue(base()).count(),
-            legacyUnverified: base().filter(\.$workflowQualification != nil).count())
-        let query = base()
+    /// The canonical states in which the contractor still owes work. The single
+    /// definition used by the overdue count, the `due=overdue` filter and reports.
+    /// `awaiting_review` (the manager's decision is outstanding) and `closed` are
+    /// excluded, and so is any imported state still carrying a legacy qualification,
+    /// which needs a reviewer's reconciliation before anyone owes work on it.
+    static let contractorOwedStatuses = ["open", "in_progress", "changes_requested"]
+    static func contractorOverdue(_ query: QueryBuilder<Snag>, today: String) -> QueryBuilder<Snag> {
+        query.filter(\.$dueOn < today).filter(\.$status ~~ contractorOwedStatuses).filter(\.$workflowQualification == nil)
+    }
+    /// The register's filter set applied to `base` (a project + archived scope). Shared
+    /// by the paged register and issued reports so both mean exactly the same thing.
+    static func matching(_ filters: SnagRegisterQuery, base query: QueryBuilder<Snag>, today: String, nextWeek: String) -> QueryBuilder<Snag> {
         if let text = filters.q?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
             // POSITION treats %, _ and backslashes literally. Every user value
             // is bound, including punctuation; no user-built SQL expressions.
@@ -78,12 +76,51 @@ enum SnagRegisterService {
         if filters.contractorId == "unassigned" { query.filter(\.$contractorId == nil) }
         else if let raw = filters.contractorId, let id = UUID(uuidString: raw) { query.filter(\.$contractorId == id) }
         switch filters.due {
-        case "overdue": _ = overdue(query)
+        case "overdue": _ = contractorOverdue(query, today: today)
         case "today": query.filter(\.$dueOn == today)
         case "next7": query.filter(\.$dueOn >= today).filter(\.$dueOn < nextWeek)
         case "none": query.filter(\.$dueOn == nil)
         default: break
         }
+        return query
+    }
+    /// Today and today + 7 in the workspace calendar.
+    static func calendarWindow(_ project: Project, on db: Database, now: Date) async throws -> (today: String, nextWeek: String) {
+        let timezone = try await CanonicalValueService.timezone(project, on: db)
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timezone
+        let formatter = CanonicalValueService.dateFormatter(timezone: timezone)
+        return (formatter.string(from: now), formatter.string(from: calendar.date(byAdding: .day, value: 7, to: now)!))
+    }
+    struct EvidencePreview: Content { let snagId: UUID; let asset: MediaAssetResponse; let count: Int }
+    struct Page: Content {
+        let items: [PlatformSnagResponse]; let page: Int; let hasMore: Bool
+        let total: Int; let summary: Summary; let contractors: [ContractorLabel]
+        let evidence: [EvidencePreview]
+    }
+    static func list(_ filters: SnagRegisterQuery, project: Project, on db: Database, now: Date = Date()) async throws -> Page {
+        try filters.validate()
+        try PlatformMutationService.requireManaged(project)
+        let projectID = try project.requireID(), page = filters.page ?? 1
+        let (today, nextWeek) = try await calendarWindow(project, on: db, now: now)
+        func base() -> QueryBuilder<Snag> {
+            let result = Snag.query(on: db).filter(\.$projectId == projectID)
+            return filters.archived == true ? result.filter(\.$archivedAt != nil) : result.filter(\.$archivedAt == nil)
+        }
+        func overdue(_ query: QueryBuilder<Snag>) -> QueryBuilder<Snag> { contractorOverdue(query, today: today) }
+        func awaitingReview(_ query: QueryBuilder<Snag>) -> QueryBuilder<Snag> {
+            query.filter(\.$status == "awaiting_review").filter(\.$workflowQualification == nil)
+        }
+        let oldestPending = try await VerifiedIdentityService.sql(db).raw("""
+            SELECT min(a.submitted_at) AS oldest FROM completion_attempts a JOIN snags s ON s.id = a.snag_id AND s.project_id = a.project_id
+            WHERE a.project_id = \(bind: projectID) AND a.state = 'pending' AND s.status = 'awaiting_review' AND s.workflow_qualification IS NULL
+              AND \(unsafeRaw: filters.archived == true ? "s.archived_at IS NOT NULL" : "s.archived_at IS NULL")
+            """).first()?.decode(column: "oldest", as: Date?.self)
+        let summary = try await Summary(total: base().count(),
+            awaitingReview: awaitingReview(base()).count(), overdue: overdue(base()).count(),
+            legacyUnverified: base().filter(\.$workflowQualification != nil).count(),
+            reviewPastDue: awaitingReview(base()).filter(\.$dueOn < today).count(),
+            oldestAwaitingReviewSince: oldestPending)
+        let query = matching(filters, base: base(), today: today, nextWeek: nextWeek)
         let total = try await query.count()
         let descending = filters.direction == "desc"
         switch filters.sort ?? "reference" {
