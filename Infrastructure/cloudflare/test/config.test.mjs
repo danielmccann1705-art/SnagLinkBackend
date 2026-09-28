@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {containerEnvironment} from '../src/config.mjs';
+import {backendInstance, containerEnvironment} from '../src/config.mjs';
 
 const sample = () => ({
   STAGING_ENABLED: 'true', STAGING_DATABASE_HOST: 'staging-db.example.com',
@@ -311,4 +311,19 @@ test('staging runtime diagnostics are absent unless exactly "enabled"', () => {
   for (const value of ['true', 'Enabled', 'enabled ', '1', '', 'on']) {
     assert.throws(() => containerEnvironment({...sample(), RUNTIME_DIAGNOSTICS: value}));
   }
+});
+
+test('the staging Durable Object name is "staging" unless another staging name is chosen', () => {
+  assert.equal(backendInstance({}), 'staging');
+  assert.equal(backendInstance(sample()), 'staging');
+  for (const name of ['staging', 'staging-lhr', 'staging-weur2', 'staging-a-b', 'staging-' + 'x'.repeat(16)]) {
+    assert.equal(backendInstance({BACKEND_INSTANCE: name}), name);
+  }
+  // Never a production name, an empty or padded value, upper case, another shape or a non-string.
+  for (const name of ['production', '', ' staging', 'staging ', 'Staging', 'staging-', 'staging--a', 'staging-LHR',
+    'staging-a-b-c', 'staging-' + 'x'.repeat(17), 'staging_lhr', 'staging/lhr', 'stagingx', 1, null, true]) {
+    assert.throws(() => backendInstance({BACKEND_INSTANCE: name}));
+  }
+  // The container's environment never carries it: it names the object, not a setting of the app.
+  assert.equal(containerEnvironment({...sample(), BACKEND_INSTANCE: 'staging-lhr'}).BACKEND_INSTANCE, undefined);
 });

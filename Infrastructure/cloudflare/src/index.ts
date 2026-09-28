@@ -1,5 +1,5 @@
 import { Container } from '@cloudflare/containers';
-import { containerEnvironment } from './config.mjs';
+import { backendInstance, containerEnvironment } from './config.mjs';
 import { backendRequest, privateResponse } from './proxy.mjs';
 import { legacyCandidateResponse } from './candidate-compatibility.mjs';
 import { apiSecurityResponse } from './security-headers.mjs';
@@ -17,8 +17,10 @@ export class SnaglistBackend extends Container<BackendEnv> {
 }
 
 async function respond(request: Request, env: BackendEnv): Promise<Response> {
+  let instance: string;
   try {
     containerEnvironment(env);
+    instance = backendInstance(env);
   } catch {
     return new Response('Snaglist staging is awaiting configuration.', {
       status: 503,
@@ -34,7 +36,7 @@ async function respond(request: Request, env: BackendEnv): Promise<Response> {
   const compatibility = legacyCandidateResponse(request, env);
   if (compatibility) return privateResponse(compatibility);
   // One stable instance, never one instance per link or per customer.
-  const backend = env.BACKEND.getByName('staging');
+  const backend = env.BACKEND.getByName(instance);
   return privateResponse(await backend.fetch(backendRequest(request)));
 }
 
@@ -49,15 +51,17 @@ export default {
   // is the whole reason this handler exists.
   async scheduled(_event: ScheduledController, env: BackendEnv, ctx: ExecutionContext): Promise<void> {
     let configured: Record<string, string>;
+    let instance: string;
     try {
       configured = containerEnvironment(env) as Record<string, string>;
+      instance = backendInstance(env);
     } catch {
       return;
     }
     const secret = configured.MAINTENANCE_SECRET;
     if (!secret) return;
     ctx.waitUntil((async () => {
-      const backend = env.BACKEND.getByName('staging');
+      const backend = env.BACKEND.getByName(instance);
       await backend.fetch(new Request('https://container.invalid/internal/maintenance/cleanup', {
         method: 'POST',
         headers: { Authorization: `Bearer ${secret}`, 'X-Forwarded-Proto': 'https' }

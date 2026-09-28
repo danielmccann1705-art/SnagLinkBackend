@@ -132,7 +132,11 @@ const notCarried=new Map([
   // generated; a configuration generated without it keeps one connection per event loop,
   // which is the previous behaviour. The diagnostics route is per load test, like the probe.
   ['DATABASE_MAX_CONNECTIONS','the pool size is set in the reviewed deploy config; absent keeps the previous pool'],
-  ['RUNTIME_DIAGNOSTICS','the runtime diagnostics route is per load test; the generator never carries it']
+  ['RUNTIME_DIAGNOSTICS','the runtime diagnostics route is per load test; the generator never carries it'],
+  // Lane 2 (28 Sep). Which Durable Object (and so which container placement) the staging Worker
+  // addresses is decided in the reviewed deploy configuration, like the pool size; a configuration
+  // generated without it addresses the original "staging" object, which is the previous behaviour.
+  ['BACKEND_INSTANCE','the staging Durable Object name is set in the reviewed deploy config; absent keeps "staging"']
 ]);
 
 test('the generated variable map is exactly the non-secret configuration the adapter reads',()=>{

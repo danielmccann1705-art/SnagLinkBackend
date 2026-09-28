@@ -91,6 +91,23 @@ export function containerEnvironment(env) {
   };
 }
 
+// The one staging Durable Object, and so the one container, this Worker addresses (Lane 2, 28 Sep 2026).
+// Cloudflare starts a container at the nearest location with a pre-fetched image to its Durable Object, and a
+// Durable Object lives where its first request arrived. The original "staging" object starts its container in
+// Lisbon (lis01), about 40 ms from the London database, and every database statement of every request paid it;
+// production's container runs in Amsterdam (ams13). Another name creates another object near its first request.
+// The old object and its sleeping container are left alone; switch only while the old container sleeps, because
+// the application runs at most one instance. Absent, exactly the previous "staging" object.
+/** @returns {string} */
+export function backendInstance(env) {
+  const name = env.BACKEND_INSTANCE;
+  if (name === undefined) return 'staging';
+  if (typeof name !== 'string' || !/^staging(-[a-z0-9]{1,16}){0,2}$/.test(name)) {
+    throw new Error('BACKEND_INSTANCE is absent, "staging" or "staging-<lowercase letters and digits>"');
+  }
+  return name;
+}
+
 // The database pool and the staging-only runtime diagnostics route (wave 3, 28 Sep 2026).
 // Both are optional; absent, the container runs exactly as before (one database
 // connection per event loop, no diagnostics route). DATABASE_MAX_CONNECTIONS is the
