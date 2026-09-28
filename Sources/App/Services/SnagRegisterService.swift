@@ -86,10 +86,83 @@ enum SnagRegisterService {
     }
     /// Today and today + 7 in the workspace calendar.
     static func calendarWindow(_ project: Project, on db: Database, now: Date) async throws -> (today: String, nextWeek: String) {
-        let timezone = try await CanonicalValueService.timezone(project, on: db)
+        calendarWindow(try await CanonicalValueService.timezone(project, on: db), now: now)
+    }
+    /// The same window from a workspace calendar already read (`teams.timezone`), with
+    /// `CanonicalValueService.timezone`'s refusal when it is not a valid identifier.
+    static func calendarWindow(identifier: String, now: Date) throws -> (today: String, nextWeek: String) {
+        guard let timezone = TimeZone(identifier: identifier) else {
+            throw Abort(.conflict, reason: "Confirm the workspace timezone before setting deadlines", identifier: "timezone_required")
+        }
+        return calendarWindow(timezone, now: now)
+    }
+    static func calendarWindow(_ timezone: TimeZone, now: Date) -> (today: String, nextWeek: String) {
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timezone
         let formatter = CanonicalValueService.dateFormatter(timezone: timezone)
         return (formatter.string(from: now), formatter.string(from: calendar.date(byAdding: .day, value: 7, to: now)!))
+    }
+    /// True when `matching` would add no condition: blank text, no status, priority, contractor or
+    /// due filter. The filtered total then equals the unfiltered summary total by construction.
+    static func isUnfiltered(_ filters: SnagRegisterQuery) -> Bool {
+        (filters.q?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            && (filters.location?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            && filters.status == nil && filters.priority == nil
+            && (filters.contractorId == nil || (filters.contractorId != "unassigned" && UUID(uuidString: filters.contractorId!) == nil))
+            && !["overdue", "today", "next7", "none"].contains(filters.due ?? "")
+    }
+    /// The unfiltered summary of one project (or several: `projectIDs`) in one statement, counting
+    /// exactly what the five Fluent counts and the oldest-pending query used to (Lane 2, 28 Sep 2026):
+    /// awaitingReview = canonical awaiting_review; overdue = `contractorOverdue`; legacyUnverified =
+    /// any qualification; reviewPastDue = canonical awaiting_review with dueOn before today;
+    /// oldestAwaitingReviewSince = the oldest pending attempt of a canonical awaiting_review snag.
+    /// Extra per-project figures for the workspace summary ride along (register totals of fixed filters).
+    struct SummaryRow {
+        let summary: Summary
+        /// Register total of {contractorId: unassigned, status: open}.
+        let unassignedOpen: Int
+        /// Register total of {status: changes_requested}.
+        let changesRequested: Int
+        /// Register total of {due: next7}, and how many of those are closed.
+        let dueNext7: Int
+        let dueNext7Closed: Int
+    }
+    static func summaries(projectIDs: [UUID], archived: Bool, today: String, nextWeek: String, on db: Database) async throws -> [UUID: SummaryRow] {
+        guard !projectIDs.isEmpty else { return [:] }
+        let owed = contractorOwedStatuses
+        let rows = try await VerifiedIdentityService.sql(db).raw("""
+            SELECT s.project_id,
+                count(*) AS total,
+                count(*) FILTER (WHERE s.status = 'awaiting_review' AND s.workflow_qualification IS NULL) AS awaiting,
+                count(*) FILTER (WHERE s.due_on < \(bind: today) AND s.status = ANY(\(bind: owed)) AND s.workflow_qualification IS NULL) AS overdue,
+                count(*) FILTER (WHERE s.workflow_qualification IS NOT NULL) AS legacy,
+                count(*) FILTER (WHERE s.status = 'awaiting_review' AND s.workflow_qualification IS NULL AND s.due_on < \(bind: today)) AS review_past_due,
+                count(*) FILTER (WHERE s.contractor_id IS NULL AND s.status = 'open') AS unassigned_open,
+                count(*) FILTER (WHERE s.status = 'changes_requested') AS changes_requested,
+                count(*) FILTER (WHERE s.due_on >= \(bind: today) AND s.due_on < \(bind: nextWeek)) AS due_next7,
+                count(*) FILTER (WHERE s.due_on >= \(bind: today) AND s.due_on < \(bind: nextWeek) AND s.status = 'closed') AS due_next7_closed,
+                (SELECT min(a.submitted_at) FROM completion_attempts a JOIN snags s2 ON s2.id = a.snag_id AND s2.project_id = a.project_id
+                  WHERE a.project_id = s.project_id AND a.state = 'pending' AND s2.status = 'awaiting_review' AND s2.workflow_qualification IS NULL
+                    AND \(unsafeRaw: archived ? "s2.archived_at IS NOT NULL" : "s2.archived_at IS NULL")) AS oldest
+            FROM snags s
+            WHERE s.project_id = ANY(\(bind: projectIDs)) AND \(unsafeRaw: archived ? "s.archived_at IS NOT NULL" : "s.archived_at IS NULL")
+            GROUP BY s.project_id
+            """).all()
+        var result: [UUID: SummaryRow] = [:]
+        for row in rows {
+            let id = try row.decode(column: "project_id", as: UUID.self)
+            result[id] = SummaryRow(summary: Summary(total: try row.decode(column: "total", as: Int.self),
+                    awaitingReview: try row.decode(column: "awaiting", as: Int.self), overdue: try row.decode(column: "overdue", as: Int.self),
+                    legacyUnverified: try row.decode(column: "legacy", as: Int.self), reviewPastDue: try row.decode(column: "review_past_due", as: Int.self),
+                    oldestAwaitingReviewSince: try row.decode(column: "oldest", as: Date?.self)),
+                unassignedOpen: try row.decode(column: "unassigned_open", as: Int.self), changesRequested: try row.decode(column: "changes_requested", as: Int.self),
+                dueNext7: try row.decode(column: "due_next7", as: Int.self), dueNext7Closed: try row.decode(column: "due_next7_closed", as: Int.self))
+        }
+        // A project with no rows in this scope has an all-zero summary, exactly as the counts gave.
+        for id in projectIDs where result[id] == nil {
+            result[id] = SummaryRow(summary: Summary(total: 0, awaitingReview: 0, overdue: 0, legacyUnverified: 0, reviewPastDue: 0, oldestAwaitingReviewSince: nil),
+                                    unassignedOpen: 0, changesRequested: 0, dueNext7: 0, dueNext7Closed: 0)
+        }
+        return result
     }
     struct EvidencePreview: Content { let snagId: UUID; let asset: MediaAssetResponse; let count: Int }
     struct Page: Content {
@@ -97,31 +170,25 @@ enum SnagRegisterService {
         let total: Int; let summary: Summary; let contractors: [ContractorLabel]
         let evidence: [EvidencePreview]
     }
-    static func list(_ filters: SnagRegisterQuery, project: Project, on db: Database, now: Date = Date()) async throws -> Page {
+    /// `timezone` is the workspace calendar when the caller already read it (`ProjectAccessService.readContext`);
+    /// nil reads it here as before.
+    static func list(_ filters: SnagRegisterQuery, project: Project, timezone: String? = nil, on db: Database, now: Date = Date()) async throws -> Page {
         try filters.validate()
         try PlatformMutationService.requireManaged(project)
         let projectID = try project.requireID(), page = filters.page ?? 1
-        let (today, nextWeek) = try await calendarWindow(project, on: db, now: now)
+        let window: (today: String, nextWeek: String)
+        if let timezone { window = try calendarWindow(identifier: timezone, now: now) }
+        else { window = try await calendarWindow(project, on: db, now: now) }
+        let (today, nextWeek) = window
         func base() -> QueryBuilder<Snag> {
             let result = Snag.query(on: db).filter(\.$projectId == projectID)
             return filters.archived == true ? result.filter(\.$archivedAt != nil) : result.filter(\.$archivedAt == nil)
         }
-        func overdue(_ query: QueryBuilder<Snag>) -> QueryBuilder<Snag> { contractorOverdue(query, today: today) }
-        func awaitingReview(_ query: QueryBuilder<Snag>) -> QueryBuilder<Snag> {
-            query.filter(\.$status == "awaiting_review").filter(\.$workflowQualification == nil)
-        }
-        let oldestPending = try await VerifiedIdentityService.sql(db).raw("""
-            SELECT min(a.submitted_at) AS oldest FROM completion_attempts a JOIN snags s ON s.id = a.snag_id AND s.project_id = a.project_id
-            WHERE a.project_id = \(bind: projectID) AND a.state = 'pending' AND s.status = 'awaiting_review' AND s.workflow_qualification IS NULL
-              AND \(unsafeRaw: filters.archived == true ? "s.archived_at IS NOT NULL" : "s.archived_at IS NULL")
-            """).first()?.decode(column: "oldest", as: Date?.self)
-        let summary = try await Summary(total: base().count(),
-            awaitingReview: awaitingReview(base()).count(), overdue: overdue(base()).count(),
-            legacyUnverified: base().filter(\.$workflowQualification != nil).count(),
-            reviewPastDue: awaitingReview(base()).filter(\.$dueOn < today).count(),
-            oldestAwaitingReviewSince: oldestPending)
+        // One statement for the whole unfiltered summary (was six), and no second count when the
+        // view has no filter: its total is the summary's total (Lane 2, 28 Sep 2026).
+        let summary = try await summaries(projectIDs: [projectID], archived: filters.archived == true, today: today, nextWeek: nextWeek, on: db)[projectID]!.summary
         let query = matching(filters, base: base(), today: today, nextWeek: nextWeek)
-        let total = try await query.count()
+        let total = isUnfiltered(filters) ? summary.total : try await query.count()
         let descending = filters.direction == "desc"
         switch filters.sort ?? "reference" {
         case "due": query.sort(.sql(raw: descending ? "due_on DESC NULLS LAST" : "due_on ASC NULLS LAST"))
@@ -133,7 +200,7 @@ enum SnagRegisterService {
         }
         let values = try await query.sort(\.$displayNumber).sort(\.$id).range(((page - 1) * 50)..<(page * 50)).all()
         let contractorIDs = Set(values.compactMap(\.contractorId))
-        let contractors = try await Contractor.query(on: db).filter(\.$id ~~ Array(contractorIDs))
+        let contractors = contractorIDs.isEmpty ? [] : try await Contractor.query(on: db).filter(\.$id ~~ Array(contractorIDs))
             .filter(\.$workspaceId == project.workspaceId).filter(\.$platformManaged == true).all()
         let ids = try values.map { try $0.requireID() }
         let photos = ids.isEmpty ? [] : try await VerifiedIdentityService.sql(db).raw("""

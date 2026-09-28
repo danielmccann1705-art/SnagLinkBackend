@@ -14275,6 +14275,390 @@
           }
         }
       }
+    },
+    "/api/v2/workspaces/{workspaceId}/work-summary": {
+      "get": {
+        "operationId": "workspaceWorkSummary",
+        "summary": "Per-project register summaries for one workspace in one read",
+        "description": "Lane 2 (28 Sep 2026). Every active project of the workspace this person may read (the project list's candidates and order, each decided by the same policy as the project register), with exactly the project register's summary plus register totals of fixed filters. One statement for all counts, under the workspace's shared read lock. At most 500 projects per page. A project the register refuses is listed with `unavailable` and counts nothing.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised summary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceWorkSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/workspaces/{workspaceId}/snags": {
+      "get": {
+        "operationId": "listWorkspaceSnags",
+        "summary": "Read a bounded register page across a workspace",
+        "description": "Lane 2 (28 Sep 2026). The project register's filters, due-date calendar and sort keys applied across every active, platform-managed project of the workspace this person may read, 50 rows a page with an exact total. Rows are grouped by project (name case-insensitively, then id) under each sort key, then reference, then UUID. Live offset pagination (not a snapshot), like the project register. Projects the register refuses are listed in `unavailable`.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "workspaceId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "in_progress",
+                "awaiting_review",
+                "changes_requested",
+                "closed"
+              ]
+            }
+          },
+          {
+            "name": "priority",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "low",
+                "medium",
+                "high",
+                "critical"
+              ]
+            }
+          },
+          {
+            "name": "contractorId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Workspace contractor UUID, or unassigned; other UUIDs return no matches without disclosing the other workspace."
+            }
+          },
+          {
+            "name": "location",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 500
+            }
+          },
+          {
+            "name": "due",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "overdue",
+                "today",
+                "next7",
+                "none"
+              ]
+            }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "reference",
+                "due",
+                "updated",
+                "priority"
+              ],
+              "default": "reference"
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            }
+          },
+          {
+            "name": "projectId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Limit to one project (404/409 exactly as that project's register)."
+          },
+          {
+            "name": "queue",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "review"
+              ]
+            },
+            "description": "The Reviews queue: canonical awaiting_review snags (no legacy qualification) in projects this person may review; status may only be awaiting_review; default sort updated ascending."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authorised page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceRegisterPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -21341,6 +21725,275 @@
           "closedAt",
           "sourceStatus"
         ]
+      },
+      "WorkspaceProjectWork": {
+        "type": "object",
+        "required": [
+          "projectId",
+          "capabilities"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "summary": {
+            "$ref": "#/components/schemas/RegisterSummary",
+            "description": "Exactly the project register's summary (active snags). Absent when unavailable is set."
+          },
+          "unassignedOpen": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Register total of contractorId=unassigned&status=open."
+          },
+          "changesRequested": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Register total of status=changes_requested."
+          },
+          "dueNext7": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Register total of due=next7 (today up to, not including, day 7 in the workspace calendar)."
+          },
+          "dueNext7Closed": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Of dueNext7, how many are closed."
+          },
+          "unavailable": {
+            "type": "string",
+            "enum": [
+              "project_import_required"
+            ],
+            "description": "The project register refuses this project; nothing is counted for it."
+          },
+          "preparedLinks": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Contractor links prepared (not activated) and unexpired; present only where this person may share."
+          }
+        }
+      },
+      "WorkspaceWorkTotals": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "total",
+          "overdue",
+          "legacyUnverified",
+          "reviewPastDue",
+          "awaitingReview",
+          "awaitingReviewAllProjects",
+          "unassignedOpen",
+          "changesRequested",
+          "dueNext7",
+          "dueNext7Closed",
+          "preparedLinks"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "overdue": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "legacyUnverified": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "reviewPastDue": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "awaitingReviewAllProjects": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unassignedOpen": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "changesRequested": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dueNext7": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "dueNext7Closed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "awaitingReview": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Canonical submissions awaiting a decision in projects this person may review (the Reviews queue total)."
+          },
+          "oldestAwaitingReviewSince": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Oldest pending submission in projects this person may review."
+          },
+          "preparedLinks": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "WorkspaceWorkSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspaceId",
+          "asOfDate",
+          "projects",
+          "totals",
+          "page",
+          "hasMore"
+        ],
+        "properties": {
+          "workspaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "asOfDate": {
+            "type": "string",
+            "format": "date",
+            "description": "Today in the workspace calendar; the overdue and next-7-days boundary of every count."
+          },
+          "projects": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceProjectWork"
+            }
+          },
+          "totals": {
+            "$ref": "#/components/schemas/WorkspaceWorkTotals"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "hasMore": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WorkspaceRegisterRow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "projectId",
+          "item"
+        ],
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "item": {
+            "$ref": "#/components/schemas/PlatformSnagResponse"
+          }
+        }
+      },
+      "WorkspaceRegisterUnavailable": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "projectId",
+          "reason"
+        ],
+        "properties": {
+          "projectId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "project_import_required"
+            ]
+          }
+        }
+      },
+      "WorkspaceRegisterPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "page",
+          "hasMore",
+          "total",
+          "contractors",
+          "evidence",
+          "projectIds",
+          "unavailable",
+          "asOfDate"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceRegisterRow"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "hasMore": {
+            "type": "boolean"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Exact number of matching rows across every project in scope."
+          },
+          "contractors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RegisterContractorLabel"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RegisterEvidencePreview"
+            }
+          },
+          "projectIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Projects this view covers, in row-group order (name case-insensitively, then id)."
+          },
+          "unavailable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceRegisterUnavailable"
+            },
+            "description": "Readable projects the register refuses; reported, never silently left out."
+          },
+          "asOfDate": {
+            "type": "string",
+            "format": "date"
+          }
+        }
       }
     }
   }

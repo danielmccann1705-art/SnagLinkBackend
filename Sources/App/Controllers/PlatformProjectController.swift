@@ -84,22 +84,15 @@ struct PlatformProjectController: RouteCollection {
         let page = (try? req.query.get(Int.self, at: "page")) ?? 1
         guard (1...10000).contains(page) else { throw Abort(.badRequest, reason: "Invalid page") }
         return try await req.db.transaction { db in
-            try await WorkspaceAccessService.readLock(workspaceID, on: db)
-            guard let workspace = try await Team.find(workspaceID, on: db) else { throw Abort(.notFound) }
-            let role = try await WorkspaceAccessService.role(actorID: actor, workspace: workspace, on: db)
-            var query = Project.query(on: db).filter(\.$workspaceId == workspaceID).filter(\.$archivedAt == nil)
-            if workspace.kind == "company", role == "member" {
-                let ids = try await VerifiedIdentityService.sql(db).raw("SELECT project_id FROM project_access WHERE state = 'active' AND workspace_id = \(bind: workspaceID) AND user_id = \(bind: actor)").all().map { try $0.decode(column: "project_id", as: UUID.self) }
-                guard !ids.isEmpty else { return Page(items: [], page: page, hasMore: false) }
-                query = query.filter(\.$id ~~ ids)
-            }
-            let projects = try await query.sort(\.$updatedAt, .descending).sort(\.$id).range(((page - 1) * 50)..<(page * 50 + 1)).all()
+            // Lane 2 (28 Sep 2026): the same candidates, order, page and per-project decision as before,
+            // in a constant number of statements rather than seven per project (WorkspaceReadScope).
+            let scope = try await WorkspaceReadScope.load(workspaceID: workspaceID, actorID: actor, offset: (page - 1) * 50, candidateLimit: 51, on: db)
             var items: [PlatformProjectResponse] = []
-            for project in projects.prefix(50) {
-                let (allowed, actions) = try await ProjectAccessService.requireRead(projectID: project.requireID(), actorID: actor, on: db)
-                items.append(try PlatformProjectResponse(allowed, actions: actions))
+            for (project, actions) in scope.projects.prefix(50) {
+                guard actions.contains(.read) else { throw Abort(.notFound, reason: "Project unavailable") }
+                items.append(try PlatformProjectResponse(project, actions: actions))
             }
-            return Page(items: items, page: page, hasMore: projects.count > 50)
+            return Page(items: items, page: page, hasMore: scope.projects.count > 50)
         }
     }
     @Sendable func create(req: Request) async throws -> PlatformProjectResponse {

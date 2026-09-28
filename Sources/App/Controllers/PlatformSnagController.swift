@@ -23,8 +23,8 @@ struct PlatformSnagController: RouteCollection {
         let projectID = try id("projectId", req), actorID = try req.requireAuthenticatedUserId()
         let filters = try req.query.decode(SnagRegisterQuery.self)
         return try await req.db.transaction { db in
-            let (project, _) = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
-            return try await SnagRegisterService.list(filters, project: project, on: db)
+            let context = try await ProjectAccessService.readContext(projectID: projectID, actorID: actorID, on: db)
+            return try await SnagRegisterService.list(filters, project: context.project, timezone: context.workspaceTimezone, on: db)
         }
     }
     @Sendable func get(req: Request) async throws -> PlatformSnagResponse {
