@@ -77,7 +77,7 @@ struct AppleWebAuthController: RouteCollection {
         let session: (token: String, principal: BrowserPrincipal)
         do {
             let proof = try await AppleWebIdentityService.verify(tokens.idToken, context: context, configuration: provider, req: req)
-            session = try await req.db.transaction { db in
+            session = try await VerifiedIdentityService.transactionRetryingIdentityRace(on: req.db) { db in
                 // Front-channel user/name JSON is not identity proof and is ignored.
                 let user = try await AppleWebIdentityService.resolve(proof, name: nil, on: db)
                 if proof.emailVerified, let email = proof.email {
@@ -129,8 +129,17 @@ private struct AppleWebPrivacyMiddleware: AsyncMiddleware {
                 let identifier = (error as? Abort)?.identifier
                 let marker = identifier == "identity_proof_required" ? "apple_existing_account" :
                     identifier == "apple_challenge_expired" ? "apple_expired" : "apple_failed"
+                // An existing account's sign-in methods travel as a closed vocabulary
+                // (`apple`, `google`, `email_link`, `unknown`) so the portal can show the
+                // same sentence the native app receives (F21).
+                var location = "/?signin=" + marker
+                if marker == "apple_existing_account",
+                   let methods = abort?.headers.first(name: ExistingAccountRecovery.methodsHeader),
+                   methods.range(of: "^(apple|google|email_link|unknown)(,(apple|google|email_link))*$", options: .regularExpression) != nil {
+                    location += "&methods=" + methods
+                }
                 response = Response(status: .seeOther)
-                response.headers.replaceOrAdd(name: .location, value: "/?signin=" + marker)
+                response.headers.replaceOrAdd(name: .location, value: location)
                 if let input = try? request.content.decode(AppleWebCallback.self),
                    AppleWebChallengeService.validOpaque(input.state) {
                     response.cookies[AppleWebAuthController.bindingCookie(for: input.state)] = AppleWebAuthController.challengeCookie("", maxAge: 0)

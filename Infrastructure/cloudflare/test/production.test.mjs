@@ -265,3 +265,15 @@ test('production portal requires its own enablement and never serves staging, pr
     assert.equal((await productionPortalResponse(new Request(portal + path), env)).status, 404);
   }
 });
+
+test('production takes an optional database pool size and never the staging diagnostics route', () => {
+  assert.equal(productionContainerEnvironment(configured()).DATABASE_MAX_CONNECTIONS, undefined);
+  assert.equal(productionContainerEnvironment(configured({DATABASE_MAX_CONNECTIONS: '4'})).DATABASE_MAX_CONNECTIONS, '4');
+  assert.equal(productionContainerEnvironment(configured({DATABASE_MAX_CONNECTIONS: 8})).DATABASE_MAX_CONNECTIONS, '8');
+  for (const value of ['0', '17', 'four', '', 1.5]) {
+    assert.throws(() => productionContainerEnvironment(configured({DATABASE_MAX_CONNECTIONS: value})));
+  }
+  for (const value of ['enabled', 'false', '']) {
+    assert.throws(() => productionContainerEnvironment(configured({RUNTIME_DIAGNOSTICS: value})), /staging-only/);
+  }
+});

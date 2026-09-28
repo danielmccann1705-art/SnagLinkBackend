@@ -86,6 +86,10 @@ struct PlatformSnagService {
         let snag = Snag(id: command.id, reference: "", title: "", projectId: projectID, ownerId: actorID)
         snag.workspaceId = workspaceID
         try await apply(command.fields, to: snag, timezone: CanonicalValueService.timezone(project, on: db))
+        if let closure = command.deviceClosure {
+            try closure.validate()
+            closure.apply(to: snag)
+        }
         guard let row = try await VerifiedIdentityService.sql(db).raw("UPDATE projects SET next_snag_number = next_snag_number + 1 WHERE id = \(bind: projectID) RETURNING next_snag_number - 1 AS number").first() else { throw Abort(.notFound) }
         let number = try row.decode(column: "number", as: Int64.self)
         snag.displayNumber = number
@@ -94,8 +98,33 @@ struct PlatformSnagService {
         snag.reference = try await SnagReferenceScheme.next(number: number, projectID: projectID, on: db)
         try await snag.save(on: db)
         let response = PlatformSnagResponse(snag)
-        try await PlatformMutationService.change(workspaceID: workspaceID, projectID: projectID, type: "snag", entityID: command.id, revision: 1, kind: "created", fields: Array(command.fields.keys) + ["reference", "status"], payload: response, actorID: actorID, on: db)
+        try await PlatformMutationService.change(workspaceID: workspaceID, projectID: projectID, type: "snag", entityID: command.id, revision: 1, kind: "created", fields: Array(command.fields.keys) + ["reference", "status"] + (command.deviceClosure == nil ? [] : ["workflow"]), payload: response, actorID: actorID, on: db)
+        if command.deviceClosure != nil {
+            try await WorkspaceAccessService.activity(workspaceID: workspaceID, actorID: actorID, action: "snag_device_closure_carried", targetID: command.id, detail: nil, on: db)
+        }
         return response
+    }
+    /// F02 amendments §2.2-2. Only a snag with no workflow of its own can take a closure
+    /// made on a device: open, unqualified, no completion attempt and no review decision.
+    static func carryDeviceClosure(_ command: DeviceClosureCommand, snag: Snag, project: Project, actorID: UUID, on db: Database) async throws -> PlatformSnagResponse {
+        try PlatformMutationService.requireManaged(project)
+        let closure = DeviceClosure(closedAt: command.closedAt, sourceStatus: command.sourceStatus)
+        try closure.validate()
+        try await PlatformMutationService.checkRevision(command.expectedRevision, snag: snag, workspaceID: project.workspaceId!, on: db)
+        guard snag.archivedAt == nil else { throw Abort(.gone, reason: "This snag is archived. Restore it explicitly before editing", identifier: "snag_archived") }
+        let snagID = try snag.requireID()
+        let history = try await VerifiedIdentityService.sql(db).raw("""
+            SELECT (SELECT count(*) FROM completion_attempts WHERE snag_id = \(bind: snagID))
+                 + (SELECT count(*) FROM review_decisions WHERE snag_id = \(bind: snagID)) AS n
+            """).first()!.decode(column: "n", as: Int.self)
+        guard snag.status == "open", snag.workflowQualification == nil, history == 0 else {
+            throw Abort(.conflict, reason: "Only an open snag with no completion or review history can take a closure made on a device", identifier: "device_closure_not_applicable")
+        }
+        closure.apply(to: snag)
+        snag.revision += 1; snag.workflowRevision += 1
+        try await snag.save(on: db)
+        try await WorkspaceAccessService.activity(workspaceID: project.workspaceId!, actorID: actorID, action: "snag_device_closure_carried", targetID: snagID, detail: nil, on: db)
+        return try await changed(snag, project: project, actorID: actorID, kind: "device_closure_carried", fields: ["status", "workflowRevision", "workflow"], on: db)
     }
     static func find(_ snagID: UUID, projectID: UUID, on db: Database) async throws -> Snag {
         guard let snag = try await Snag.query(on: db).filter(\.$id == snagID).filter(\.$projectId == projectID).first() else { throw Abort(.notFound, reason: "Snag unavailable") }

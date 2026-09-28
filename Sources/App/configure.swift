@@ -73,7 +73,16 @@ public func configure(_ app: Application,
         if Environment.get("DATABASE_TLS_DISABLE") == "true" {
             config.coreConfiguration.tls = .disable
         }
-        app.databases.use(.postgres(configuration: config), as: .psql)
+        // Pool size (wave 3): `DATABASE_MAX_CONNECTIONS`, total across event loops, 1...16.
+        // Absent, exactly the previous pool: one connection per event loop.
+        let pool = DatabasePool.settings(requested: Environment.get(DatabasePool.variable),
+                                         eventLoops: DatabasePool.eventLoopCount(app.eventLoopGroup))
+        if pool.invalid {
+            app.logger.warning("\(DatabasePool.variable) is not a whole number from 1 to \(DatabasePool.ceiling); using one connection per event loop")
+        }
+        app.storage[DatabasePool.Key.self] = pool
+        app.storage[RuntimeDiagnostics.BootKey.self] = Date()
+        app.databases.use(.postgres(configuration: config, maxConnectionsPerEventLoop: pool.perEventLoop), as: .psql)
 
         // MARK: - Migrations
         app.migrations.add(CreateMagicLink())

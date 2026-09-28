@@ -80,16 +80,10 @@ enum AppleWebIdentityService {
             let user = try await VerifiedIdentityService.resolveApple(subject: proof.subject, email: proof.email, name: name, on: db)
             return user
         }
-        if let email = proof.email {
-            try await VerifiedIdentityService.lock("identity-email:" + email, on: db)
-            guard try await sql.raw("""
-                SELECT id FROM users WHERE lower(btrim(email))=\(bind: email)
-                UNION SELECT user_id AS id FROM user_identities WHERE provider='email' AND subject=\(bind: email) LIMIT 1
-                """).first() == nil else {
-                throw Abort(.conflict, reason: "Use your existing Snaglist sign-in to access that account", identifier: "identity_proof_required")
-            }
-        }
-        return try await VerifiedIdentityService.resolveApple(subject: proof.subject, email: proof.email, name: name, on: db)
+        // A first sign-in: the same rule, identifier and sentence as native Apple (F21),
+        // decided in one place so the two surfaces cannot drift apart again.
+        return try await VerifiedIdentityService.resolveApple(subject: proof.subject, email: proof.email,
+                                                              emailVerified: proof.emailVerified, name: name, on: db)
     }
     static func invalidIdentity() -> Abort { Abort(.unauthorized, reason: "Apple sign-in could not be verified. Start again", identifier: "apple_identity_invalid") }
     static func exchangeUnavailable() -> Abort { Abort(.serviceUnavailable, reason: "Apple sign-in is temporarily unavailable. Start again shortly", identifier: "apple_exchange_unavailable") }

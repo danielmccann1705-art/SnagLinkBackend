@@ -38,6 +38,10 @@ struct CleanupService {
         /// Retention maintenance packet M1 (`RetentionMaintenanceService`). Optional
         /// for the same reason; older images ignore it.
         var retention: RetentionMaintenanceService.Counts? = nil
+        /// The container's own numbers at the end of the pass (wave 3): CPU limit and use,
+        /// memory, the database pool and round trips. Numbers only; optional for the same
+        /// reason as the fields above, and never able to fail the pass.
+        var runtime: RuntimeFacts? = nil
     }
 
     /// Counts only, by table.
@@ -196,6 +200,7 @@ struct CleanupService {
         let health = AccountDeletionHealth.flag(groups, now: now, previousPass: previousPass)
         removed.accountDeletionHealth = health
         AccountDeletionHealth.log(health, logger: app.logger)
+        removed.runtime = try? await RuntimeDiagnostics.facts(app: app, pinned: db)
 
         return removed
     }

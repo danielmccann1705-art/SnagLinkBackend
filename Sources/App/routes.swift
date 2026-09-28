@@ -163,6 +163,10 @@ func routes(_ app: Application) throws {
 
     // MARK: - Controllers
     try app.register(collection: WebReportController())
+    // Staging-only runtime numbers for load tests; never registered unless asked for.
+    if Environment.get(RuntimeDiagnostics.variable) == "enabled" {
+        try app.register(collection: RuntimeDiagnosticsController())
+    }
     try app.register(collection: MagicLinkController())
     try app.register(collection: TeamInviteController())
     try app.register(collection: CompletionController())

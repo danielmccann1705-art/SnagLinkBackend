@@ -201,6 +201,48 @@ final class AppleWebAuthEndpointTests: XCTestCase {
         let adopted = try await VerifiedIdentityService.verifiedEmails(for: userID, on: app.db)
         XCTAssertEqual(adopted, [fresh])
     }
+    func testWebAndNativeRefuseAnExistingAddressWithTheSameIdentifierAndSentence() async throws {
+        // Wave 3 (Dan's requirement): one refusal, built in one place, on both surfaces.
+        let address = "same-refusal-" + UUID().uuidString.lowercased() + "@example.test"
+        _ = try await app.db.transaction { db in try await VerifiedIdentityService.resolveEmail(address, name: "Link user", on: db) }
+        let started = try await start(), subject = "web-refused-" + UUID().uuidString
+        fixture.configure(token: try token(started, subject: subject, email: address))
+        let web = try await callback(started)
+        assertPrivateFailure(web, status: .conflict)
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(buffer: web.body)) as? [String: Any])
+        XCTAssertEqual(body["identifier"] as? String, "identity_proof_required")
+        XCTAssertEqual(body["reason"] as? String, ExistingAccountRecovery.message([.emailLink]))
+        XCTAssertEqual(web.headers.first(name: ExistingAccountRecovery.methodsHeader), "email_link")
+        do {
+            _ = try await app.db.transaction { db in
+                try await VerifiedIdentityService.resolveApple(subject: "native-refused-" + UUID().uuidString, email: address, emailVerified: true, name: nil, on: db)
+            }
+            XCTFail("native must refuse the same address")
+        } catch let native as Abort {
+            XCTAssertEqual(native.status, web.status)
+            XCTAssertEqual(native.identifier, body["identifier"] as? String)
+            XCTAssertEqual(native.reason, body["reason"] as? String, "the same sentence on native and web")
+        }
+        let rows = try await VerifiedIdentityService.sql(app.db).raw("SELECT count(*) AS n FROM user_identities WHERE provider='apple' AND subject=\(bind: subject)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(rows, 0)
+    }
+    func testBrowserCallbackForAnExistingAccountCarriesItsSignInMethod() async throws {
+        let address = "browser-refusal-" + UUID().uuidString.lowercased() + "@example.test"
+        _ = try await app.db.transaction { db in try await VerifiedIdentityService.resolveEmail(address, name: "Link user", on: db) }
+        let started = try await start()
+        fixture.configure(token: try token(started, subject: "browser-refused-" + UUID().uuidString, email: address))
+        try await app.test(.POST, path + "callback", beforeRequest: { request in
+            request.headers.replaceOrAdd(name: "Origin", value: "https://appleid.apple.com")
+            request.headers.replaceOrAdd(name: "Accept", value: "text/html,application/xhtml+xml")
+            request.headers.replaceOrAdd(name: "Cookie", value: started.cookie)
+            try request.content.encode(["state": started.state, "code": "synthetic-browser-code"], as: .urlEncodedForm)
+        }, afterResponse: { response async throws in
+            XCTAssertEqual(response.status, .seeOther)
+            XCTAssertEqual(response.headers.first(name: .location), "/?signin=apple_existing_account&methods=email_link")
+            XCTAssertFalse(response.headers.first(name: .location)!.contains("@"), "no address in the redirect")
+            XCTAssertFalse(response.headers["set-cookie"].contains { $0.hasPrefix(BrowserSessionService.cookieName + "=") })
+        })
+    }
     func testOnlyProviderVerifiedAddressBecomesInvitationAuthority() async throws {
         for verified in [true, false] {
             let subject = "email-proof-" + UUID().uuidString

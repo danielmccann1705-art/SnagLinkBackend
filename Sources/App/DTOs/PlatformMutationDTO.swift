@@ -30,6 +30,41 @@ struct SnagCreateCommand: Content {
     let mutation: MutationMetadata
     let id: UUID
     let fields: [String: PlatformJSON]
+    /// Optional (F02 amendments §2.2-1): the snag was closed on a device before it reached
+    /// the workspace. Absent from every older client, and omitted from the request hash
+    /// when absent, so an earlier create replays exactly as before.
+    var deviceClosure: DeviceClosure? = nil
+}
+/// A closure made on a device before the snag reached the workspace. It is recorded exactly
+/// as a 1.x import records an unverified closure — `status = closed`, `closed_at` empty,
+/// `workflow_qualification = legacy_unverified`, `source_status`, `source_closed_at` — so the
+/// register, overdue, reports, review reopen and every label already treat it correctly:
+/// never accepted, never in the review queue, never overdue, reopenable by a reviewer.
+struct DeviceClosure: Content, Equatable {
+    let closedAt: Date
+    let sourceStatus: String
+    static let earliest = ISO8601DateFormatter().date(from: "2015-01-01T00:00:00Z")!
+    func validate(now: Date = Date()) throws {
+        guard sourceStatus == "closed" else {
+            throw Abort(.badRequest, reason: "A device closure's source status must be \"closed\"", identifier: "invalid_device_closure")
+        }
+        guard closedAt >= Self.earliest, closedAt <= now.addingTimeInterval(300) else {
+            throw Abort(.badRequest, reason: "A device closure needs the date it was closed, not in the future", identifier: "invalid_device_closure")
+        }
+    }
+    func apply(to snag: Snag) {
+        snag.status = "closed"; snag.closedAt = nil
+        snag.sourceStatus = sourceStatus; snag.sourceClosedAt = closedAt
+        snag.workflowQualification = "legacy_unverified"
+    }
+}
+/// F02 amendments §2.2-2: carry a device closure onto a snag created without one (build 4
+/// copies, build 3's Save to workspace). Idempotent through mutation receipts.
+struct DeviceClosureCommand: Content {
+    let mutation: MutationMetadata
+    let expectedRevision: Int64
+    let closedAt: Date
+    let sourceStatus: String
 }
 struct SnagEditCommand: Content {
     let mutation: MutationMetadata
@@ -54,8 +89,9 @@ struct CanonicalSnagValues: Content {
         currency = snag.currency
     }
 }
-/// Present only for imported legacy snags. `legacyClosureUnverified` must render
-/// as "Legacy closure — unverified", never as Accepted; `actionableReview` is false
+/// Present for imported legacy snags and for closures carried from a device.
+/// `legacyClosureUnverified` must render as "Previously closed on this device — unverified",
+/// never as Accepted; `actionableReview` is false
 /// until a real completion attempt exists.
 struct SnagWorkflowQualification: Content, Equatable {
     let qualification: String

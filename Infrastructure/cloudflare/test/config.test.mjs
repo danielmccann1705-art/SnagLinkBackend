@@ -294,3 +294,21 @@ test('the log-stream probe marker is optional and cannot carry a secret', () => 
     assert.throws(() => containerEnvironment({...sample(), LOG_STREAM_PROBE: marker}));
   }
 });
+
+test('the database pool size is optional, a whole number from 1 to 16, and absent means the old pool', () => {
+  assert.equal(containerEnvironment(sample()).DATABASE_MAX_CONNECTIONS, undefined);
+  for (const [value, expected] of [['1', '1'], ['4', '4'], ['16', '16'], [4, '4'], [16, '16']]) {
+    assert.equal(containerEnvironment({...sample(), DATABASE_MAX_CONNECTIONS: value}).DATABASE_MAX_CONNECTIONS, expected);
+  }
+  for (const value of ['0', '17', '04', '4 ', '-1', '1.5', 'four', '', 0, 17, 2.5, true, null]) {
+    assert.throws(() => containerEnvironment({...sample(), DATABASE_MAX_CONNECTIONS: value}));
+  }
+});
+
+test('staging runtime diagnostics are absent unless exactly "enabled"', () => {
+  assert.equal(containerEnvironment(sample()).RUNTIME_DIAGNOSTICS, undefined);
+  assert.equal(containerEnvironment({...sample(), RUNTIME_DIAGNOSTICS: 'enabled'}).RUNTIME_DIAGNOSTICS, 'enabled');
+  for (const value of ['true', 'Enabled', 'enabled ', '1', '', 'on']) {
+    assert.throws(() => containerEnvironment({...sample(), RUNTIME_DIAGNOSTICS: value}));
+  }
+});

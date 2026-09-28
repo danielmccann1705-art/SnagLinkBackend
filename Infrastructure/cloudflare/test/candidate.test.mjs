@@ -127,7 +127,12 @@ const notCarried=new Map([
   // SNAGLIST_CANDIDATE_LOG_PROBE names one for that generation, so a configuration
   // generated without it is one with the probe off - which is the normal state and
   // the state a deploy should return the Worker to once a run has been read.
-  ['LOG_STREAM_PROBE','the log-stream probe is per-run; the generator carries it only when asked']
+  ['LOG_STREAM_PROBE','the log-stream probe is per-run; the generator carries it only when asked'],
+  // Wave 3 (28 Sep). The pool size is decided in the reviewed deploy configuration, not
+  // generated; a configuration generated without it keeps one connection per event loop,
+  // which is the previous behaviour. The diagnostics route is per load test, like the probe.
+  ['DATABASE_MAX_CONNECTIONS','the pool size is set in the reviewed deploy config; absent keeps the previous pool'],
+  ['RUNTIME_DIAGNOSTICS','the runtime diagnostics route is per load test; the generator never carries it']
 ]);
 
 test('the generated variable map is exactly the non-secret configuration the adapter reads',()=>{

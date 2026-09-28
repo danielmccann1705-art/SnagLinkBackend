@@ -101,7 +101,8 @@ enum IssuedReportService {
     static func encode(_ snapshot: ReportSnapshot) throws -> String { try PlatformMutationService.encode(snapshot) }
 
     static func statusLabel(status: String, legacy: Bool, acceptance: ReportSnapshot.Acceptance?) -> String {
-        if legacy { return status == "closed" ? "Legacy closure — unverified" : "Legacy status — unverified" }
+        // Dan's words (F02 amendments §2.2-3): a 1.x import's closure is a device closure too.
+        if legacy { return status == "closed" ? "Previously closed on this device — unverified" : "Legacy status — unverified" }
         switch status {
         case "open": return "Open"
         case "in_progress": return "In progress"

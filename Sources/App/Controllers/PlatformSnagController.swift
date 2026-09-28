@@ -13,6 +13,7 @@ struct PlatformSnagController: RouteCollection {
         snags.post(":snagId", "assignment", use: assign)
         snags.post(":snagId", "archive", use: archive)
         snags.post(":snagId", "restore", use: restore)
+        snags.post(":snagId", "workflow", "device-closure", use: deviceClosure)
     }
     private func id(_ key: String, _ req: Request) throws -> UUID {
         guard let raw = req.parameters.get(key), let id = UUID(uuidString: raw) else { throw Abort(.badRequest) }
@@ -76,6 +77,13 @@ struct PlatformSnagController: RouteCollection {
         return try await mutate(req: req, command: body, metadata: body.mutation, action: .edit) { db, project, _, actorID in
             let snag = try await PlatformSnagService.find(snagID, projectID: project.requireID(), on: db)
             return try await PlatformSnagService.publish(body, snag: snag, project: project, actorID: actorID, on: db)
+        }
+    }
+    @Sendable func deviceClosure(req: Request) async throws -> PlatformSnagResponse {
+        let body = try req.content.decode(DeviceClosureCommand.self), snagID = try id("snagId", req)
+        return try await mutate(req: req, command: body, metadata: body.mutation, action: .edit) { db, project, _, actorID in
+            let snag = try await PlatformSnagService.find(snagID, projectID: project.requireID(), on: db)
+            return try await PlatformSnagService.carryDeviceClosure(body, snag: snag, project: project, actorID: actorID, on: db)
         }
     }
     @Sendable func archive(req: Request) async throws -> PlatformSnagResponse { try await archive(req, restore: false) }

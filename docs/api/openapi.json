@@ -14113,6 +14113,168 @@
           }
         }
       }
+    },
+    "/api/v2/projects/{projectId}/snags/{snagId}/workflow/device-closure": {
+      "post": {
+        "operationId": "carryDeviceClosure",
+        "summary": "Record that an existing snag was closed on a device before it reached the workspace (unverified)",
+        "description": "F02 amendments §2.2-2. For copies made without the create field (build 4, build 3's Save to workspace). Edit permission; idempotent through mutation receipts; refused with 409 device_closure_not_applicable unless the snag is open, has no workflow qualification, no completion attempt and no review decision; 400 invalid_device_closure for a bad date or status; 410 snag_archived for an archived snag. Increments revision and workflowRevision and records workspace activity snag_device_closure_carried. The result is the same unverified closure the create field records.",
+        "security": [
+          {
+            "browserSession": []
+          },
+          {
+            "nativeBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "projectId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "snagId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact PORTAL_ORIGIN; required for cookie-authenticated mutations and public browser email exchange."
+          },
+          {
+            "name": "X-CSRF-Token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required with browser-session cookies. Native Bearer requests do not use CSRF."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed result. Mutations return only after transaction commit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlatformSnagResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign in again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Action not permitted or previously held project access revoked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource unavailable without revealing cross-workspace existence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Revision, identity, operation or lifecycle conflict. Retain the original draft/request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "$ref": "#/components/schemas/SnagRevisionConflict"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Expired, archived or rebootstrap required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Bounded request limit reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporary provider/service failure; do not infer success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceClosureCommand"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -15581,6 +15743,10 @@
           },
           "fields": {
             "$ref": "#/components/schemas/SnagFields"
+          },
+          "deviceClosure": {
+            "$ref": "#/components/schemas/DeviceClosure",
+            "description": "Optional. Older clients never send it; an older server ignores it, and the reply's missing workflow.qualification tells the client so."
           }
         },
         "required": [
@@ -21126,6 +21292,55 @@
           "member"
         ],
         "additionalProperties": false
+      },
+      "DeviceClosure": {
+        "type": "object",
+        "description": "A closure made on a device before the snag reached the workspace (F02 amendments §2.2). Recorded exactly like a 1.x import's unverified closure: status closed, closedAt empty, workflow.qualification legacy_unverified with sourceStatus and sourceClosedAt. Never accepted, never in the review queue, never overdue; a reviewer can reopen it.",
+        "properties": {
+          "closedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was closed on the device: ISO 8601 without fractional seconds, not before 2015-01-01 and not in the future."
+          },
+          "sourceStatus": {
+            "type": "string",
+            "enum": [
+              "closed"
+            ]
+          }
+        },
+        "required": [
+          "closedAt",
+          "sourceStatus"
+        ]
+      },
+      "DeviceClosureCommand": {
+        "type": "object",
+        "properties": {
+          "mutation": {
+            "$ref": "#/components/schemas/MutationMetadata"
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "closedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "sourceStatus": {
+            "type": "string",
+            "enum": [
+              "closed"
+            ]
+          }
+        },
+        "required": [
+          "mutation",
+          "expectedRevision",
+          "closedAt",
+          "sourceStatus"
+        ]
       }
     }
   }

@@ -118,6 +118,18 @@ export function productionContainerEnvironment(env) {
       values[key] = env[key];
     }
   }
+  // Database pool (wave 3): optional total across event loops, 1 to 16; absent keeps one
+  // connection per event loop. The runtime diagnostics route is staging-only.
+  if (env.DATABASE_MAX_CONNECTIONS !== undefined) {
+    const text = typeof env.DATABASE_MAX_CONNECTIONS === 'number' ? String(env.DATABASE_MAX_CONNECTIONS) : env.DATABASE_MAX_CONNECTIONS;
+    if (typeof text !== 'string' || !/^([1-9]|1[0-6])$/.test(text)) {
+      throw new Error('DATABASE_MAX_CONNECTIONS must be a whole number from 1 to 16');
+    }
+    values.DATABASE_MAX_CONNECTIONS = text;
+  }
+  if (env.RUNTIME_DIAGNOSTICS !== undefined) {
+    throw new Error('Runtime diagnostics are staging-only');
+  }
   const pushKeys = ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY', 'APNS_BUNDLE_ID', 'APNS_ENVIRONMENT'];
   if (pushKeys.some(key => env[key] !== undefined)) {
     for (const key of pushKeys) required(key);

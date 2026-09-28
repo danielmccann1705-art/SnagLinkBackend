@@ -86,8 +86,38 @@ export function containerEnvironment(env) {
     ...appleEnvironment(env, candidate),
     ...importPreparation(env, candidate, base),
     ...privateStorage(env, candidate),
-    ...logStream(env)
+    ...logStream(env),
+    ...capacity(env)
   };
+}
+
+// The database pool and the staging-only runtime diagnostics route (wave 3, 28 Sep 2026).
+// Both are optional; absent, the container runs exactly as before (one database
+// connection per event loop, no diagnostics route). DATABASE_MAX_CONNECTIONS is the
+// total pool across event loops, a whole number from 1 to 16 (a JSON number or string).
+// RUNTIME_DIAGNOSTICS is absent or exactly "enabled"; the production adapter refuses it.
+/** @returns {Record<string, string>} */
+function capacity(env) {
+  const selected = {};
+  const pool = databaseConnections(env.DATABASE_MAX_CONNECTIONS);
+  if (pool !== undefined) selected.DATABASE_MAX_CONNECTIONS = pool;
+  if (env.RUNTIME_DIAGNOSTICS !== undefined) {
+    if (env.RUNTIME_DIAGNOSTICS !== 'enabled') {
+      throw new Error('RUNTIME_DIAGNOSTICS is either absent or exactly "enabled"');
+    }
+    selected.RUNTIME_DIAGNOSTICS = 'enabled';
+  }
+  return selected;
+}
+
+/** @returns {string | undefined} */
+export function databaseConnections(value) {
+  if (value === undefined) return undefined;
+  const text = typeof value === 'number' ? String(value) : value;
+  if (typeof text !== 'string' || !/^([1-9]|1[0-6])$/.test(text)) {
+    throw new Error('DATABASE_MAX_CONNECTIONS must be a whole number from 1 to 16');
+  }
+  return text;
 }
 
 // Where the container's log goes, and the marker that switches the one-run

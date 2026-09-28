@@ -41,14 +41,18 @@ struct AuthController: RouteCollection {
         let appleUserId = appleToken.subject.value
         let email = appleToken.email
 
-        let user = try await req.db.transaction { db in
-            let user = try await VerifiedIdentityService.resolveApple(subject: appleUserId, email: email, name: input.firstName, on: db)
+        let emailVerified = appleToken.emailVerified?.value == true
+        // One transaction for the account and its identities; a race the unique constraints
+        // caught is retried once against the winner (F21, concurrent first sign-ins).
+        let user = try await VerifiedIdentityService.transactionRetryingIdentityRace(on: req.db) { db in
+            let user = try await VerifiedIdentityService.resolveApple(subject: appleUserId, email: email, emailVerified: emailVerified,
+                                                                      name: input.firstName, on: db)
             // The same adoption the web Apple path performs. Without it a person who
             // signs in with Apple on their phone has only an `apple` identity, so a
             // sign-in link sent to that address in a browser cannot resolve to this
             // account and Google would make a second one. Relay addresses from Hide
             // My Email adopt exactly like any other verified address.
-            if appleToken.emailVerified?.value == true, let email, !email.isEmpty {
+            if emailVerified, let email, !email.isEmpty {
                 _ = try await VerifiedIdentityService.adoptProviderVerifiedEmail(email, to: user.requireID(), on: db)
             }
             return user
