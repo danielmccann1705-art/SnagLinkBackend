@@ -24,8 +24,22 @@ struct WorkspaceAccessService {
     /// All workspace mutations and project commands lock this same scope and
     /// re-read authority in their transaction. Removal cannot race a later write.
     static func lock(_ id: UUID, on db: Database) async throws {
-        try await VerifiedIdentityService.lock("workspace:" + id.uuidString, on: db)
+        try await VerifiedIdentityService.sql(db).raw("""
+            SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "workspace:" + id.uuidString), 0)) IS NULL AS locked
+            FROM (SELECT set_config('lock_timeout', \(bind: commandLockTimeout), true) AS applied) AS bound WHERE bound.applied IS NOT NULL
+            """).run()
     }
+
+    /// Bounded lock waits (Fable, final remediation design §5 F-L4). A transaction queued for a
+    /// workspace lock holds a pooled connection while it waits; without a bound, one long read plus
+    /// one queued command plus a few new reads could hold the whole pool. The first statement that
+    /// takes a workspace lock sets `lock_timeout` for the rest of its transaction (`set_config(...,
+    /// true)` is `SET LOCAL`), in the same statement so it costs no round trip: the bound is applied
+    /// in the FROM clause, which PostgreSQL evaluates before the lock in the select list. A wait
+    /// that reaches the bound fails with SQLSTATE 55P03, answered as 503 `workspace_busy` with
+    /// Retry-After (`PrivateRequestLoggingMiddleware`). Every client already retries a 503.
+    static let readLockTimeout = "8s"
+    static let commandLockTimeout = "15s"
 
     /// The same scope, shared (wave 3, 28 Sep 2026). Reads of one workspace used to queue
     /// behind each other on the exclusive lock above, so a busy workspace served about one
@@ -35,7 +49,10 @@ struct WorkspaceAccessService {
     /// Only for a transaction that writes nothing and never asks for the exclusive lock
     /// afterwards: two shared holders both upgrading would deadlock.
     static func readLock(_ id: UUID, on db: Database) async throws {
-        try await VerifiedIdentityService.sql(db).raw("SELECT pg_advisory_xact_lock_shared(hashtextextended(\(bind: "workspace:" + id.uuidString), 0))").run()
+        try await VerifiedIdentityService.sql(db).raw("""
+            SELECT pg_advisory_xact_lock_shared(hashtextextended(\(bind: "workspace:" + id.uuidString), 0)) IS NULL AS locked
+            FROM (SELECT set_config('lock_timeout', \(bind: readLockTimeout), true) AS applied) AS bound WHERE bound.applied IS NOT NULL
+            """).run()
     }
 
     static func personal(for userID: UUID, on db: Database) async throws -> Team {
@@ -189,7 +206,8 @@ struct ProjectAccessService {
         //    string Swift's `uuidString` produces (PostgreSQL's uuid text is lower-case, hence upper()).
         guard let located = try await sql.raw("""
             SELECT p.workspace_id, pg_advisory_xact_lock_shared(hashtextextended('workspace:' || upper(p.workspace_id::text), 0)) IS NULL AS lock_result
-            FROM projects p WHERE p.id = \(bind: projectID) AND p.workspace_id IS NOT NULL
+            FROM projects p, (SELECT set_config('lock_timeout', \(bind: WorkspaceAccessService.readLockTimeout), true) AS applied) AS bound
+            WHERE p.id = \(bind: projectID) AND p.workspace_id IS NOT NULL AND bound.applied IS NOT NULL
             """).first() else {
             let (project, actions) = try await check(.read, projectID: projectID, actorID: actorID, shared: true, on: db)
             guard let workspaceID = project.workspaceId, let team = try await Team.find(workspaceID, on: db) else { throw Abort(.conflict, reason: "Project access changed. Refresh to continue") }
@@ -232,7 +250,11 @@ struct ProjectAccessService {
 
     private static func check(_ action: ProjectAccessPolicy.Action, projectID: UUID, actorID: UUID, shared: Bool, on db: Database) async throws -> (Project, Set<ProjectAccessPolicy.Action>) {
         guard var project = try await Project.find(projectID, on: db) else { throw Abort(.notFound, reason: "Project unavailable") }
+        var shared = shared
         if project.workspaceId == nil {
+            // Fable §5 F-L3: attaching a pre-workspace project is a write, so this call takes the
+            // workspace lock exclusively even when a read asked for the shared path.
+            shared = false
             guard project.ownerId == actorID else { throw Abort(.notFound, reason: "Project unavailable") }
             let personal = try await WorkspaceAccessService.personal(for: actorID, on: db)
             project.workspaceId = try personal.requireID()

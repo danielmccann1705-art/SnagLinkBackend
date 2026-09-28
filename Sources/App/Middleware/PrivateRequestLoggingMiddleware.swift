@@ -1,4 +1,5 @@
 import Vapor
+import FluentPostgresDriver
 
 /// Legacy URL paths contain capability tokens. Log only registered route patterns
 /// and status codes, never request URLs, query strings, bodies or error bindings.
@@ -23,6 +24,11 @@ struct PrivateRequestLoggingMiddleware: AsyncMiddleware {
         } catch let conflict as RevisionConflict {
             response = Response(status: .conflict)
             try response.content.encode(conflict.body)
+        } catch let error as PSQLError where error.serverInfo?[.sqlState] == "55P03" {
+            // A bounded workspace-lock wait ran out (WorkspaceAccessService lock timeouts): nothing was
+            // changed, and the same request can simply be sent again.
+            response = Response(status: .serviceUnavailable, headers: ["Retry-After": "2"])
+            try response.content.encode(Failure(error: true, reason: "This workspace is busy. Try again in a moment.", identifier: "workspace_busy"))
         } catch {
             let abort = error as? AbortError
             let status = abort?.status ?? .internalServerError
