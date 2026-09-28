@@ -164,6 +164,51 @@ enum SnagRegisterService {
         }
         return result
     }
+    /// `summaries` and, in the same statement, the prepared, unexpired Contractor links of `sharing` (the work summary's
+    /// separate count query, Lane 2 28 Sep evening): the same two queries' rows, UNION ALL-ed and told apart by `row_kind`.
+    static func summariesAndPreparedLinks(projectIDs: [UUID], sharing: [UUID], today: String, nextWeek: String, on db: Database) async throws -> (summaries: [UUID: SummaryRow], prepared: [UUID: Int]) {
+        guard !sharing.isEmpty else { return (try await summaries(projectIDs: projectIDs, archived: false, today: today, nextWeek: nextWeek, on: db), [:]) }
+        guard !projectIDs.isEmpty else { return ([:], [:]) }
+        let owed = contractorOwedStatuses
+        let rows = try await VerifiedIdentityService.sql(db).raw("""
+            SELECT 'summary' AS row_kind, s.project_id,
+                count(*) AS total,
+                count(*) FILTER (WHERE s.status = 'awaiting_review' AND s.workflow_qualification IS NULL) AS awaiting,
+                count(*) FILTER (WHERE s.due_on < \(bind: today) AND s.status = ANY(\(bind: owed)) AND s.workflow_qualification IS NULL) AS overdue,
+                count(*) FILTER (WHERE s.workflow_qualification IS NOT NULL) AS legacy,
+                count(*) FILTER (WHERE s.status = 'awaiting_review' AND s.workflow_qualification IS NULL AND s.due_on < \(bind: today)) AS review_past_due,
+                count(*) FILTER (WHERE s.contractor_id IS NULL AND s.status = 'open') AS unassigned_open,
+                count(*) FILTER (WHERE s.status = 'changes_requested') AS changes_requested,
+                count(*) FILTER (WHERE s.due_on >= \(bind: today) AND s.due_on < \(bind: nextWeek)) AS due_next7,
+                count(*) FILTER (WHERE s.due_on >= \(bind: today) AND s.due_on < \(bind: nextWeek) AND s.status = 'closed') AS due_next7_closed,
+                (SELECT min(a.submitted_at) FROM completion_attempts a JOIN snags s2 ON s2.id = a.snag_id AND s2.project_id = a.project_id
+                  WHERE a.project_id = s.project_id AND a.state = 'pending' AND s2.status = 'awaiting_review' AND s2.workflow_qualification IS NULL
+                    AND s2.archived_at IS NULL) AS oldest
+            FROM snags s
+            WHERE s.project_id = ANY(\(bind: projectIDs)) AND s.archived_at IS NULL
+            GROUP BY s.project_id
+            UNION ALL
+            SELECT 'links' AS row_kind, project_id, count(*) AS total, 0, 0, 0, 0, 0, 0, 0, 0, NULL::timestamptz
+            FROM link_grants
+            WHERE project_id = ANY(\(bind: sharing)) AND state = 'prepared' AND expires_at > now() GROUP BY project_id
+            """).all()
+        var result: [UUID: SummaryRow] = [:], prepared: [UUID: Int] = [:]
+        for row in rows {
+            let id = try row.decode(column: "project_id", as: UUID.self)
+            if try row.decode(column: "row_kind", as: String.self) == "links" { prepared[id] = try row.decode(column: "total", as: Int.self); continue }
+            result[id] = SummaryRow(summary: Summary(total: try row.decode(column: "total", as: Int.self),
+                    awaitingReview: try row.decode(column: "awaiting", as: Int.self), overdue: try row.decode(column: "overdue", as: Int.self),
+                    legacyUnverified: try row.decode(column: "legacy", as: Int.self), reviewPastDue: try row.decode(column: "review_past_due", as: Int.self),
+                    oldestAwaitingReviewSince: try row.decode(column: "oldest", as: Date?.self)),
+                unassignedOpen: try row.decode(column: "unassigned_open", as: Int.self), changesRequested: try row.decode(column: "changes_requested", as: Int.self),
+                dueNext7: try row.decode(column: "due_next7", as: Int.self), dueNext7Closed: try row.decode(column: "due_next7_closed", as: Int.self))
+        }
+        for id in projectIDs where result[id] == nil {
+            result[id] = SummaryRow(summary: Summary(total: 0, awaitingReview: 0, overdue: 0, legacyUnverified: 0, reviewPastDue: 0, oldestAwaitingReviewSince: nil),
+                                    unassignedOpen: 0, changesRequested: 0, dueNext7: 0, dueNext7Closed: 0)
+        }
+        return (result, prepared)
+    }
     struct EvidencePreview: Content { let snagId: UUID; let asset: MediaAssetResponse; let count: Int }
     struct Page: Content {
         let items: [PlatformSnagResponse]; let page: Int; let hasMore: Bool
@@ -289,6 +334,18 @@ enum RegisterSQL {
             return "\(number), display_number ASC, id ASC"
         }
     }
+    /// The page as two CTEs after `filtered`: the order is decided on the sort keys and ids alone (a narrow sort: a deep page of
+    /// a 5,000-snag project no longer sorts whole rows), then the page's 50 rows are read by id. Same rows, same order.
+    static func pageCTE(order: SQLQueryString, limit: Int, offset: Int) -> SQLQueryString {
+        """
+        page_keys AS (
+            SELECT id AS page_id, row_number() OVER (ORDER BY \(order)) AS register_position
+            FROM filtered ORDER BY \(order) LIMIT \(bind: limit) OFFSET \(bind: offset)
+        ), page AS (
+            SELECT snags.*, page_keys.register_position FROM page_keys JOIN snags ON snags.id = page_keys.page_id
+        )
+        """
+    }
     /// Page rows (`page.*` = the snag columns and `register_position`) with the page's contractor label (`ct_…`,
     /// only a platform-managed contractor of `workspace`) and evidence preview (`ph_…`: the first ready, attached
     /// photo in `list`'s order, and `ph_evidence_count`) joined on. `page` must be a CTE of snag rows.
@@ -383,10 +440,7 @@ extension SnagRegisterService {
                 FROM scoped
             ), filtered AS NOT MATERIALIZED (
                 SELECT * FROM scoped WHERE \(RegisterSQL.whereClause(RegisterSQL.conditions(filters, today: window.today, nextWeek: window.nextWeek)))
-            ), page AS (
-                SELECT filtered.*, row_number() OVER (ORDER BY \(RegisterSQL.order(filters))) AS register_position
-                FROM filtered ORDER BY \(RegisterSQL.order(filters)) LIMIT 50 OFFSET \(bind: (page - 1) * 50)
-            )
+            ), \(RegisterSQL.pageCTE(order: RegisterSQL.order(filters), limit: 50, offset: (page - 1) * 50))
             SELECT scope_workspace.id AS hd_workspace_id, scope_workspace.hd_owner_id, scope_workspace.hd_platform_managed, scope_workspace.hd_archived_at,
                    scope_workspace.access_workspace_kind, scope_workspace.access_workspace_owner, scope_workspace.access_workspace_state,
                    scope_workspace.access_workspace_timezone, scope_workspace.access_user_state, scope_workspace.access_member_role,

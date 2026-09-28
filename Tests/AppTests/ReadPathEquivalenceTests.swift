@@ -677,4 +677,57 @@ final class ReadPathEquivalenceTests: XCTestCase {
         }
         XCTAssertTrue(sawEvidence)
     }
+    func testWorkSummaryReadsPreparedLinksInTheSameStatementWithTheSameCounts() async throws {
+        let owner = try await user("owner"), member = try await user("member")
+        let company = try await app.db.transaction { db in try await WorkspaceAccessService.createCompany(id: UUID(), name: "Prepared Links Ltd", actorID: owner.requireID(), on: db) }
+        let companyID = try company.requireID(), ownerID = try owner.requireID()
+        try await app.db.transaction { db in try await WorkspaceAccessService.putMembership(workspaceID: companyID, userID: member.requireID(), role: "member", on: db) }
+        let p1 = try await project(owner, workspace: companyID, name: "Links · Plot 1")
+        let p2 = try await project(owner, workspace: companyID, name: "Links · Plot 2")
+        let p3 = try await project(owner, workspace: companyID, name: "Links · Plot 3")
+        let oak = try await contractor(owner, workspace: companyID, project: p1, name: "Oak Glazing")
+        try await populate(owner, p1, contractors: [oak], count: 14, seed: 5)
+        try await populate(owner, p2, contractors: [oak], count: 6, seed: 6)
+        try await sql("INSERT INTO project_access (project_id, workspace_id, user_id, role) VALUES (\(bind: p2.project.id), \(bind: companyID), \(bind: member.requireID()), 'member')")
+        func link(_ envelope: PlatformProjectResponse, state: String, expiresInDays: Double) async throws {
+            try await sql("""
+                INSERT INTO link_grants (id, workspace_id, project_id, creator_id, mode, state, revision, duration_days, created_at, expires_at, revoked_at)
+                VALUES (\(bind: UUID()), \(bind: companyID), \(bind: envelope.project.id), \(bind: ownerID), 'read_only', \(bind: state), 1, 14, NOW(),
+                        NOW() + \(bind: "\(Int(expiresInDays * 24)) hours")::interval, \(bind: state == "revoked" ? Optional(Date()) : nil))
+                """)
+        }
+        try await link(p1, state: "prepared", expiresInDays: 3); try await link(p1, state: "prepared", expiresInDays: 10)
+        try await link(p1, state: "prepared", expiresInDays: -1); try await link(p1, state: "revoked", expiresInDays: 5)
+        try await link(p2, state: "prepared", expiresInDays: 1)
+        let ids = [p1.project.id, p2.project.id, p3.project.id]
+        let window = try SnagRegisterService.calendarWindow(identifier: company.timezone, now: Date())
+        for sharing in [ids, [p2.project.id], []] {
+            let (combined, prepared) = try await SnagRegisterService.summariesAndPreparedLinks(projectIDs: ids, sharing: sharing, today: window.today, nextWeek: window.nextWeek, on: app.db)
+            let reference = try await SnagRegisterService.summaries(projectIDs: ids, archived: false, today: window.today, nextWeek: window.nextWeek, on: app.db)
+            var expected: [UUID: Int] = [:]
+            if !sharing.isEmpty {
+                for row in try await VerifiedIdentityService.sql(app.db).raw("""
+                    SELECT project_id, count(*) AS n FROM link_grants
+                    WHERE project_id = ANY(\(bind: sharing)) AND state = 'prepared' AND expires_at > now() GROUP BY project_id
+                    """).all() { expected[try row.decode(column: "project_id", as: UUID.self)] = try row.decode(column: "n", as: Int.self) }
+            }
+            XCTAssertEqual(prepared, expected, "sharing \(sharing.count)")
+            for id in ids {
+                let a = combined[id]!, b = reference[id]!
+                XCTAssertEqual(try json(a.summary), try json(b.summary))
+                XCTAssertEqual([a.unassignedOpen, a.changesRequested, a.dueNext7, a.dueNext7Closed], [b.unassignedOpen, b.changesRequested, b.dueNext7, b.dueNext7Closed])
+            }
+        }
+        let all = try await SnagRegisterService.summariesAndPreparedLinks(projectIDs: ids, sharing: ids, today: window.today, nextWeek: window.nextWeek, on: app.db)
+        XCTAssertEqual(all.prepared, [p1.project.id: 2, p2.project.id: 1], "expired and revoked links are not counted")
+        // Through HTTP: the owner may share (counted), a project Member may not (absent).
+        let response = try await request(.GET, "api/v2/workspaces/\(companyID)/work-summary", user: owner)
+        XCTAssertEqual(response.status, .ok, response.body.string)
+        let summary = try response.content.decode(WorkspaceWorkController.Summary.self)
+        XCTAssertEqual(summary.projects.first { $0.projectId == p1.project.id }?.preparedLinks, 2)
+        XCTAssertEqual(summary.projects.first { $0.projectId == p3.project.id }?.preparedLinks, 0)
+        XCTAssertEqual(summary.totals.preparedLinks, 3)
+        let memberView = try await request(.GET, "api/v2/workspaces/\(companyID)/work-summary", user: member).content.decode(WorkspaceWorkController.Summary.self)
+        XCTAssertEqual(memberView.projects.map(\.projectId), [p2.project.id]); XCTAssertNil(memberView.projects.first?.preparedLinks)
+    }
 }

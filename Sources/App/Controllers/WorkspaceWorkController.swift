@@ -86,17 +86,9 @@ struct WorkspaceWorkController: RouteCollection {
             let window = try SnagRegisterService.calendarWindow(identifier: scope.team.timezone, now: Date())
             let readable = Array(scope.readable.prefix(Self.summaryPageSize))
             let managed = try readable.filter { $0.project.platformManaged }.map { try $0.project.requireID() }
-            let rows = try await SnagRegisterService.summaries(projectIDs: managed, archived: false, today: window.today, nextWeek: window.nextWeek, on: db)
             let sharing = try readable.filter { $0.project.platformManaged && $0.actions.contains(.share) }.map { try $0.project.requireID() }
-            var prepared: [UUID: Int] = [:]
-            if !sharing.isEmpty {
-                for row in try await VerifiedIdentityService.sql(db).raw("""
-                    SELECT project_id, count(*) AS n FROM link_grants
-                    WHERE project_id = ANY(\(bind: sharing)) AND state = 'prepared' AND expires_at > now() GROUP BY project_id
-                    """).all() {
-                    prepared[try row.decode(column: "project_id", as: UUID.self)] = try row.decode(column: "n", as: Int.self)
-                }
-            }
+            // The summaries and the prepared-link counts in one statement (Lane 2, 28 Sep evening; were two).
+            let (rows, prepared) = try await SnagRegisterService.summariesAndPreparedLinks(projectIDs: managed, sharing: sharing, today: window.today, nextWeek: window.nextWeek, on: db)
             var preparedTotal = 0
             var projects: [ProjectWork] = []
             var total = 0, overdue = 0, legacy = 0, pastDue = 0, awaiting = 0, awaitingAll = 0, unassigned = 0, changes = 0, due7 = 0, due7Closed = 0
@@ -174,10 +166,7 @@ struct WorkspaceWorkController: RouteCollection {
                 WITH scope_workspace AS (SELECT \(bind: workspaceID)::uuid AS id),
                 filtered AS NOT MATERIALIZED (
                     SELECT * FROM snags WHERE project_id = ANY(\(bind: order)) AND \(RegisterSQL.whereClause(conditions))
-                ), page AS (
-                    SELECT filtered.*, row_number() OVER (ORDER BY \(sortOrder)) AS register_position
-                    FROM filtered ORDER BY \(sortOrder) LIMIT \(bind: Self.pageSize) OFFSET \(bind: (page - 1) * Self.pageSize)
-                )
+                ), \(RegisterSQL.pageCTE(order: sortOrder, limit: Self.pageSize, offset: (page - 1) * Self.pageSize))
                 SELECT (SELECT count(*) FROM filtered) AS register_total, \(RegisterSQL.pageColumns)
                 FROM scope_workspace
                 LEFT JOIN page ON TRUE
