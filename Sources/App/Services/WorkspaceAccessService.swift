@@ -200,22 +200,38 @@ struct ProjectAccessService {
     }
 
     static func readContext(projectID: UUID, actorID: UUID, on db: Database) async throws -> ReadContext {
-        let sql = try VerifiedIdentityService.sql(db)
-        // 1. Find the project's workspace and take its shared lock in the same statement. The key is
-        //    byte-for-byte `WorkspaceAccessService.readLock`'s: "workspace:" + the upper-case UUID
-        //    string Swift's `uuidString` produces (PostgreSQL's uuid text is lower-case, hence upper()).
-        guard let located = try await sql.raw("""
-            SELECT p.workspace_id, pg_advisory_xact_lock_shared(hashtextextended('workspace:' || upper(p.workspace_id::text), 0)) IS NULL AS lock_result
+        try await readContext(projectID: projectID, actorID: actorID, located: try await locateForRead(projectID: projectID, on: db), on: db)
+    }
+
+    /// The project's workspace, found by the statement that takes that workspace's shared lock, and the workspace
+    /// calendar as read by that same statement: a hint only (its snapshot predates the lock); whoever uses it
+    /// compares it with the calendar re-read under the lock (Lane 2, 28 Sep 2026, evening).
+    struct Located: Sendable { let workspaceID: UUID; let timezoneHint: String? }
+
+    /// readContext's first statement. nil: no such project, or it predates workspaces (`check` handles both).
+    static func locateForRead(projectID: UUID, on db: Database) async throws -> Located? {
+        // The key is byte-for-byte `WorkspaceAccessService.readLock`'s: "workspace:" + the upper-case UUID
+        // string Swift's `uuidString` produces (PostgreSQL's uuid text is lower-case, hence upper()).
+        guard let located = try await VerifiedIdentityService.sql(db).raw("""
+            SELECT p.workspace_id, pg_advisory_xact_lock_shared(hashtextextended('workspace:' || upper(p.workspace_id::text), 0)) IS NULL AS lock_result,
+                   (SELECT t.timezone FROM teams t WHERE t.id = p.workspace_id) AS timezone_hint
             FROM projects p, (SELECT set_config('lock_timeout', \(bind: WorkspaceAccessService.readLockTimeout), true) AS applied) AS bound
             WHERE p.id = \(bind: projectID) AND p.workspace_id IS NOT NULL AND bound.applied IS NOT NULL
-            """).first() else {
+            """).first() else { return nil }
+        return .init(workspaceID: try located.decode(column: "workspace_id", as: UUID.self), timezoneHint: try located.decode(column: "timezone_hint", as: String?.self))
+    }
+
+    /// readContext after its first statement (`located` = that statement's answer).
+    static func readContext(projectID: UUID, actorID: UUID, located: Located?, on db: Database) async throws -> ReadContext {
+        // 1. No workspace found: a project that predates workspaces (or does not exist) goes through `check` unchanged.
+        guard let located else {
             let (project, actions) = try await check(.read, projectID: projectID, actorID: actorID, shared: true, on: db)
             guard let workspaceID = project.workspaceId, let team = try await Team.find(workspaceID, on: db) else { throw Abort(.conflict, reason: "Project access changed. Refresh to continue") }
             return .init(project: project, actions: actions, workspaceTimezone: team.timezone)
         }
-        let workspaceID = try located.decode(column: "workspace_id", as: UUID.self)
+        let workspaceID = located.workspaceID
         // 2. Everything the decision reads, re-read under the lock (a new statement, so a new snapshot).
-        guard let row = try await sql.raw("""
+        guard let row = try await VerifiedIdentityService.sql(db).raw("""
             SELECT p.*, t.kind AS access_workspace_kind, t.owner_user_id AS access_workspace_owner,
                    t.lifecycle_state AS access_workspace_state, t.timezone AS access_workspace_timezone,
                    (SELECT u.lifecycle_state FROM users u WHERE u.id = \(bind: actorID)) AS access_user_state,
@@ -228,6 +244,13 @@ struct ProjectAccessService {
             throw Abort(.conflict, reason: "Project access changed. Refresh to continue")
         }
         let project = try row.decode(fluentModel: Project.self)
+        let actions = try readDecision(row, projectID: projectID, workspaceID: workspaceID, actorID: actorID, ownerID: project.ownerId)
+        return .init(project: project, actions: actions, workspaceTimezone: try row.decode(column: "access_workspace_timezone", as: String.self))
+    }
+
+    /// readContext's decision from one row's access facts (`access_*` columns), with its errors in its order:
+    /// the account (401), the workspace kind (403), then `.read` (404). Shared by the one-statement register read.
+    static func readDecision(_ row: any SQLRow, projectID: UUID, workspaceID: UUID, actorID: UUID, ownerID: UUID) throws -> Set<ProjectAccessPolicy.Action> {
         guard try row.decode(column: "access_user_state", as: String?.self) == "active" else {
             throw Abort(.unauthorized, reason: "Account is no longer available")
         }
@@ -243,9 +266,9 @@ struct ProjectAccessService {
         let actions = ProjectAccessPolicy.allowedActions(actorID: actorID,
             workspace: .init(id: workspaceID, kind: kind, ownerID: try row.decode(column: "access_workspace_owner", as: UUID.self),
                              active: try row.decode(column: "access_workspace_state", as: String.self) == "active"),
-            project: .init(id: projectID, workspaceID: workspaceID, creatorID: project.ownerId), membership: membership, grant: grant)
+            project: .init(id: projectID, workspaceID: workspaceID, creatorID: ownerID), membership: membership, grant: grant)
         guard actions.contains(.read) else { throw Abort(.notFound, reason: "Project unavailable") }
-        return .init(project: project, actions: actions, workspaceTimezone: try row.decode(column: "access_workspace_timezone", as: String.self))
+        return actions
     }
 
     private static func check(_ action: ProjectAccessPolicy.Action, projectID: UUID, actorID: UUID, shared: Bool, on db: Database) async throws -> (Project, Set<ProjectAccessPolicy.Action>) {
@@ -316,33 +339,60 @@ struct WorkspaceReadScope {
     /// one page plus one); nil reads every active project of the workspace.
     static func load(workspaceID: UUID, actorID: UUID, offset: Int = 0, candidateLimit: Int? = nil, on db: Database) async throws -> WorkspaceReadScope {
         try await WorkspaceAccessService.readLock(workspaceID, on: db)
-        guard let team = try await Team.find(workspaceID, on: db) else { throw Abort(.notFound) }
-        let role = try await WorkspaceAccessService.role(actorID: actorID, workspace: team, on: db)
-        let sql = try VerifiedIdentityService.sql(db)
-        let memberOnly = team.kind == "company" && role == "member"
+        // Everything else in ONE statement under the lock (Lane 2, 28 Sep 2026, evening; was three to five: the
+        // workspace, the account, the membership for `role`, the candidates, the membership again for the policy).
+        // The same rows, read from one snapshot; `WorkspaceAccessService.role`'s checks are made below in its order
+        // with its errors, and the candidates are the project list's: active projects of the workspace, and for a
+        // company Member only those with an active grant, most recently updated first.
         let limit = candidateLimit.map { "LIMIT \($0) OFFSET \(offset)" } ?? ""
-        // The project list's candidates: active projects of the workspace; a company Member sees only
-        // projects with an active grant. The actor's grant rides along for the decision.
-        let rows = try await sql.raw("""
-            SELECT p.*,
-                   (SELECT g.role FROM project_access g WHERE g.state = 'active' AND g.workspace_id = p.workspace_id AND g.project_id = p.id AND g.user_id = \(bind: actorID) LIMIT 1) AS access_grant_role
-            FROM projects p
-            WHERE p.workspace_id = \(bind: workspaceID) AND p.archived_at IS NULL
-              AND (\(bind: !memberOnly) OR p.id IN (SELECT project_id FROM project_access WHERE state = 'active' AND workspace_id = \(bind: workspaceID) AND user_id = \(bind: actorID)))
-            ORDER BY p.updated_at DESC, p.id
-            \(unsafeRaw: limit)
+        let teamColumns = Team.keys.map { key -> SQLQueryString in "t.\(ident: key.description) AS \(ident: "scope_team_" + key.description)" }.joined(separator: ", ")
+        let rows = try await VerifiedIdentityService.sql(db).raw("""
+            WITH head AS (
+                SELECT \(teamColumns),
+                       (SELECT u.lifecycle_state FROM users u WHERE u.id = \(bind: actorID)) AS scope_user_state,
+                       (SELECT m.role FROM workspace_memberships m WHERE m.workspace_id = t.id AND m.user_id = \(bind: actorID)) AS scope_member_role,
+                       (SELECT m.state FROM workspace_memberships m WHERE m.workspace_id = t.id AND m.user_id = \(bind: actorID)) AS scope_member_state
+                FROM teams t WHERE t.id = \(bind: workspaceID)
+            )
+            SELECT head.*, candidate.*
+            FROM head LEFT JOIN LATERAL (
+                SELECT p.*,
+                       (SELECT g.role FROM project_access g WHERE g.state = 'active' AND g.workspace_id = p.workspace_id AND g.project_id = p.id AND g.user_id = \(bind: actorID) LIMIT 1) AS access_grant_role
+                FROM projects p
+                WHERE p.workspace_id = \(bind: workspaceID) AND p.archived_at IS NULL
+                  AND (NOT COALESCE(head.scope_team_kind = 'company' AND head.scope_member_state = 'active' AND head.scope_member_role = 'member', FALSE)
+                       OR p.id IN (SELECT project_id FROM project_access WHERE state = 'active' AND workspace_id = \(bind: workspaceID) AND user_id = \(bind: actorID)))
+                ORDER BY p.updated_at DESC, p.id
+                \(unsafeRaw: limit)
+            ) candidate ON TRUE
+            ORDER BY candidate.updated_at DESC, candidate.id
             """).all()
-        let memberRow = team.kind == "company"
-            ? try await sql.raw("SELECT role, state FROM workspace_memberships WHERE workspace_id = \(bind: workspaceID) AND user_id = \(bind: actorID)").first()
-            : nil
-        let membership: ProjectAccessPolicy.Membership? = try memberRow.flatMap { row in
-            guard let parsed = ProjectAccessPolicy.WorkspaceRole(rawValue: try row.decode(column: "role", as: String.self)) else { return nil }
-            return .init(workspaceID: workspaceID, userID: actorID, role: parsed, active: try row.decode(column: "state", as: String.self) == "active")
+        guard let first = rows.first else { throw Abort(.notFound) }
+        let team = try PrefixedSQLRow(base: first, prefix: "scope_team_").decode(fluentModel: Team.self)
+        // `WorkspaceAccessService.role`, check for check.
+        guard team.lifecycleState == "active" else { throw Abort(.notFound, reason: "Workspace unavailable") }
+        guard try first.decode(column: "scope_user_state", as: String?.self) == "active" else { throw Abort(.unauthorized, reason: "Account is no longer available") }
+        let memberRole = try first.decode(column: "scope_member_role", as: String?.self)
+        let memberState = try first.decode(column: "scope_member_state", as: String?.self)
+        let role: String
+        if team.kind == "personal" {
+            guard team.ownerUserId == actorID else { throw Abort(.notFound, reason: "Workspace unavailable") }
+            role = "owner"
+        } else {
+            guard memberState == "active", let active = memberRole else { throw Abort(.notFound, reason: "Workspace unavailable") }
+            guard active != "owner" || team.ownerUserId == actorID else { throw Abort(.forbidden) }
+            role = active
+        }
+        // The membership the policy reads (any state), for a company workspace only, as before.
+        var membership: ProjectAccessPolicy.Membership? = nil
+        if team.kind == "company", let raw = memberRole, let parsed = ProjectAccessPolicy.WorkspaceRole(rawValue: raw) {
+            membership = .init(workspaceID: workspaceID, userID: actorID, role: parsed, active: memberState == "active")
         }
         guard let kind = ProjectAccessPolicy.WorkspaceKind(rawValue: team.kind) else { throw Abort(.forbidden) }
         let workspace = ProjectAccessPolicy.Workspace(id: workspaceID, kind: kind, ownerID: team.ownerUserId, active: team.lifecycleState == "active")
         var projects: [(project: Project, actions: Set<ProjectAccessPolicy.Action>)] = []
         for row in rows {
+            guard !(try row.decodeNil(column: "id")) else { continue }
             let project = try row.decode(fluentModel: Project.self)
             let projectID = try project.requireID()
             let grant: ProjectAccessPolicy.Grant? = try row.decode(column: "access_grant_role", as: String?.self).flatMap { raw in

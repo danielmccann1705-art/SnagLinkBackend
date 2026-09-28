@@ -217,3 +217,208 @@ enum SnagRegisterService {
             }, evidence: evidence)
     }
 }
+
+/// Columns of one joined table carried under a prefix in a combined statement (Lane 2, 28 Sep 2026): a decoder
+/// that reads a whole row (`MediaAssetResponse(row)`, `decode(fluentModel:)`) reads the prefixed columns as if
+/// they were the only ones.
+struct PrefixedSQLRow: SQLRow {
+    let base: any SQLRow
+    let prefix: String
+    var allColumns: [String] { base.allColumns.filter { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) } }
+    func contains(column: String) -> Bool { base.contains(column: prefix + column) }
+    func decodeNil(column: String) throws -> Bool { try base.decodeNil(column: prefix + column) }
+    func decode<D: Decodable>(column: String, as type: D.Type) throws -> D { try base.decode(column: prefix + column, as: type) }
+}
+
+/// The register's filters, orders and page as SQL for one statement (Lane 2, 28 Sep 2026, evening). Staging's
+/// container is about 45 ms from its database per statement, so a register read of nine sequential statements
+/// cost about 0.5 s before anything else. These are exactly `SnagRegisterService.matching`'s conditions (same
+/// expressions, same bound values), `list`'s and the workspace register's orders and tie-breaks, and `range`'s
+/// LIMIT/OFFSET. `ReadPathEquivalenceTests` compares every page with the previous statements.
+enum RegisterSQL {
+    /// `matching(filters, …)` as conditions on unqualified `snags` columns (AND-ed; empty = no condition).
+    static func conditions(_ filters: SnagRegisterQuery, today: String, nextWeek: String) -> [SQLQueryString] {
+        var result: [SQLQueryString] = []
+        if let text = filters.q?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+            result.append("POSITION(LOWER(\(bind: text)) IN LOWER(CONCAT_WS(' ', reference, title, description, location))) > 0")
+        }
+        if let location = filters.location?.trimmingCharacters(in: .whitespacesAndNewlines), !location.isEmpty {
+            result.append("POSITION(LOWER(\(bind: location)) IN LOWER(COALESCE(location, ''))) > 0")
+        }
+        if let status = filters.status { result.append("status = \(bind: status)") }
+        if let priority = filters.priority { result.append("priority = \(bind: priority)") }
+        if filters.contractorId == "unassigned" { result.append("contractor_id IS NULL") }
+        else if let raw = filters.contractorId, let id = UUID(uuidString: raw) { result.append("contractor_id = \(bind: id)") }
+        switch filters.due {
+        case "overdue":
+            result.append("due_on < \(bind: today)")
+            result.append("status = ANY(\(bind: SnagRegisterService.contractorOwedStatuses))")
+            result.append("workflow_qualification IS NULL")
+        case "today": result.append("due_on = \(bind: today)")
+        case "next7": result.append("due_on >= \(bind: today)"); result.append("due_on < \(bind: nextWeek)")
+        case "none": result.append("due_on IS NULL")
+        default: break
+        }
+        return result
+    }
+    static func whereClause(_ conditions: [SQLQueryString]) -> SQLQueryString {
+        guard !conditions.isEmpty else { return "TRUE" }
+        return conditions.map { (condition: SQLQueryString) -> SQLQueryString in "(\(condition))" }.joined(separator: " AND ")
+    }
+    /// `list`'s order (project register) or the workspace register's (`projects` = the project order), then the
+    /// same tie-breaks: display number ascending and id ascending, exactly as Fluent's appended sorts.
+    static func order(_ filters: SnagRegisterQuery, projects: [UUID]? = nil) -> SQLQueryString {
+        let descending = filters.direction == "desc"
+        var project: SQLQueryString? = nil
+        if let projects { project = "array_position(\(bind: projects), project_id)" }
+        func then(_ first: SQLQueryString) -> SQLQueryString {
+            if let project { return "\(first), \(project), display_number ASC, id ASC" }
+            return "\(first), display_number ASC, id ASC"
+        }
+        switch filters.sort ?? "reference" {
+        case "due": return then(descending ? "due_on DESC NULLS LAST" : "due_on ASC NULLS LAST")
+        case "updated": return then(descending ? "updated_at DESC NULLS LAST" : "updated_at ASC NULLS LAST")
+        case "priority": return then(descending
+            ? "CASE priority WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC"
+            : "CASE priority WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END ASC")
+        default:
+            let number: SQLQueryString = descending ? "display_number DESC" : "display_number ASC"
+            // Project register: display number, then (Fluent's appended sorts) display number ascending, id.
+            // Workspace register: project, display number in the asked direction, id.
+            if let project { return "\(project), \(number), id ASC" }
+            return "\(number), display_number ASC, id ASC"
+        }
+    }
+    /// Page rows (`page.*` = the snag columns and `register_position`) with the page's contractor label (`ct_…`,
+    /// only a platform-managed contractor of `workspace`) and evidence preview (`ph_…`: the first ready, attached
+    /// photo in `list`'s order, and `ph_evidence_count`) joined on. `page` must be a CTE of snag rows.
+    static var pageJoins: SQLQueryString { """
+        LEFT JOIN contractors ct ON ct.id = page.contractor_id AND ct.workspace_id = scope_workspace.id AND ct.platform_managed = TRUE
+        LEFT JOIN LATERAL (
+            SELECT m.id, m.project_id, m.snag_id, m.purpose, m.intent_id, m.state, m.revision, m.original_sha256, m.original_size,
+                   m.original_mime, m.width, m.height, m.created_at, m.expires_at, m.attached_at, m.rendition_sha256, m.rendition_size,
+                   count(*) OVER () AS evidence_count
+            FROM media_assets m
+            WHERE m.project_id = page.project_id AND m.snag_id = page.id AND m.state = 'ready' AND m.attached_at IS NOT NULL
+            ORDER BY CASE m.purpose WHEN 'capture' THEN 0 ELSE 1 END, m.created_at, m.id
+            LIMIT 1
+        ) ph ON page.id IS NOT NULL
+        """ }
+    static var pageColumns: SQLQueryString { """
+        page.*, ct.id AS ct_id, ct.company_name AS ct_company_name, ct.contact_name AS ct_contact_name, ct.is_archived AS ct_is_archived,
+        ph.id AS ph_id, ph.project_id AS ph_project_id, ph.snag_id AS ph_snag_id, ph.purpose AS ph_purpose, ph.intent_id AS ph_intent_id,
+        ph.state AS ph_state, ph.revision AS ph_revision, ph.original_sha256 AS ph_original_sha256, ph.original_size AS ph_original_size,
+        ph.original_mime AS ph_original_mime, ph.width AS ph_width, ph.height AS ph_height, ph.created_at AS ph_created_at,
+        ph.expires_at AS ph_expires_at, ph.attached_at AS ph_attached_at, ph.rendition_sha256 AS ph_rendition_sha256,
+        ph.rendition_size AS ph_rendition_size, ph.evidence_count AS ph_evidence_count
+        """ }
+    /// The rows of one page, its contractor labels (sorted by id: the previous separate query returned them in no
+    /// specified order) and its evidence previews (by snag id, as `DISTINCT ON (snag_id) … ORDER BY snag_id` did).
+    static func decodePage(_ rows: [any SQLRow]) throws -> (snags: [Snag], contractors: [SnagRegisterService.ContractorLabel], evidence: [SnagRegisterService.EvidencePreview]) {
+        var snags: [Snag] = [], labels: [UUID: SnagRegisterService.ContractorLabel] = [:], evidence: [SnagRegisterService.EvidencePreview] = []
+        for row in rows {
+            guard !(try row.decodeNil(column: "register_position")) else { continue }
+            snags.append(try row.decode(fluentModel: Snag.self))
+            if !(try row.decodeNil(column: "ct_id")) {
+                let id = try row.decode(column: "ct_id", as: UUID.self)
+                labels[id] = .init(id: id, companyName: try row.decode(column: "ct_company_name", as: String.self),
+                                   contactName: try row.decode(column: "ct_contact_name", as: String?.self), isArchived: try row.decode(column: "ct_is_archived", as: Bool.self))
+            }
+            if !(try row.decodeNil(column: "ph_id")) {
+                evidence.append(.init(snagId: try row.decode(column: "ph_snag_id", as: UUID.self), asset: try MediaAssetResponse(PrefixedSQLRow(base: row, prefix: "ph_")),
+                                      count: try row.decode(column: "ph_evidence_count", as: Int.self)))
+            }
+        }
+        return (snags, labels.values.sorted { $0.id.uuidString < $1.id.uuidString }, evidence.sorted { $0.snagId.uuidString < $1.snagId.uuidString })
+    }
+}
+
+extension SnagRegisterService {
+    /// One project's register page in five statements instead of nine or ten (Lane 2, 28 Sep 2026, evening):
+    /// session, BEGIN, the workspace's shared lock (the statement that finds the project's workspace, as
+    /// `ProjectAccessService.readContext`), ONE statement for everything else, COMMIT.
+    ///
+    /// The one statement re-reads every access fact under the lock (exactly readContext's second statement) and,
+    /// from the same snapshot, the summary, the filtered total, the 50-row page, its contractor labels and its
+    /// evidence previews. The decision is then made in Swift by the same code as readContext; nothing read is
+    /// returned unless it allows reading, and the errors and their order are readContext's, then `list`'s.
+    /// The page is computed with the workspace calendar read (as a hint) in the lock statement; if the calendar
+    /// changed in between, or is not a valid time zone, or the filters are invalid, or the project predates
+    /// workspaces, the previous statements run instead (same answers, as before).
+    static func read(_ filters: SnagRegisterQuery, projectID: UUID, actorID: UUID, on db: Database, now: Date = Date()) async throws -> Page {
+        let located = try await ProjectAccessService.locateForRead(projectID: projectID, on: db)
+        guard let located, let hint = located.timezoneHint, let zone = TimeZone(identifier: hint), (try? filters.validate()) != nil else {
+            let context = try await ProjectAccessService.readContext(projectID: projectID, actorID: actorID, located: located, on: db)
+            return try await list(filters, project: context.project, timezone: context.workspaceTimezone, on: db, now: now)
+        }
+        let window = calendarWindow(zone, now: now)
+        let page = filters.page ?? 1
+        let archived: SQLQueryString = filters.archived == true ? "archived_at IS NOT NULL" : "archived_at IS NULL"
+        let archivedS2: SQLQueryString = filters.archived == true ? "s2.archived_at IS NOT NULL" : "s2.archived_at IS NULL"
+        let unfiltered = isUnfiltered(filters)
+        let filteredTotal: SQLQueryString = unfiltered ? "NULL::bigint" : "(SELECT count(*) FROM filtered)"
+        let owed = contractorOwedStatuses
+        let rows = try await VerifiedIdentityService.sql(db).raw("""
+            WITH scope_workspace AS (
+                SELECT p.workspace_id AS id, p.owner_id AS hd_owner_id, p.platform_managed AS hd_platform_managed, p.archived_at AS hd_archived_at,
+                       t.kind AS access_workspace_kind, t.owner_user_id AS access_workspace_owner,
+                       t.lifecycle_state AS access_workspace_state, t.timezone AS access_workspace_timezone,
+                       (SELECT u.lifecycle_state FROM users u WHERE u.id = \(bind: actorID)) AS access_user_state,
+                       (SELECT m.role FROM workspace_memberships m WHERE m.workspace_id = p.workspace_id AND m.user_id = \(bind: actorID)) AS access_member_role,
+                       (SELECT m.state FROM workspace_memberships m WHERE m.workspace_id = p.workspace_id AND m.user_id = \(bind: actorID)) AS access_member_state,
+                       (SELECT g.role FROM project_access g WHERE g.state = 'active' AND g.workspace_id = p.workspace_id AND g.project_id = p.id AND g.user_id = \(bind: actorID) LIMIT 1) AS access_grant_role
+                FROM projects p JOIN teams t ON t.id = p.workspace_id
+                WHERE p.id = \(bind: projectID)
+            ), scoped AS NOT MATERIALIZED (
+                SELECT * FROM snags WHERE project_id = \(bind: projectID) AND \(archived)
+            ), summary AS (
+                SELECT count(*) AS hd_total,
+                    count(*) FILTER (WHERE status = 'awaiting_review' AND workflow_qualification IS NULL) AS hd_awaiting,
+                    count(*) FILTER (WHERE due_on < \(bind: window.today) AND status = ANY(\(bind: owed)) AND workflow_qualification IS NULL) AS hd_overdue,
+                    count(*) FILTER (WHERE workflow_qualification IS NOT NULL) AS hd_legacy,
+                    count(*) FILTER (WHERE status = 'awaiting_review' AND workflow_qualification IS NULL AND due_on < \(bind: window.today)) AS hd_review_past_due,
+                    (SELECT min(a.submitted_at) FROM completion_attempts a JOIN snags s2 ON s2.id = a.snag_id AND s2.project_id = a.project_id
+                      WHERE a.project_id = \(bind: projectID) AND a.state = 'pending' AND s2.status = 'awaiting_review' AND s2.workflow_qualification IS NULL
+                        AND \(archivedS2)) AS hd_oldest
+                FROM scoped
+            ), filtered AS NOT MATERIALIZED (
+                SELECT * FROM scoped WHERE \(RegisterSQL.whereClause(RegisterSQL.conditions(filters, today: window.today, nextWeek: window.nextWeek)))
+            ), page AS (
+                SELECT filtered.*, row_number() OVER (ORDER BY \(RegisterSQL.order(filters))) AS register_position
+                FROM filtered ORDER BY \(RegisterSQL.order(filters)) LIMIT 50 OFFSET \(bind: (page - 1) * 50)
+            )
+            SELECT scope_workspace.id AS hd_workspace_id, scope_workspace.hd_owner_id, scope_workspace.hd_platform_managed, scope_workspace.hd_archived_at,
+                   scope_workspace.access_workspace_kind, scope_workspace.access_workspace_owner, scope_workspace.access_workspace_state,
+                   scope_workspace.access_workspace_timezone, scope_workspace.access_user_state, scope_workspace.access_member_role,
+                   scope_workspace.access_member_state, scope_workspace.access_grant_role,
+                   summary.*, \(filteredTotal) AS hd_filtered_total, \(RegisterSQL.pageColumns)
+            FROM scope_workspace CROSS JOIN summary
+            LEFT JOIN page ON TRUE
+            \(RegisterSQL.pageJoins)
+            ORDER BY page.register_position
+            """).all()
+        // Everything the decision reads, re-read under the lock: readContext's checks, in readContext's order.
+        guard let head = rows.first, try head.decode(column: "hd_workspace_id", as: UUID?.self) == located.workspaceID else {
+            throw Abort(.conflict, reason: "Project access changed. Refresh to continue")
+        }
+        _ = try ProjectAccessService.readDecision(head, projectID: projectID, workspaceID: located.workspaceID, actorID: actorID,
+                                                  ownerID: try head.decode(column: "hd_owner_id", as: UUID.self))
+        let timezone = try head.decode(column: "access_workspace_timezone", as: String.self)
+        guard timezone == hint else {
+            // The calendar changed between the two statements: the page above used the old one. Read it again as before.
+            guard let project = try await Project.find(projectID, on: db) else { throw Abort(.conflict, reason: "Project access changed. Refresh to continue") }
+            return try await list(filters, project: project, timezone: timezone, on: db, now: now)
+        }
+        // `list`'s checks, in `list`'s order (the filters were validated above; the calendar is valid).
+        try PlatformMutationService.requireManaged(platformManaged: try head.decode(column: "hd_platform_managed", as: Bool.self),
+                                                   archivedAt: try head.decode(column: "hd_archived_at", as: Date?.self))
+        let summary = Summary(total: try head.decode(column: "hd_total", as: Int.self),
+                              awaitingReview: try head.decode(column: "hd_awaiting", as: Int.self), overdue: try head.decode(column: "hd_overdue", as: Int.self),
+                              legacyUnverified: try head.decode(column: "hd_legacy", as: Int.self), reviewPastDue: try head.decode(column: "hd_review_past_due", as: Int.self),
+                              oldestAwaitingReviewSince: try head.decode(column: "hd_oldest", as: Date?.self))
+        let total = unfiltered ? summary.total : try head.decode(column: "hd_filtered_total", as: Int.self)
+        let decoded = try RegisterSQL.decodePage(rows)
+        return try Page(items: decoded.snags.map(PlatformSnagResponse.init), page: page, hasMore: page * 50 < total,
+                        total: total, summary: summary, contractors: decoded.contractors, evidence: decoded.evidence)
+    }
+}

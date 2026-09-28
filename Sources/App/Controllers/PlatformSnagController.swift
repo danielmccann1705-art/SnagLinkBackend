@@ -22,9 +22,9 @@ struct PlatformSnagController: RouteCollection {
     @Sendable func list(req: Request) async throws -> Page {
         let projectID = try id("projectId", req), actorID = try req.requireAuthenticatedUserId()
         let filters = try req.query.decode(SnagRegisterQuery.self)
+        // Five statements: the shared workspace lock, then one statement for access and the whole page (Lane 2).
         return try await req.db.transaction { db in
-            let context = try await ProjectAccessService.readContext(projectID: projectID, actorID: actorID, on: db)
-            return try await SnagRegisterService.list(filters, project: context.project, timezone: context.workspaceTimezone, on: db)
+            try await SnagRegisterService.read(filters, projectID: projectID, actorID: actorID, on: db)
         }
     }
     @Sendable func get(req: Request) async throws -> PlatformSnagResponse {

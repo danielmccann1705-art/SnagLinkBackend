@@ -198,7 +198,7 @@ final class WorkspaceLockBoundsTests: XCTestCase {
         let controllers = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/App/Controllers")
         let files = try FileManager.default.contentsOfDirectory(at: controllers, includingPropertiesForKeys: nil).filter { $0.pathExtension == "swift" }
-        let markers = ["requireRead(", "readContext(", "WorkspaceReadScope.load("]
+        let markers = ["requireRead(", "readContext(", "WorkspaceReadScope.load(", "SnagRegisterService.read("]
         let forbidden = ["WorkspaceAccessService.lock(", ".change(", ".record(", "activity(", ".save(on", "INSERT ", "UPDATE ", "DELETE ", "require(."]
         var checked = 0
         for file in files {

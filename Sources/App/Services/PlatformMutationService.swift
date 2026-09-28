@@ -64,7 +64,11 @@ struct PlatformMutationService {
         throw RevisionConflict(body: .init(current: PlatformSnagResponse(snag), changedFields: fields))
     }
     static func requireManaged(_ project: Project) throws {
-        guard project.platformManaged else { throw Abort(.conflict, reason: "Import and verify this existing project before editing it in the shared workspace", identifier: "project_import_required") }
-        guard project.archivedAt == nil else { throw Abort(.gone, reason: "This project is archived", identifier: "project_archived") }
+        try requireManaged(platformManaged: project.platformManaged, archivedAt: project.archivedAt)
+    }
+    /// The same check from the two columns it reads (the one-statement register read has no Project model).
+    static func requireManaged(platformManaged: Bool, archivedAt: Date?) throws {
+        guard platformManaged else { throw Abort(.conflict, reason: "Import and verify this existing project before editing it in the shared workspace", identifier: "project_import_required") }
+        guard archivedAt == nil else { throw Abort(.gone, reason: "This project is archived", identifier: "project_archived") }
     }
 }

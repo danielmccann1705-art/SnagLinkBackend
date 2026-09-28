@@ -163,39 +163,31 @@ struct WorkspaceWorkController: RouteCollection {
             guard !order.isEmpty else {
                 return Page(items: [], page: page, hasMore: false, total: 0, contractors: [], evidence: [], projectIds: [], unavailable: unavailable, asOfDate: window.today)
             }
-            let base = Snag.query(on: db).filter(\.$projectId ~~ order)
-            if filters.archived == true { base.filter(\.$archivedAt != nil) } else { base.filter(\.$archivedAt == nil) }
-            if queue == "review" { base.filter(\.$workflowQualification == nil) }
-            let query = SnagRegisterService.matching(filters, base: base, today: window.today, nextWeek: window.nextWeek)
-            let total = try await query.count()
-            let descending = filters.direction == "desc"
-            let projectOrder = DatabaseQuery.Sort.sql(embed: "array_position(\(bind: order), project_id)")
-            switch filters.sort ?? "reference" {
-            case "due": query.sort(.sql(raw: descending ? "due_on DESC NULLS LAST" : "due_on ASC NULLS LAST")).sort(projectOrder).sort(\.$displayNumber)
-            case "updated": query.sort(.sql(raw: descending ? "updated_at DESC NULLS LAST" : "updated_at ASC NULLS LAST")).sort(projectOrder).sort(\.$displayNumber)
-            case "priority": query.sort(.sql(raw: descending
-                ? "CASE priority WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC"
-                : "CASE priority WHEN 'critical' THEN 4 WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END ASC")).sort(projectOrder).sort(\.$displayNumber)
-            default: query.sort(projectOrder).sort(\.$displayNumber, descending ? .descending : .ascending)
-            }
-            let values = try await query.sort(\.$id).range(((page - 1) * Self.pageSize)..<(page * Self.pageSize)).all()
-            let contractorIDs = Set(values.compactMap(\.contractorId))
-            let contractors = contractorIDs.isEmpty ? [] : try await Contractor.query(on: db).filter(\.$id ~~ Array(contractorIDs))
-                .filter(\.$workspaceId == workspaceID).filter(\.$platformManaged == true).all()
-            let ids = try values.map { try $0.requireID() }
-            let projectsOnPage = Array(Set(values.map(\.projectId)))
-            let photos = ids.isEmpty ? [] : try await VerifiedIdentityService.sql(db).raw("""
-                SELECT DISTINCT ON (snag_id) media_assets.*, count(*) OVER (PARTITION BY snag_id) AS photo_count
-                FROM media_assets WHERE project_id = ANY(\(bind: projectsOnPage)) AND snag_id = ANY(\(bind: ids)) AND state = 'ready' AND attached_at IS NOT NULL
-                ORDER BY snag_id, CASE purpose WHEN 'capture' THEN 0 ELSE 1 END, created_at, id
+            // The total, the page, its contractor labels and its evidence previews in ONE statement (Lane 2, 28 Sep 2026,
+            // evening; was up to four): `SnagRegisterService.matching`'s conditions and this route's order as SQL
+            // (`RegisterSQL`), compared with the previous statements in `ReadPathEquivalenceTests`.
+            var conditions: [SQLQueryString] = [filters.archived == true ? "archived_at IS NOT NULL" : "archived_at IS NULL"]
+            if queue == "review" { conditions.append("workflow_qualification IS NULL") }
+            conditions += RegisterSQL.conditions(filters, today: window.today, nextWeek: window.nextWeek)
+            let sortOrder = RegisterSQL.order(filters, projects: order)
+            let rows = try await VerifiedIdentityService.sql(db).raw("""
+                WITH scope_workspace AS (SELECT \(bind: workspaceID)::uuid AS id),
+                filtered AS NOT MATERIALIZED (
+                    SELECT * FROM snags WHERE project_id = ANY(\(bind: order)) AND \(RegisterSQL.whereClause(conditions))
+                ), page AS (
+                    SELECT filtered.*, row_number() OVER (ORDER BY \(sortOrder)) AS register_position
+                    FROM filtered ORDER BY \(sortOrder) LIMIT \(bind: Self.pageSize) OFFSET \(bind: (page - 1) * Self.pageSize)
+                )
+                SELECT (SELECT count(*) FROM filtered) AS register_total, \(RegisterSQL.pageColumns)
+                FROM scope_workspace
+                LEFT JOIN page ON TRUE
+                \(RegisterSQL.pageJoins)
+                ORDER BY page.register_position
                 """).all()
-            let evidence = try photos.map { row in
-                SnagRegisterService.EvidencePreview(snagId: try row.decode(column: "snag_id", as: UUID.self), asset: try MediaAssetResponse(row), count: try row.decode(column: "photo_count", as: Int.self))
-            }
-            return Page(items: values.map { Row(projectId: $0.projectId, item: PlatformSnagResponse($0)) }, page: page, hasMore: page * Self.pageSize < total,
-                        total: total, contractors: try contractors.map {
-                            SnagRegisterService.ContractorLabel(id: try $0.requireID(), companyName: $0.companyName, contactName: $0.contactName, isArchived: $0.isArchived)
-                        }, evidence: evidence, projectIds: order, unavailable: unavailable, asOfDate: window.today)
+            let total = try rows.first?.decode(column: "register_total", as: Int.self) ?? 0
+            let decoded = try RegisterSQL.decodePage(rows)
+            return Page(items: decoded.snags.map { Row(projectId: $0.projectId, item: PlatformSnagResponse($0)) }, page: page, hasMore: page * Self.pageSize < total,
+                        total: total, contractors: decoded.contractors, evidence: decoded.evidence, projectIds: order, unavailable: unavailable, asOfDate: window.today)
         }
     }
 }
