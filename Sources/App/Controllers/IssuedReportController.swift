@@ -20,7 +20,7 @@ struct IssuedReportController: RouteCollection {
         let projectID = try id("projectId", req), actorID = try req.requireAuthenticatedUserId()
         let body = try req.content.decode(ReportPreviewCommand.self)
         return try await req.db.transaction { db in
-            let (project, _) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            let (project, _) = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
             let snapshot = try await IssuedReportService.build(title: body.title, scope: body.scope, project: project, on: db)
             let people = try await IssuedReportService.people(IssuedReportService.peopleIn(snapshot, issuer: nil), on: db)
             return IssuedReportDetail(report: nil, snapshot: snapshot, people: people)
@@ -45,21 +45,21 @@ struct IssuedReportController: RouteCollection {
         let projectID = try id("projectId", req), actorID = try req.requireAuthenticatedUserId()
         let page = (try? req.query.get(Int.self, at: "page")) ?? 1
         return try await req.db.transaction { db in
-            _ = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            _ = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
             return try await IssuedReportService.list(projectID: projectID, page: page, on: db)
         }
     }
     @Sendable func get(req: Request) async throws -> IssuedReportDetail {
         let projectID = try id("projectId", req), reportID = try id("reportId", req), actorID = try req.requireAuthenticatedUserId()
         return try await req.db.transaction { db in
-            _ = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            _ = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
             return try await IssuedReportService.find(reportID, projectID: projectID, on: db)
         }
     }
     @Sendable func download(req: Request) async throws -> Response {
         let projectID = try id("projectId", req), reportID = try id("reportId", req), actorID = try req.requireAuthenticatedUserId()
         let detail = try await req.db.transaction { db -> IssuedReportDetail in
-            _ = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            _ = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
             return try await IssuedReportService.find(reportID, projectID: projectID, on: db)
         }
         guard let report = detail.report else { throw Abort(.notFound, reason: "Report unavailable") }

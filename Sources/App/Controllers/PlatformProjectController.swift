@@ -60,7 +60,7 @@ struct PlatformProjectController: RouteCollection {
         guard let raw = req.parameters.get("projectId"), let id = UUID(uuidString: raw) else { throw Abort(.badRequest) }
         let actor = try req.requireAuthenticatedUserId()
         return try await req.db.transaction { db in
-            let (project, actions) = try await ProjectAccessService.require(.read, projectID: id, actorID: actor, on: db)
+            let (project, actions) = try await ProjectAccessService.requireRead(projectID: id, actorID: actor, on: db)
             return try PlatformProjectResponse(project, actions: actions)
         }
     }
@@ -84,7 +84,7 @@ struct PlatformProjectController: RouteCollection {
         let page = (try? req.query.get(Int.self, at: "page")) ?? 1
         guard (1...10000).contains(page) else { throw Abort(.badRequest, reason: "Invalid page") }
         return try await req.db.transaction { db in
-            try await WorkspaceAccessService.lock(workspaceID, on: db)
+            try await WorkspaceAccessService.readLock(workspaceID, on: db)
             guard let workspace = try await Team.find(workspaceID, on: db) else { throw Abort(.notFound) }
             let role = try await WorkspaceAccessService.role(actorID: actor, workspace: workspace, on: db)
             var query = Project.query(on: db).filter(\.$workspaceId == workspaceID).filter(\.$archivedAt == nil)
@@ -96,7 +96,7 @@ struct PlatformProjectController: RouteCollection {
             let projects = try await query.sort(\.$updatedAt, .descending).sort(\.$id).range(((page - 1) * 50)..<(page * 50 + 1)).all()
             var items: [PlatformProjectResponse] = []
             for project in projects.prefix(50) {
-                let (allowed, actions) = try await ProjectAccessService.require(.read, projectID: project.requireID(), actorID: actor, on: db)
+                let (allowed, actions) = try await ProjectAccessService.requireRead(projectID: project.requireID(), actorID: actor, on: db)
                 items.append(try PlatformProjectResponse(allowed, actions: actions))
             }
             return Page(items: items, page: page, hasMore: projects.count > 50)

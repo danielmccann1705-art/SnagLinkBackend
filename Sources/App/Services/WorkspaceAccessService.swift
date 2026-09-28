@@ -27,6 +27,17 @@ struct WorkspaceAccessService {
         try await VerifiedIdentityService.lock("workspace:" + id.uuidString, on: db)
     }
 
+    /// The same scope, shared (wave 3, 28 Sep 2026). Reads of one workspace used to queue
+    /// behind each other on the exclusive lock above, so a busy workspace served about one
+    /// register read a second whatever the pool size. A shared holder still excludes every
+    /// exclusive holder — a membership, access or content change never overlaps a read, and
+    /// a read never overlaps such a change — but readers no longer wait for one another.
+    /// Only for a transaction that writes nothing and never asks for the exclusive lock
+    /// afterwards: two shared holders both upgrading would deadlock.
+    static func readLock(_ id: UUID, on db: Database) async throws {
+        try await VerifiedIdentityService.sql(db).raw("SELECT pg_advisory_xact_lock_shared(hashtextextended(\(bind: "workspace:" + id.uuidString), 0))").run()
+    }
+
     static func personal(for userID: UUID, on db: Database) async throws -> Team {
         try await VerifiedIdentityService.lock("personal-workspace:" + userID.uuidString, on: db)
         _ = try await VerifiedIdentityService.activeUser(userID, on: db)
@@ -144,6 +155,19 @@ struct ProjectAccessService {
     /// Caller holds a DB transaction. The workspace lock is shared by membership,
     /// transfer, grant and project commands; re-read project after taking it.
     static func require(_ action: ProjectAccessPolicy.Action, projectID: UUID, actorID: UUID, on db: Database) async throws -> (Project, Set<ProjectAccessPolicy.Action>) {
+        try await check(action, projectID: projectID, actorID: actorID, shared: false, on: db)
+    }
+
+    /// Read access for a transaction that only reads (register, snag, photo, comment,
+    /// history and report reads): exactly the checks above, under the shared workspace lock,
+    /// so reads of one workspace run side by side while any change to access still excludes
+    /// them. A transaction that writes, or that locks the workspace exclusively later, must
+    /// use `require` instead.
+    static func requireRead(projectID: UUID, actorID: UUID, on db: Database) async throws -> (Project, Set<ProjectAccessPolicy.Action>) {
+        try await check(.read, projectID: projectID, actorID: actorID, shared: true, on: db)
+    }
+
+    private static func check(_ action: ProjectAccessPolicy.Action, projectID: UUID, actorID: UUID, shared: Bool, on db: Database) async throws -> (Project, Set<ProjectAccessPolicy.Action>) {
         guard var project = try await Project.find(projectID, on: db) else { throw Abort(.notFound, reason: "Project unavailable") }
         if project.workspaceId == nil {
             guard project.ownerId == actorID else { throw Abort(.notFound, reason: "Project unavailable") }
@@ -152,7 +176,8 @@ struct ProjectAccessService {
             try await project.save(on: db)
         }
         let workspaceID = project.workspaceId!
-        try await WorkspaceAccessService.lock(workspaceID, on: db)
+        if shared { try await WorkspaceAccessService.readLock(workspaceID, on: db) }
+        else { try await WorkspaceAccessService.lock(workspaceID, on: db) }
         guard let fresh = try await Project.find(projectID, on: db), fresh.workspaceId == workspaceID,
               let team = try await Team.find(workspaceID, on: db) else { throw Abort(.conflict, reason: "Project access changed. Refresh to continue") }
         project = fresh

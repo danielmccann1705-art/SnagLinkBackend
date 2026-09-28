@@ -29,7 +29,7 @@ struct CanonicalWorkflowController: RouteCollection {
         let page = try req.query.get(Int?.self, at: "page") ?? 1
         guard (1...1000).contains(page) else { throw Abort(.badRequest, reason: "Invalid history page") }
         return try await req.db.transaction { db in
-            let (project, _) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            let (project, _) = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
             try PlatformMutationService.requireManaged(project)
             let snag = try await PlatformSnagService.find(snagID, projectID: projectID, on: db)
             let sql = try VerifiedIdentityService.sql(db)

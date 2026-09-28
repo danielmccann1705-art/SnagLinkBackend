@@ -18,7 +18,7 @@ struct ProjectCommentController: RouteCollection {
         let projectID = try id("projectId", req), snagID = try id("snagId", req), actorID = try req.requireAuthenticatedUserId()
         let after = try req.query.get(UUID?.self, at: "after")
         return try await req.db.transaction { db in
-            let (project, _) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            let (project, _) = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
             try PlatformMutationService.requireManaged(project)
             _ = try await PlatformSnagService.find(snagID, projectID: projectID, on: db)
             let sql = try VerifiedIdentityService.sql(db)

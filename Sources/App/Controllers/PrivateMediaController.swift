@@ -30,7 +30,7 @@ struct PrivateMediaController: RouteCollection {
         let page = try req.query.get(Int?.self, at: "page") ?? 1
         guard (1...1000).contains(page) else { throw Abort(.badRequest, reason: "Invalid media page") }
         return try await req.db.transaction { db in
-            let (project, _) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            let (project, _) = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
             try PlatformMutationService.requireManaged(project)
             _ = try await PlatformSnagService.find(snagID, projectID: projectID, on: db)
             let rows = try await VerifiedIdentityService.sql(db).raw("""
@@ -44,7 +44,7 @@ struct PrivateMediaController: RouteCollection {
     @Sendable func get(req: Request) async throws -> MediaAssetResponse {
         let projectID = try id("projectId", req), snagID = try id("snagId", req), assetID = try id("assetId", req), actorID = try req.requireAuthenticatedUserId()
         return try await req.db.transaction { db in
-            let (project, _) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            let (project, _) = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
             try PlatformMutationService.requireManaged(project)
             let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: projectID, on: db)
             if try row.decode(column: "attached_at", as: Date?.self) == nil { try PrivateMediaService.requireUploader(row, actorID: actorID) }
@@ -181,7 +181,7 @@ struct PrivateMediaController: RouteCollection {
     @Sendable private func download(req: Request, original: Bool) async throws -> Response {
         let projectID = try id("projectId", req), snagID = try id("snagId", req), assetID = try id("assetId", req), actorID = try req.requireAuthenticatedUserId()
         let target: (key: String, sha256: String, size: Int, mime: String) = try await req.db.transaction { db in
-            let (project, _) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            let (project, _) = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
             try PlatformMutationService.requireManaged(project)
             let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: projectID, on: db)
             try PrivateMediaService.requireVisible(row, actorID: actorID)
@@ -203,7 +203,7 @@ struct PrivateMediaController: RouteCollection {
         // No long-lived signed URL. Check again after fetching bytes so a removed
         // member cannot complete a slow download after its access has been revoked.
         try await req.db.transaction { db in
-            let (project, _) = try await ProjectAccessService.require(.read, projectID: projectID, actorID: actorID, on: db)
+            let (project, _) = try await ProjectAccessService.requireRead(projectID: projectID, actorID: actorID, on: db)
             try PlatformMutationService.requireManaged(project)
             try await PrivateMediaService.requireVisible(PrivateMediaService.row(assetID, snagID: snagID, projectID: projectID, on: db), actorID: actorID)
         }
