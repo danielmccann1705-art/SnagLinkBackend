@@ -84,12 +84,90 @@ enum LinkGrantService {
         try await WorkspaceAccessService.activity(workspaceID: project.workspaceId!, actorID: actorID, action: "contractor_link_activated", targetID: current.id, on: db)
         return try await response(self.row(current.id, projectID: project.requireID(), on: db), on: db)
     }
+    /// The grant, its project and every access fact the Contractor link routes check, in three statements
+    /// (Lane A P1a, 1 Oct 2026; Fable-approved): the same checks, the same errors in the same order and the
+    /// same locks in the same order as `loadSequential`, which issued ~11. Staging's container sits a ~40 ms
+    /// round trip from Neon and every photo upload runs this four times.
+    /// 1. The token lookup takes the grant's workspace lock exclusively in the same statement — the key is
+    ///    byte-for-byte `WorkspaceAccessService.lock`'s ("workspace:" + upper-case UUID) and the F-L4
+    ///    `lock_timeout` is applied in FROM, before the lock. Its snapshot predates the lock, so nothing it read
+    ///    decides anything; 2. the grant row is re-read under the lock exactly as before (`row`); 3. the issuer's
+    ///    project/workspace/account/membership/grant facts (the ones `ProjectAccessService.check(.share)` reads),
+    ///    the contractor's archive flag and the PIN session are read in one statement under the lock and decided in
+    ///    Swift with the same `readDecision` + `.share`. A project that is missing, predates workspaces or is not in
+    ///    the grant's workspace goes through the original sequence unchanged.
     static func load(_ token: String, req: Request, verifySession: Bool = true, on db: Database) async throws -> (SQLRow, Project) {
+        guard token.hasPrefix("c2_"), token.count <= 100 else { throw Abort(.notFound, reason: "Contractor link unavailable") }
+        let sql = try VerifiedIdentityService.sql(db)
+        guard let found = try await sql.raw("""
+            SELECT g.id, g.project_id, g.workspace_id, pg_advisory_xact_lock(hashtextextended('workspace:' || upper(g.workspace_id::text), 0)) IS NULL AS locked
+            FROM link_grants g, (SELECT set_config('lock_timeout', \(bind: WorkspaceAccessService.commandLockTimeout), true) AS applied) AS bound
+            WHERE g.token_hash = \(bind: SHA256Hasher.hash(token: token)) AND bound.applied IS NOT NULL
+            """).first() else { throw Abort(.notFound, reason: "Contractor link unavailable") }
+        let grantID = try found.decode(column: "id", as: UUID.self), workspaceID = try found.decode(column: "workspace_id", as: UUID.self)
+        let row = try await self.row(grantID, projectID: found.decode(column: "project_id", as: UUID.self), on: db)
+        guard try row.decode(column: "state", as: String.self) == "active", try row.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "This Contractor link expired or was revoked. Ask the project manager for a new link") }
+        let projectID = try row.decode(column: "project_id", as: UUID.self), creatorID = try row.decode(column: "creator_id", as: UUID.self)
+        let contractorID = try row.decode(column: "contractor_id", as: UUID?.self)
+        let pinRequired = try verifySession && row.decode(column: "pin_hash", as: String?.self) != nil
+        let sessionHash: String? = pinRequired ? RequestCredentialCookie.value(cookieName(grantID), on: req).flatMap { $0.count <= 128 ? SHA256Hasher.hash(token: $0) : nil } : nil
+        guard let facts = try await sql.raw("""
+            SELECT p.*, t.kind AS access_workspace_kind, t.owner_user_id AS access_workspace_owner, t.lifecycle_state AS access_workspace_state,
+                   (SELECT u.lifecycle_state FROM users u WHERE u.id = \(bind: creatorID)) AS access_user_state,
+                   (SELECT m.role FROM workspace_memberships m WHERE m.workspace_id = p.workspace_id AND m.user_id = \(bind: creatorID)) AS access_member_role,
+                   (SELECT m.state FROM workspace_memberships m WHERE m.workspace_id = p.workspace_id AND m.user_id = \(bind: creatorID)) AS access_member_state,
+                   (SELECT a.role FROM project_access a WHERE a.state = 'active' AND a.workspace_id = p.workspace_id AND a.project_id = p.id AND a.user_id = \(bind: creatorID) LIMIT 1) AS access_grant_role,
+                   (SELECT c.is_archived FROM contractors c WHERE c.id = \(bind: contractorID)) AS link_contractor_archived,
+                   EXISTS (SELECT 1 FROM link_sessions s WHERE s.token_hash = \(bind: sessionHash) AND s.grant_id = \(bind: grantID) AND s.expires_at > \(bind: Date())) AS link_session_live
+            FROM projects p JOIN teams t ON t.id = p.workspace_id
+            WHERE p.id = \(bind: projectID)
+            """).first(), try facts.decode(column: "workspace_id", as: UUID?.self) == workspaceID else {
+            return try await afterGrantRow(row, req: req, verifySession: verifySession, on: db)
+        }
+        let project = try facts.decode(fluentModel: Project.self)
+        do {
+            let actions = try ProjectAccessService.readDecision(facts, projectID: projectID, workspaceID: workspaceID, actorID: creatorID, ownerID: project.ownerId)
+            guard actions.contains(.share) else { throw Abort(.forbidden, reason: "Your project role does not allow this action") }
+        } catch let error as AbortError where [.notFound, .forbidden, .unauthorized].contains(error.status) {
+            throw Abort(.gone, reason: "This Contractor link is no longer active. Ask the project manager for a new link.", identifier: "link_issuer_inactive")
+        }
+        try PlatformMutationService.requireManaged(project)
+        if contractorID != nil {
+            guard let archived = try facts.decode(column: "link_contractor_archived", as: Bool?.self), !archived else { throw Abort(.gone, reason: "This contractor assignment is no longer active") }
+        }
+        if pinRequired {
+            guard sessionHash != nil, try facts.decode(column: "link_session_live", as: Bool.self) else { throw Abort(.forbidden, reason: "Enter the PIN provided by the project manager", identifier: "pin_required") }
+        }
+        return (row, project)
+    }
+    /// One statement instead of two (Lane A P1a): the link item and its snag, with `PlatformSnagService.find`'s
+    /// project filter and refusal, then exactly the checks `itemSequential` makes, in its order.
+    static func item(_ snagID: UUID, grant: SQLRow, project: Project, write: Bool, on db: Database) async throws -> Snag {
+        let id = try grant.decode(column: "id", as: UUID.self)
+        guard let row = try await VerifiedIdentityService.sql(db).raw("""
+            SELECT i.assignment_id AS link_assignment_id, s.id AS link_snag_id, s.*
+            FROM link_items i LEFT JOIN snags s ON s.id = i.snag_id AND s.project_id = \(bind: project.requireID())
+            WHERE i.grant_id = \(bind: id) AND i.snag_id = \(bind: snagID) AND i.revoked_at IS NULL
+            """).first() else { throw Abort(.notFound, reason: "This snag is not available through this Contractor link") }
+        guard try row.decode(column: "link_snag_id", as: UUID?.self) != nil else { throw Abort(.notFound, reason: "Snag unavailable") }
+        let snag = try row.decode(fluentModel: Snag.self)
+        guard snag.archivedAt == nil, snag.publishedAt != nil, try row.decode(column: "link_assignment_id", as: UUID?.self) == snag.contractorId else { throw Abort(.notFound, reason: "This snag is no longer available through this Contractor link") }
+        if write { guard try grant.decode(column: "mode", as: String.self) == "completion" else { throw Abort(.forbidden, reason: "This Contractor link is read only") } }
+        return snag
+    }
+    /// The pre-P1a sequence (~11 statements), kept as the reference the equivalence test compares `load` with, and as
+    /// `load`'s path for a project that is missing, predates workspaces or is not in the grant's workspace.
+    /// Delete the reference entry points once P1a is accepted; keep `afterGrantRow` for that fallback.
+    static func loadSequential(_ token: String, req: Request, verifySession: Bool = true, on db: Database) async throws -> (SQLRow, Project) {
         guard token.hasPrefix("c2_"), token.count <= 100,
               let found = try await VerifiedIdentityService.sql(db).raw("SELECT id, project_id, workspace_id FROM link_grants WHERE token_hash = \(bind: SHA256Hasher.hash(token: token))").first() else { throw Abort(.notFound, reason: "Contractor link unavailable") }
         try await WorkspaceAccessService.lock(found.decode(column: "workspace_id", as: UUID.self), on: db)
         let row = try await self.row(found.decode(column: "id", as: UUID.self), projectID: found.decode(column: "project_id", as: UUID.self), on: db)
         guard try row.decode(column: "state", as: String.self) == "active", try row.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "This Contractor link expired or was revoked. Ask the project manager for a new link") }
+        return try await afterGrantRow(row, req: req, verifySession: verifySession, on: db)
+    }
+    /// The original checks after the grant row (lock held): issuer access, managed project, contractor, PIN session.
+    static func afterGrantRow(_ row: SQLRow, req: Request, verifySession: Bool, on db: Database) async throws -> (SQLRow, Project) {
         // Revoked issuer membership/access also invalidates an old capability. This is the
         // secure default (audit F09) and stays: a link never outlives its issuer's right to
         // share. The contractor is told what happened in their terms rather than being shown
@@ -111,7 +189,7 @@ enum LinkGrantService {
         }
         return (row, project)
     }
-    static func item(_ snagID: UUID, grant: SQLRow, project: Project, write: Bool, on db: Database) async throws -> Snag {
+    static func itemSequential(_ snagID: UUID, grant: SQLRow, project: Project, write: Bool, on db: Database) async throws -> Snag {
         let id = try grant.decode(column: "id", as: UUID.self)
         guard let row = try await VerifiedIdentityService.sql(db).raw("SELECT assignment_id FROM link_items WHERE grant_id = \(bind: id) AND snag_id = \(bind: snagID) AND revoked_at IS NULL").first() else { throw Abort(.notFound, reason: "This snag is not available through this Contractor link") }
         let snag = try await PlatformSnagService.find(snagID, projectID: project.requireID(), on: db)

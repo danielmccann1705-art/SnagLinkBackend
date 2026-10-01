@@ -151,6 +151,90 @@ final class ContractorGrantTests: XCTestCase {
         let put = try await call(.PUT, path + "/\(media.id)/content", nil, bytes: Self.png, cookie: cookie)
         XCTAssertEqual(put.status, .ok, put.body.string); return media.id
     }
+    /// Lane A P1a: the three-statement `load` and one-statement `item` against the pre-P1a sequence
+    /// (`loadSequential` / `itemSequential`), refusal by refusal: same status, reason and identifier, or the
+    /// same grant, project and snag.
+    func testSingleStatementLoadMatchesTheSequentialChecksRefusalByRefusal() async throws {
+        struct Outcome: Equatable { var ok: String? = nil; var status: UInt? = nil; var reason: String? = nil; var identifier: String? = nil }
+        func run(_ new: Bool, token: String, snag: UUID, cookie: String?, write: Bool) async -> Outcome {
+            let req = Request(application: app, on: app.eventLoopGroup.next())
+            if let cookie { req.headers.replaceOrAdd(name: .cookie, value: cookie) }
+            do {
+                return .init(ok: try await app.db.transaction { db -> String in
+                    let (grant, project) = new ? try await LinkGrantService.load(token, req: req, on: db) : try await LinkGrantService.loadSequential(token, req: req, on: db)
+                    let item = new ? try await LinkGrantService.item(snag, grant: grant, project: project, write: write, on: db)
+                                   : try await LinkGrantService.itemSequential(snag, grant: grant, project: project, write: write, on: db)
+                    return "\(try grant.decode(column: "id", as: UUID.self)) \(try project.requireID()) \(try item.requireID()) \(item.contractorId?.uuidString ?? "-")"
+                })
+            } catch let error as AbortError {
+                return .init(status: error.status.code, reason: error.reason, identifier: (error as? DebuggableError)?.identifier)
+            } catch { return .init(reason: "non-Abort \(type(of: error))") }
+        }
+        func compare(_ label: String, token: String, snag: UUID, cookie: String? = nil, write: Bool = true) async -> Outcome {
+            let new = await run(true, token: token, snag: snag, cookie: cookie, write: write)
+            let old = await run(false, token: token, snag: snag, cookie: cookie, write: write)
+            XCTAssertEqual(new, old, label); return new
+        }
+        let sql = try VerifiedIdentityService.sql(app.db)
+        func scenario(_ label: String, pin: String? = nil, expect: UInt?, identifier: String? = nil, _ mutate: (User, UUID, UUID, UUID, PlatformProjectResponse) async throws -> Void) async throws {
+            let (owner, project, snag, activation, token, _) = try await fixture(pin: pin)
+            try await mutate(owner, activation.grant.id, snag.snag.id, project.project.id, project)
+            let outcome = await compare(label, token: token, snag: snag.snag.id)
+            XCTAssertEqual(outcome.status, expect, "\(label): \(outcome)")
+            if let identifier { XCTAssertEqual(outcome.identifier, identifier, label) }
+        }
+        try await scenario("valid link", expect: nil) { _, _, _, _, _ in }
+        try await scenario("expired link", expect: 410) { _, grant, _, _, _ in try await sql.raw("UPDATE link_grants SET expires_at = now() - interval '1 minute' WHERE id = \(bind: grant)").run() }
+        try await scenario("issuer is not a member of the workspace", expect: 410, identifier: "link_issuer_inactive") { _, grant, _, _, _ in
+            let other = try await self.user(); try await sql.raw("UPDATE link_grants SET creator_id = \(bind: other.requireID()) WHERE id = \(bind: grant)").run()
+        }
+        try await scenario("issuer account no longer active", expect: 410, identifier: "link_issuer_inactive") { owner, _, _, _, _ in
+            try await sql.raw("UPDATE users SET lifecycle_state = 'deleted' WHERE id = \(bind: owner.requireID())").run()
+        }
+        try await scenario("project archived", expect: 410, identifier: "project_archived") { _, _, _, project, _ in try await sql.raw("UPDATE projects SET archived_at = now() WHERE id = \(bind: project)").run() }
+        try await scenario("project not platform-managed", expect: 409, identifier: "project_import_required") { _, _, _, project, _ in try await sql.raw("UPDATE projects SET platform_managed = false WHERE id = \(bind: project)").run() }
+        try await scenario("contractor archived", expect: 410) { _, grant, _, _, _ in try await sql.raw("UPDATE contractors SET is_archived = true WHERE id = (SELECT contractor_id FROM link_grants WHERE id = \(bind: grant))").run() }
+        try await scenario("snag revoked from the link", expect: 404) { _, grant, snag, _, _ in try await sql.raw("UPDATE link_items SET revoked_at = now() WHERE grant_id = \(bind: grant) AND snag_id = \(bind: snag)").run() }
+        try await scenario("snag reassigned", expect: 404) { _, _, snag, _, _ in try await sql.raw("UPDATE snags SET contractor_id = NULL WHERE id = \(bind: snag)").run() }
+        try await scenario("snag archived", expect: 404) { _, _, snag, _, _ in try await sql.raw("UPDATE snags SET archived_at = now() WHERE id = \(bind: snag)").run() }
+        // Revocation through the route, as a manager does it.
+        do {
+            let (owner, _, snag, _, token, _) = try await fixture()
+            let revoked = try await call(.POST, "api/v1/magic-links/\(token)/revoke", owner); XCTAssertEqual(revoked.status, .ok)
+            let outcome = await compare("revoked through the route", token: token, snag: snag.snag.id); XCTAssertEqual(outcome.status, 410)
+        }
+        // Unknown token and a snag that is not on the link.
+        do {
+            let (_, _, snag, _, token, _) = try await fixture()
+            let o1 = await compare("unknown token", token: "c2_" + String(repeating: "q", count: 43), snag: snag.snag.id)
+            XCTAssertEqual(o1.status, 404)
+            let o2 = await compare("snag not on this link", token: token, snag: UUID())
+            XCTAssertEqual(o2.status, 404)
+        }
+        // PIN: no cookie, a live session, an expired session.
+        do {
+            let (_, _, snag, activation, token, _) = try await fixture(pin: "735291")
+            let o3 = await compare("PIN, no session", token: token, snag: snag.snag.id)
+            XCTAssertEqual(o3.identifier, "pin_required")
+            let cookie = try await verify(token, pin: "735291")
+            let o4 = await compare("PIN, live session", token: token, snag: snag.snag.id, cookie: cookie)
+            XCTAssertNotNil(o4.ok)
+            try await sql.raw("UPDATE link_sessions SET expires_at = now() - interval '1 minute' WHERE grant_id = \(bind: activation.grant.id)").run()
+            let o5 = await compare("PIN, expired session", token: token, snag: snag.snag.id, cookie: cookie)
+            XCTAssertEqual(o5.identifier, "pin_required")
+        }
+        // A read-only link on a write route, and on a read.
+        do {
+            let owner = try await user(), project = try await project(owner), contractor = try await contractor(owner, project)
+            let snag = try await assign(owner, project, logged(owner, project), contractor)
+            let grant = try await prepared(owner, project, snags: [snag.snag.id], contractor: contractor, mode: "read_only")
+            let (_, token) = try await activate(owner, project, grant)
+            let o6 = await compare("read-only link, write", token: token, snag: snag.snag.id)
+            XCTAssertEqual(o6.status, 403)
+            let o7 = await compare("read-only link, read", token: token, snag: snag.snag.id, write: false)
+            XCTAssertNotNil(o7.ok)
+        }
+    }
     /// Lane A P0: phase timing is staging-only (RUNTIME_DIAGNOSTICS=enabled) and carries fixed
     /// phase names with durations only — no token, id, key or image fact can appear in it.
     func testServerTimingIsStagingOnlyAndCarriesOnlyPhaseDurations() async throws {
