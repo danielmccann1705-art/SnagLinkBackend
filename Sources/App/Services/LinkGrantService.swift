@@ -259,7 +259,7 @@ extension LinkGrantService {
             let imported = try await importedPhotos(snagIDs: ids, projectID: try project.requireID(), on: db)
             // WP4: this grant's own drafts — unattached, not retired — and nothing of anyone else's.
             let drafts = try await sql.raw("""
-                SELECT id, snag_id, state, expires_at, original_sha256, original_size FROM media_assets
+                SELECT id, snag_id, intent_id, state, expires_at, original_sha256, original_size FROM media_assets
                 WHERE creator_grant_id = \(bind: grantID) AND snag_id = ANY(\(bind: ids)::UUID[]) AND attached_at IS NULL AND state <> 'retired'
                 ORDER BY created_at, id
                 """).all()
@@ -284,7 +284,7 @@ extension LinkGrantService {
                     ContractorItem.Submission(id: $0.id, number: $0.number, notes: $0.notes, state: $0.state, submittedAt: $0.submittedAt, evidenceIds: $0.evidenceIds, feedback: feedback[$0.id])
                 }
                 let own = try drafts.filter { try $0.decode(column: "snag_id", as: UUID.self) == id }.map {
-                    try ContractorItem.Draft(id: $0.decode(column: "id", as: UUID.self), state: $0.decode(column: "state", as: String.self), expiresAt: $0.decode(column: "expires_at", as: Date.self),
+                    try ContractorItem.Draft(id: $0.decode(column: "id", as: UUID.self), intentId: $0.decode(column: "intent_id", as: UUID?.self), state: $0.decode(column: "state", as: String.self), expiresAt: $0.decode(column: "expires_at", as: Date.self),
                                              sha256: $0.decode(column: "original_sha256", as: String.self), byteCount: $0.decode(column: "original_size", as: Int.self))
                 }
                 result.append(.init(id: id, reference: snag.reference, title: snag.title, description: snag.snagDescription, location: snag.location, priority: snag.priority, dueDate: snag.dueOn ?? snag.dueDate.map(date.string), status: snag.status, revision: snag.revision, workflowRevision: snag.workflowRevision, photos: photos, submissions: submissions, drafts: own))
@@ -292,7 +292,8 @@ extension LinkGrantService {
         }
         let contractor: String?
         if let id = current.contractorId { contractor = try await Contractor.find(id, on: db)?.companyName } else { contractor = nil }
-        return .init(projectName: project.name, projectAddress: project.address, contractorName: contractor, mode: current.mode, expiresAt: current.expiresAt, issuedAt: current.activatedAt ?? current.createdAt, items: result, total: current.activeSnagIds.count, page: page, hasMore: page * limit < current.activeSnagIds.count)
+        return .init(projectName: project.name, projectAddress: project.address, contractorName: contractor, mode: current.mode, expiresAt: current.expiresAt, issuedAt: current.activatedAt ?? current.createdAt, items: result, total: current.activeSnagIds.count, page: page, hasMore: page * limit < current.activeSnagIds.count,
+                     earlyUpload: Environment.get(RuntimeDiagnostics.variable) == "enabled")
     }
     static func visibleMedia(_ id: UUID, snagID: UUID, grant: SQLRow, project: Project, on db: Database) async throws -> SQLRow {
         _ = try await item(snagID, grant: grant, project: project, write: false, on: db)

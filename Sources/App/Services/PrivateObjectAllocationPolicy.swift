@@ -418,6 +418,11 @@ enum PrivateObjectAllocationPolicy {
     /// (`existing_verified`) — never overwritten, never a second object. Every other row is answered exactly as before:
     /// no retry on `created`, `alreadyExists`, cancellation, an unreachable readback, a fence, or a content/key refusal.
     /// If the retry also ends `not_landed`, the existing path applies (`uncertain`, 503 `media_unavailable`).
+    ///
+    /// Operator reading (B2 row 14a, Fable RF-1): one `not_landed` line followed by a settling line is the retry carrying
+    /// the write; two `not_landed` lines for one request are the first attempt (logged here) and the retry's own failure
+    /// (logged by `abort`), answered 503. A re-check refusal or a cancellation leaves the intent `uncertain` even though
+    /// the readback proved the first write absent — deliberately conservative: the ordinary fence path resolves it.
     private static func issue(store: any PrivateContentStorage, key: String, data: Data,
                               contentType: String, sha256: String, logger: Logger,
                               recheck: @Sendable () async throws -> Void) async throws -> Settled {
@@ -426,9 +431,9 @@ enum PrivateObjectAllocationPolicy {
         } catch PrivateMediaWriteService.Refusal.unavailable(.some(.notLanded)) {
             // The first attempt's own line, in the existing vocabulary; the retry's outcome is logged by the caller as today.
             logger.info("Private media write", metadata: ["kind": .string(PrivateMediaLogKind.notLanded.rawValue)])
-            ServerTiming.note("media_write.retry_after_not_landed")
             try await Task.sleep(nanoseconds: notLandedRetryPause)
             try await recheck()
+            ServerTiming.note("media_write.retry_after_not_landed")
             return try await issueOnce(store: store, key: key, data: data, contentType: contentType, sha256: sha256)
         }
     }
@@ -439,7 +444,8 @@ enum PrivateObjectAllocationPolicy {
     /// and the key is checked against the erasure-fence register. A refusal from either is answered as itself and the
     /// PUT is not repeated: a write is never retried past a permission, expiry, revocation or deletion, and nothing can
     /// be written to an address a deletion has claimed. (Create-only `If-None-Match: *` still refuses a fence written
-    /// after this check; the readback then answers `media_erased`.)
+    /// after this check; the readback then answers `media_erased`.) The register is matched by key alone, whatever its
+    /// backend or bucket: a fence row for this address is a refusal regardless of target (Fable RF-1 note 3).
     static func recheckBeforeRetry(key: String, authorize: @escaping @Sendable (Database) async throws -> ObjectWriteIntentService.Scope,
                                    on database: Database) async throws {
         try await database.transaction { db in

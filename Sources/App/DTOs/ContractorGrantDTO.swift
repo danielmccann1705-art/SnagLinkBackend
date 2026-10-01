@@ -40,13 +40,17 @@ struct ContractorItem: Content {
     let photos: [Photo]; let submissions: [Submission]
     /// WP4 (FABLE-DESIGN-A-AMENDMENT §4.6): this link's own unattached, unretired uploads for the snag, so a resumed page
     /// can reconcile its local drafts with the server. Own grant only by construction; an older page ignores it.
-    struct Draft: Content { let id: UUID; let state: String; let expiresAt: Date; let sha256: String; let byteCount: Int }
+    struct Draft: Content { let id: UUID; let intentId: UUID?; let state: String; let expiresAt: Date; let sha256: String; let byteCount: Int }
     let drafts: [Draft]
 }
 struct ContractorPage: Content {
     let projectName: String; let projectAddress: String?; let contractorName: String?
     let mode: String; let expiresAt: Date; let issuedAt: Date; let items: [ContractorItem]
     let total: Int; let page: Int; let hasMore: Bool
+    /// WP4 (FABLE-DESIGN-A-AMENDMENT §4): the staging-only switch for uploading photos as they are added. True only where
+    /// `RUNTIME_DIAGNOSTICS=enabled` (the staging adapter maps it; the production adapter refuses it), so no real user's
+    /// page turns it on. An older page ignores the field; a page without it uploads at Submit as before.
+    let earlyUpload: Bool
 }
 struct ContractorWorkflowResult: Content {
     let snagId: UUID; let status: String; let revision: Int64; let workflowRevision: Int64

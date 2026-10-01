@@ -6,7 +6,7 @@ import Vapor
 /// one row per 5xx answer on a Contractor-link route (and per answer that succeeded only because the write path retried), written only where `RUNTIME_DIAGNOSTICS=enabled` (which the
 /// production adapter refuses), so production never writes a row. Route pattern, status, the answer's identifier, the
 /// error's type, the phases the request completed and the write path's notes — fixed vocabulary, never a URL, token,
-/// key, message or value. Durable where Workers Logs are not (they keep 3–7 days); staging rows only, no retention sweep yet.
+/// key, message or value. Durable where Workers Logs are not (they keep 3–7 days); rows older than 30 days are removed by the hourly pass.
 struct CreateDiagnosticRequestFailures: AsyncMigration {
     func prepare(on database: Database) async throws {
         let sql = try VerifiedIdentityService.sql(database)

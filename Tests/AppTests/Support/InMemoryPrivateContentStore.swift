@@ -54,7 +54,9 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     private var objects: [String: Object] = [:]
     private var written = 0
     /// Queued: each `failNextPut` fails one more `put` (the WP1 retry needs two failures to reach row 14a).
-    private var putFailures: [(any Error)?] = []
+    /// Scripted behaviour of the next `put`s, in order: behave normally, fail, or perform and then lose the response.
+    private enum PutStep { case pass, fail(any Error), loseResponse }
+    private var putFailures: [PutStep] = []
     private var readFailure: (any Error)?
     private var dropPutResponse = false
     private var lateLanding: (data: Data, contentType: String)?
@@ -104,9 +106,11 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     /// The next content `put` throws and stores nothing. With the default error
     /// this is a PUT whose request never reached storage: paired with a readback
     /// that finds nothing, it is the fixture for "the write never landed".
-    func failNextPut(with error: any Error = PrivateContentStoreError.transportUnavailable) { putFailures.append(error) }
+    func failNextPut(with error: any Error = PrivateContentStoreError.transportUnavailable) { putFailures.append(.fail(error)) }
     /// Queues a `put` that behaves normally, so a later queued failure lands on a later PUT (for example the rendition's).
-    func passNextPut() { putFailures.append(nil) }
+    func passNextPut() { putFailures.append(.pass) }
+    /// Queues a `put` that is performed and then loses its response (like `dropNextPutResponse`, but in script order).
+    func loseResponseOfQueuedPut() { putFailures.append(.loseResponse) }
 
     /// The next content `read` throws. Default: storage did not answer.
     func failNextRead(with error: any Error = PrivateContentStoreError.transportUnavailable) { readFailure = error }
@@ -180,7 +184,13 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     /// refusal is an outcome rather than an error.
     func put(key: String, data: Data, contentType: String) async throws -> PutOutcome {
         calls.append(.put(key: key, byteCount: data.count, contentType: contentType))
-        if !putFailures.isEmpty, let failure = putFailures.removeFirst() { self.dropPutResponse = false; throw failure }
+        if !putFailures.isEmpty {
+            switch putFailures.removeFirst() {
+            case .fail(let failure): self.dropPutResponse = false; throw failure
+            case .loseResponse: self.dropPutResponse = true
+            case .pass: break
+            }
+        }
         try configuration.validateContentKey(key)
         guard PrivateContent.mimeTypes.contains(contentType),
               contentType != ObjectErasureFenceService.contentType else { throw PrivateContentStoreError.invalidContent }

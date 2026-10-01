@@ -762,6 +762,22 @@ final class ContractorGrantTests: XCTestCase {
         XCTAssertTrue(stillFenced)
     }
 
+    /// WP4: the early-upload switch is on only where RUNTIME_DIAGNOSTICS is enabled (staging; production refuses it),
+    /// and each draft names the completion intention it was allocated for (Fable §8.5).
+    func testTheEarlyUploadSwitchIsStagingOnlyAndDraftsNameTheirIntent() async throws {
+        unsetenv(RuntimeDiagnostics.variable)
+        let (_, _, snag, _, token, _) = try await fixture()
+        let intent = UUID()
+        _ = try await contractorAfter(token, snag, intent: intent)
+        let off = try await call(.GET, "api/v2/contractor/\(token)", nil, contractorHeader: false)
+        let offPage = try off.content.decode(ContractorPage.self)
+        XCTAssertFalse(offPage.earlyUpload, "off unless RUNTIME_DIAGNOSTICS is enabled")
+        XCTAssertEqual(offPage.items.first?.drafts.first?.intentId, intent)
+        setenv(RuntimeDiagnostics.variable, "enabled", 1); defer { unsetenv(RuntimeDiagnostics.variable) }
+        let on = try await call(.GET, "api/v2/contractor/\(token)", nil, contractorHeader: false)
+        XCTAssertTrue(try on.content.decode(ContractorPage.self).earlyUpload)
+    }
+
     func testPINProtectsReadWorkflowAllocateUploadAndDownloadAndLocksGuesses() async throws {
         let (_, project, snag, activation, token, photo) = try await fixture(pin: "618294", photo: true)
         let root = "api/v2/contractor/\(token)", media = root + "/snags/\(snag.snag.id)/media"

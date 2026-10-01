@@ -33,13 +33,14 @@ final class UploadRetryConditionsTests: XCTestCase {
 
     struct Link { let owner: User; let project: PlatformProjectResponse; let snag: PlatformSnagResponse; let grantID: UUID; let token: String }
     private func meta() -> [String: Any] { ["operationId": UUID().uuidString, "deviceId": UUID().uuidString] }
-    private func call(_ method: HTTPMethod, _ path: String, _ user: User?, body: [String: Any] = [:], bytes: Data? = nil) async throws -> XCTHTTPResponse {
+    private func call(_ method: HTTPMethod, _ path: String, _ user: User?, body: [String: Any] = [:], bytes: Data? = nil, cookie: String? = nil) async throws -> XCTHTTPResponse {
         let jwt: String? = try user.map { u in let id = try u.requireID(); return try app.jwt.signers.sign(UserJWTPayload(subject: .init(value: id.uuidString), expiration: .init(value: Date().addingTimeInterval(3600)), userId: id)) }
         let payload = try bytes ?? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
         var result: XCTHTTPResponse!
         try await app.test(method, path, beforeRequest: { req in
             if let jwt { req.headers.bearerAuthorization = .init(token: jwt) }
             req.headers.replaceOrAdd(name: "X-Snaglist-Contractor", value: "1")
+            if let cookie { req.headers.replaceOrAdd(name: .cookie, value: cookie) }
             if method != .GET { req.headers.replaceOrAdd(name: .contentType, value: bytes == nil ? "application/json" : "image/png"); req.body = .init(data: payload) }
         }, afterResponse: { response async in result = response })
         return result
@@ -47,7 +48,7 @@ final class UploadRetryConditionsTests: XCTestCase {
     private func ok<T: Decodable>(_ response: XCTHTTPResponse, _ type: T.Type, file: StaticString = #filePath, line: UInt = #line) throws -> T {
         XCTAssertEqual(response.status, .ok, response.body.string, file: file, line: line); return try response.content.decode(type)
     }
-    private func link() async throws -> Link {
+    private func link(pin: String? = nil) async throws -> Link {
         let owner = try await app.db.transaction { db in try await VerifiedIdentityService.resolveEmail("retry-\(UUID())@example.test", name: "Synthetic retry tester", on: db) }
         let workspace = try await app.db.transaction { db in try await WorkspaceAccessService.createCompany(id: UUID(), name: "Synthetic Retry Construction", actorID: owner.requireID(), on: db) }
         let project = try ok(try await call(.POST, "api/v2/projects", owner, body: ["mutation": meta(), "workspaceId": try workspace.requireID().uuidString, "project": ["id": UUID().uuidString, "name": "Plot 7", "reference": "RT7"]]), PlatformProjectResponse.self)
@@ -56,17 +57,30 @@ final class UploadRetryConditionsTests: XCTestCase {
         let draft = try ok(try await call(.POST, "api/v2/projects/\(project.project.id)/snags", owner, body: ["mutation": meta(), "id": UUID().uuidString, "fields": ["title": "Reseal window", "location": "Plot 7 · Kitchen"]]), PlatformSnagResponse.self)
         let logged = try ok(try await call(.POST, "api/v2/projects/\(project.project.id)/snags/\(draft.snag.id)/publish", owner, body: ["mutation": meta(), "expectedRevision": draft.revision]), PlatformSnagResponse.self)
         let snag = try ok(try await call(.POST, "api/v2/projects/\(project.project.id)/snags/\(logged.snag.id)/assignment", owner, body: ["mutation": meta(), "expectedRevision": logged.revision, "fields": ["contractorId": contractorID.uuidString]]), PlatformSnagResponse.self)
-        let grant = try ok(try await call(.POST, "api/v2/projects/\(project.project.id)/links/prepare", owner, body: ["mutation": meta(), "id": UUID().uuidString, "mode": "completion", "snagIds": [snag.snag.id.uuidString], "assetIds": [String](), "contractorId": contractorID.uuidString]), LinkGrantResponse.self)
+        let grant = try ok(try await call(.POST, "api/v2/projects/\(project.project.id)/links/prepare", owner, body: ["mutation": meta(), "id": UUID().uuidString, "mode": "completion", "snagIds": [snag.snag.id.uuidString], "assetIds": [String](), "contractorId": contractorID.uuidString].merging(pin.map { ["pin": $0] as [String: Any] } ?? [:]) { a, _ in a }), LinkGrantResponse.self)
         let activation = try ok(try await call(.POST, "api/v2/projects/\(project.project.id)/links/\(grant.id)/activate", owner, body: ["mutation": meta(), "expectedRevision": grant.revision]), LinkActivationResponse.self)
         return Link(owner: owner, project: project, snag: snag, grantID: grant.id, token: String(try XCTUnwrap(activation.contractorPath).dropFirst(3)))
     }
     private func media(_ link: Link) -> String { "api/v2/contractor/\(link.token)/snags/\(link.snag.snag.id)/media" }
-    private func allocate(_ link: Link, intent: UUID, bytes: Data = png) async throws -> UUID {
+    private func allocate(_ link: Link, intent: UUID, bytes: Data = png, cookie: String? = nil) async throws -> UUID {
         let body: [String: Any] = ["mutation": meta(), "id": UUID().uuidString, "expectedRevision": link.snag.revision, "purpose": "completion", "intentId": intent.uuidString,
                                    "sha256": PrivateImageProcessor.digest(bytes), "byteCount": bytes.count, "mimeType": "image/png"]
-        return try ok(try await call(.POST, media(link), nil, body: body), ContractorGrantController.PhotoResult.self).id
+        return try ok(try await call(.POST, media(link), nil, body: body, cookie: cookie), ContractorGrantController.PhotoResult.self).id
     }
-    private func put(_ link: Link, _ asset: UUID, bytes: Data = png) async throws -> XCTHTTPResponse { try await call(.PUT, media(link) + "/\(asset)/content", nil, bytes: bytes) }
+    private func put(_ link: Link, _ asset: UUID, bytes: Data = png, cookie: String? = nil) async throws -> XCTHTTPResponse { try await call(.PUT, media(link) + "/\(asset)/content", nil, bytes: bytes, cookie: cookie) }
+    private func putsAfter(_ mark: Int) async -> Int { await store.recordedCalls().dropFirst(mark).filter { if case .put = $0 { return true } else { return false } }.count }
+    /// Holds this workspace's lock (exclusive, as a deletion or a command would) on a connection of its own.
+    private func holdWorkspace(_ workspace: UUID, seconds: Double, then work: (@Sendable (SQLDatabase) async throws -> Void)? = nil) -> Task<Void, Error> {
+        let db = app.db
+        return Task {
+            try await db.transaction { tx in
+                let sql = tx as! SQLDatabase
+                try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "workspace:" + workspace.uuidString), 0))").run()
+                if let work { try await work(sql) }
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            }
+        }
+    }
     private var sql: SQLDatabase { app.db as! SQLDatabase }
     private func originalKey(_ asset: UUID) async throws -> String? { try await sql.raw("SELECT original_key FROM media_assets WHERE id = \(bind: asset)").first()?.decode(column: "original_key", as: String?.self) }
     private func puts(to key: String) async -> Int { await store.recordedCalls().filter { if case .put(let k, _, _) = $0 { return k == key } else { return false } }.count }
@@ -240,6 +254,133 @@ final class UploadRetryConditionsTests: XCTestCase {
         XCTAssertEqual(putsAfter, 1, "the first attempt only; the re-check refused the retry")
     }
 
+    // MARK: - Fable RF-1 additions (FABLE-DESIGN-A-AMENDMENT §7 condition 1)
+
+    /// (a) The rendition's address gets the same one retry, re-checked through `confirmation`: original created,
+    /// rendition PUT lost in transport and absent → one retry → settled; one intent for the rendition key.
+    func testTheRenditionPathRetriesOnceAndSettles() async throws {
+        let link = try await link()
+        let asset = try await allocate(link, intent: UUID())
+        await store.passNextPut(); await store.failNextPut()
+        let response = try await put(link, asset)
+        XCTAssertEqual(response.status, .ok, response.body.string)
+        let rendition = try await sql.raw("SELECT rendition_key FROM media_assets WHERE id = \(bind: asset)").first()?.decode(column: "rendition_key", as: String?.self)
+        let key = try XCTUnwrap(rendition)
+        let count = await puts(to: key)
+        XCTAssertEqual(count, 2)
+        let rows = try await intents(key)
+        XCTAssertEqual(rows.count, 1, "\(rows)"); XCTAssertTrue(rows[0].hasSuffix(":settled"))
+    }
+
+    /// (b) The PIN session expires in the window before the retry: 403 `pin_required`, one PUT, no retry recorded.
+    func testAPINSessionExpiringBeforeTheRetryStopsIt() async throws {
+        setenv(RuntimeDiagnostics.variable, "enabled", 1)
+        let link = try await link(pin: "4826")
+        let verified = try await call(.POST, "api/v2/contractor/\(link.token)/verify-pin", nil, body: ["pin": "4826"])
+        XCTAssertEqual(verified.status, .ok, verified.body.string)
+        let cookie = String(try XCTUnwrap(verified.headers[.setCookie].first).split(separator: ";")[0])
+        let asset = try await allocate(link, intent: UUID(), cookie: cookie)
+        try await clearRecords()
+        await store.failNextPut()
+        let db = app.db, grant = link.grantID
+        await store.afterNextRead { try await (db as! SQLDatabase).raw("UPDATE link_sessions SET expires_at = now() - interval '1 second' WHERE grant_id = \(bind: grant)").run() }
+        let mark = await store.recordedCalls().count
+        let response = try await put(link, asset, cookie: cookie)
+        XCTAssertEqual(response.status, .forbidden, response.body.string); XCTAssertTrue(response.body.string.contains("pin_required"), response.body.string)
+        let count = await putsAfter(mark)
+        XCTAssertEqual(count, 1)
+        let records = try await failureRecords()
+        XCTAssertTrue(records.allSatisfy { !$0.2.contains("retry_after") }, "no retry was made: \(records)")
+        let keyFound = try await originalKey(asset); let key = try XCTUnwrap(keyFound)
+        let rows = try await intents(key)
+        XCTAssertEqual(rows.count, 1); XCTAssertTrue(rows[0].hasSuffix(":uncertain"), "re-check refusal leaves the intent uncertain: \(rows)")
+    }
+
+    /// (c) A cancelled first PUT: one PUT, no retry, the intent `uncertain`.
+    func testACancelledFirstPutIsNotRetried() async throws {
+        setenv(RuntimeDiagnostics.variable, "enabled", 1)
+        let link = try await link()
+        let asset = try await allocate(link, intent: UUID())
+        try await clearRecords()
+        await store.failNextPut(with: CancellationError())
+        let mark = await store.recordedCalls().count
+        let response = try await put(link, asset)
+        XCTAssertEqual(response.status, .serviceUnavailable, response.body.string)
+        let count = await putsAfter(mark)
+        XCTAssertEqual(count, 1)
+        let notes = try await failureRecords().first?.2 ?? ""
+        XCTAssertFalse(notes.contains("retry_after"), notes); XCTAssertTrue(notes.contains("cancelled_put"), notes)
+        let keyFound = try await originalKey(asset); let key = try XCTUnwrap(keyFound)
+        let rows = try await intents(key)
+        XCTAssertEqual(rows.count, 1); XCTAssertTrue(rows[0].hasSuffix(":uncertain"), "\(rows)")
+    }
+
+    /// (d) A deletion holds the workspace lock while the re-check runs: the re-check waits for it, finds the row gone and
+    /// refuses — one PUT. And when the lock is held past the 15 s command bound: 503 `workspace_busy`, the intent
+    /// `uncertain`, one PUT.
+    func testTheRecheckWaitsForADeletionAndIsBoundedByTheLockTimeout() async throws {
+        let link = try await link()
+        let workspace = link.project.workspaceId
+        // A deletion that commits after 1 s.
+        let gone = try await allocate(link, intent: UUID())
+        await store.failNextPut()
+        let box = TaskBox()
+        await store.afterNextRead {
+            box.task = self.holdWorkspace(workspace, seconds: 1) { sql in try await sql.raw("DELETE FROM media_assets WHERE id = \(bind: gone)").run() }
+            try await Task.sleep(nanoseconds: 300_000_000)
+        }
+        var mark = await store.recordedCalls().count
+        let refused = try await put(link, gone)
+        try await box.task?.value
+        XCTAssertTrue([.notFound, .gone].contains(refused.status), refused.body.string)
+        var count = await putsAfter(mark)
+        XCTAssertEqual(count, 1)
+        // A holder that outlasts the 15 s command lock bound.
+        let busy = try await allocate(link, intent: UUID())
+        await store.failNextPut()
+        let longBox = TaskBox()
+        await store.afterNextRead {
+            longBox.task = self.holdWorkspace(workspace, seconds: 17)
+            try await Task.sleep(nanoseconds: 300_000_000)
+        }
+        mark = await store.recordedCalls().count
+        let timedOut = try await put(link, busy)
+        try await longBox.task?.value
+        XCTAssertEqual(timedOut.status, .serviceUnavailable, timedOut.body.string); XCTAssertTrue(timedOut.body.string.contains("workspace_busy"), timedOut.body.string)
+        count = await putsAfter(mark)
+        XCTAssertEqual(count, 1)
+        let keyFound = try await originalKey(busy); let key = try XCTUnwrap(keyFound)
+        let rows = try await intents(key)
+        XCTAssertEqual(rows.count, 1); XCTAssertTrue(rows[0].hasSuffix(":uncertain"), "\(rows)")
+    }
+
+    /// Fable §8.3: a rendition that settled while readiness never committed is known only to the intent table; retiring
+    /// the upload queues both addresses and the hourly pass fences both.
+    func testARenditionKnownOnlyToItsIntentIsQueuedAndFenced() async throws {
+        let link = try await link()
+        let asset = try await allocate(link, intent: UUID())
+        await store.passNextPut(); await store.loseResponseOfQueuedPut()
+        let db = app.db
+        // The rendition landed; its readback verifies it; then, before readiness, the upload expires.
+        await store.afterNextRead { try await (db as! SQLDatabase).raw("UPDATE media_assets SET expires_at = now() - interval '1 second' WHERE id = \(bind: asset)").run() }
+        let response = try await put(link, asset)
+        XCTAssertEqual(response.status, .gone, "readiness refused: " + response.body.string)
+        let row = try await sql.raw("SELECT original_key, rendition_key, state FROM media_assets WHERE id = \(bind: asset)").first()!
+        XCTAssertNil(try row.decode(column: "rendition_key", as: String?.self), "the rendition's key is not on the row")
+        let renditionKeys = try await sql.raw("SELECT object_key FROM object_write_intents WHERE source_id = \(bind: asset) AND object_key NOT LIKE '%/original' AND state = 'settled'").all().map { try $0.decode(column: "object_key", as: String.self) }
+        XCTAssertEqual(renditionKeys.count, 1)
+        let retired = try await call(.DELETE, media(link) + "/\(asset)", nil)
+        XCTAssertEqual(retired.status, .ok, retired.body.string)
+        let queued = try await sql.raw("SELECT role || ':' || state AS line FROM upload_retirements WHERE asset_id = \(bind: asset) ORDER BY role").all().map { try $0.decode(column: "line", as: String.self) }
+        XCTAssertEqual(queued, ["original:pending", "rendition:pending"])
+        let counts = try await RetentionMaintenanceService.run(on: app.db, fenceStore: store)
+        XCTAssertEqual(counts.failed, [])
+        let originalAddress = try row.decode(column: "original_key", as: String.self)
+        let fencedOriginal = await store.isFenced(originalAddress)
+        let fencedRendition = await store.isFenced(renditionKeys[0])
+        XCTAssertTrue(fencedOriginal); XCTAssertTrue(fencedRendition)
+    }
+
     /// (5) Permission, expiry, revocation and integrity failures are never retried. Revocation or expiry in the window
     /// before the retry stops it (one PUT, answered 4xx); bytes that differ from the allocation are refused before any
     /// intent or PUT; a key holding somebody else's object is a terminal conflict after one PUT.
@@ -286,3 +427,6 @@ final class UploadRetryConditionsTests: XCTestCase {
         XCTAssertEqual(count, 1, "revocation stops the retry")
     }
 }
+
+/// Carries a task started inside a store hook out to the test.
+private final class TaskBox: @unchecked Sendable { var task: Task<Void, Error>? }

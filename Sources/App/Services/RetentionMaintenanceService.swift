@@ -54,6 +54,10 @@ enum RetentionMaintenanceService {
         var uploadFencesWritten: Int? = nil
         var uploadFenceFailures: Int? = nil
         var uploadFencesPending: Int? = nil
+        /// Pending fences that have failed `fenceAttemptCeiling` passes and are no longer tried (Fable §8.4: visible, never silent).
+        var uploadFencesAtCeiling: Int? = nil
+        /// P0e staging diagnostics rows removed after 30 days (Fable §7 condition 4).
+        var diagnosticFailures: Int? = nil
         var failed: [String] = []
     }
 
@@ -226,6 +230,13 @@ enum RetentionMaintenanceService {
                 SELECT count(*) AS total FROM removed
                 """)
         }
+        await step("diagnosticFailures") {
+            counts.diagnosticFailures = try await total("""
+                WITH removed AS (DELETE FROM diagnostic_request_failures WHERE id IN (
+                    SELECT id FROM diagnostic_request_failures WHERE occurred_at < \(bind: monthAgo) ORDER BY occurred_at LIMIT \(bind: n)) RETURNING 1)
+                SELECT count(*) AS total FROM removed
+                """)
+        }
         await step("cleanupRuns") {
             counts.cleanupRuns = try await total("""
                 WITH removed AS (DELETE FROM cleanup_runs WHERE id IN (
@@ -299,6 +310,11 @@ enum RetentionMaintenanceService {
             }
             counts.uploadFencesWritten = written; counts.uploadFenceFailures = failures
             counts.uploadFencesPending = try await total("SELECT count(*) AS total FROM upload_retirements WHERE state = 'pending'")
+            counts.uploadFencesAtCeiling = try await total("SELECT count(*) AS total FROM upload_retirements WHERE state = 'pending' AND attempts >= \(bind: fenceAttemptCeiling)")
+            if (counts.uploadFencesPending ?? 0) > 0 || (counts.uploadFencesAtCeiling ?? 0) > 0 {
+                logger?.warning("Upload fences outstanding", metadata: ["pending": .string("\(counts.uploadFencesPending ?? 0)"),
+                                                                       "atCeiling": .string("\(counts.uploadFencesAtCeiling ?? 0)")])
+            }
         }
         return counts
     }
