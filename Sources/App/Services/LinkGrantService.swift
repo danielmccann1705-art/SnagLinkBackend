@@ -96,15 +96,28 @@ enum LinkGrantService {
     ///    the contractor's archive flag and the PIN session are read in one statement under the lock and decided in
     ///    Swift with the same `readDecision` + `.share`. A project that is missing, predates workspaces or is not in
     ///    the grant's workspace goes through the original sequence unchanged.
-    static func load(_ token: String, req: Request, verifySession: Bool = true, on db: Database) async throws -> (SQLRow, Project) {
+    ///
+    /// `shared` (Lane A P5, Fable-approved): for the transactions that only read — the page GET and the photo download's
+    /// transactions. Statement 1 then takes the same key with `pg_advisory_xact_lock_shared` and the 8 s read bound, and
+    /// also makes the rest of the transaction read-only (`transaction_read_only`), so a write on this path fails instead of
+    /// happening. Readers of one workspace no longer queue behind each other; every writer still takes the key exclusively
+    /// and waits for them (PostgreSQL queues lock requests fairly). The shared variant never upgrades: where the exclusive
+    /// variant falls back to `ProjectAccessService.require` (which may write and locks exclusively), it refuses instead.
+    static func load(_ token: String, req: Request, verifySession: Bool = true, shared: Bool = false, on db: Database) async throws -> (SQLRow, Project) {
         guard token.hasPrefix("c2_"), token.count <= 100 else { throw Abort(.notFound, reason: "Contractor link unavailable") }
         let sql = try VerifiedIdentityService.sql(db)
         // "lock" (staging-only Server-Timing): this statement, i.e. mostly the wait for the workspace lock.
-        guard let found = try await ServerTiming.measure("lock", { try await sql.raw("""
+        let lookup: SQLQueryString = shared ? """
+            SELECT g.id, g.project_id, g.workspace_id, pg_advisory_xact_lock_shared(hashtextextended('workspace:' || upper(g.workspace_id::text), 0)) IS NULL AS locked
+            FROM link_grants g, (SELECT set_config('lock_timeout', \(bind: WorkspaceAccessService.readLockTimeout), true) AS applied,
+                                        set_config('transaction_read_only', 'on', true) AS read_only) AS bound
+            WHERE g.token_hash = \(bind: SHA256Hasher.hash(token: token)) AND bound.applied IS NOT NULL AND bound.read_only IS NOT NULL
+            """ : """
             SELECT g.id, g.project_id, g.workspace_id, pg_advisory_xact_lock(hashtextextended('workspace:' || upper(g.workspace_id::text), 0)) IS NULL AS locked
             FROM link_grants g, (SELECT set_config('lock_timeout', \(bind: WorkspaceAccessService.commandLockTimeout), true) AS applied) AS bound
             WHERE g.token_hash = \(bind: SHA256Hasher.hash(token: token)) AND bound.applied IS NOT NULL
-            """).first() }) else { throw Abort(.notFound, reason: "Contractor link unavailable") }
+            """
+        guard let found = try await ServerTiming.measure("lock", { try await sql.raw(lookup).first() }) else { throw Abort(.notFound, reason: "Contractor link unavailable") }
         let grantID = try found.decode(column: "id", as: UUID.self), workspaceID = try found.decode(column: "workspace_id", as: UUID.self)
         let row = try await self.row(grantID, projectID: found.decode(column: "project_id", as: UUID.self), on: db)
         guard try row.decode(column: "state", as: String.self) == "active", try row.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "This Contractor link expired or was revoked. Ask the project manager for a new link") }
@@ -123,6 +136,9 @@ enum LinkGrantService {
             FROM projects p JOIN teams t ON t.id = p.workspace_id
             WHERE p.id = \(bind: projectID)
             """).first(), try facts.decode(column: "workspace_id", as: UUID?.self) == workspaceID else {
+            // A shared holder must not reach `check` (it may write and locks exclusively: an upgrade). A `c2_` grant is only
+            // ever prepared on a managed project in its own workspace, so on the read path this is a refusal.
+            if shared { throw Abort(.gone, reason: "This Contractor link is no longer active. Ask the project manager for a new link.", identifier: "link_issuer_inactive") }
             return try await afterGrantRow(row, req: req, verifySession: verifySession, on: db)
         }
         let project = try facts.decode(fluentModel: Project.self)

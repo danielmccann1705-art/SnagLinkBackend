@@ -19,7 +19,8 @@ struct ContractorGrantController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
         routes.get("assets", "contractor", "v2", ":name", use: resource)
         let grant = routes.grouped("api", "v2", "contractor", ":token").grouped(ContractorErrorBoundary())
-        grant.get(use: read)
+        // Read routes take the workspace lock shared (P5); Server-Timing (staging only) shows their lock waits.
+        grant.get { req async throws -> Response in try await ServerTiming.respond(req) { try await self.read(req: req) } }
         grant.post("verify-pin", use: verifyPIN)
         let snag = grant.grouped("snags", ":snagId")
         for action in [WorkflowAction.start, .submit] {
@@ -37,7 +38,9 @@ struct ContractorGrantController: RouteCollection {
                 try await self.upload(req: req)
             }
         }
-        snag.get("media", ":assetId", "content", use: download)
+        snag.get("media", ":assetId", "content") { req async throws -> Response in
+            try await ServerTiming.respond(req, rename: ["lock": "lock_imported", "lock_2": "lock_check", "lock_3": "lock_recheck"]) { try await self.download(req: req) }
+        }
     }
     @Sendable func resource(req: Request) async throws -> Response {
         let types = ["contractor.js": "text/javascript; charset=utf-8", "contractor.css": "text/css; charset=utf-8", "tokens.css": "text/css; charset=utf-8", "wordmark-light.svg": "image/svg+xml", "IBMPlexSans-Regular.ttf": "font/ttf", "IBMPlexSans-Medium.ttf": "font/ttf", "IBMPlexSans-Bold.ttf": "font/ttf", "IBMPlexMono-Regular.ttf": "font/ttf", "OFL.txt": "text/plain; charset=utf-8"]
@@ -51,7 +54,7 @@ struct ContractorGrantController: RouteCollection {
         let token = try Self.token(req), page = try req.query.get(Int?.self, at: "page") ?? 1
         guard (1...1000).contains(page) else { throw Abort(.badRequest) }
         return try await req.db.transaction { db in
-            let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
+            let (grant, project) = try await LinkGrantService.load(token, req: req, shared: true, on: db)
             return try await LinkGrantService.page(grant, project: project, page: page, on: db)
         }
     }
@@ -195,7 +198,7 @@ struct ContractorGrantController: RouteCollection {
         // media lookup fail and catching it: a not-found here is a real refusal, and it
         // should not become control flow.
         if let imported = try await (req.db.transaction { db -> (key: ImportedObjectKey, sha256: String, size: Int64, mime: String)? in
-            let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
+            let (grant, project) = try await LinkGrantService.load(token, req: req, shared: true, on: db)
             return try await LinkGrantService.visibleImportedPhoto(assetID, snagID: snagID, grant: grant, project: project, on: db)
         }) {
             // Resolved only once an imported photo is actually in hand. Asking for the
@@ -205,7 +208,7 @@ struct ContractorGrantController: RouteCollection {
             let value = try await LegacyImportReadService.verifiedBytes(imported, store: store)
             // Storage IO ran outside the grant's locks; recheck before disclosure.
             try await req.db.transaction { db in
-                let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
+                let (grant, project) = try await LinkGrantService.load(token, req: req, shared: true, on: db)
                 guard try await LinkGrantService.visibleImportedPhoto(assetID, snagID: snagID, grant: grant, project: project, on: db) != nil else {
                     throw Abort(.notFound)
                 }
@@ -220,7 +223,7 @@ struct ContractorGrantController: RouteCollection {
         // here. Checking one and not the other left a size disagreement to be
         // caught by the digest alone.
         let target: (key: String, sha256: String, size: Int) = try await req.db.transaction { db in
-            let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
+            let (grant, project) = try await LinkGrantService.load(token, req: req, shared: true, on: db)
             let media = try await LinkGrantService.visibleMedia(assetID, snagID: snagID, grant: grant, project: project, on: db)
             return try (media.decode(column: "rendition_key", as: String.self),
                         media.decode(column: "rendition_sha256", as: String.self),
@@ -236,7 +239,7 @@ struct ContractorGrantController: RouteCollection {
             throw Abort(.serviceUnavailable, reason: "This photo could not be verified", identifier: "media_unavailable")
         }
         try await req.db.transaction { db in
-            let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
+            let (grant, project) = try await LinkGrantService.load(token, req: req, shared: true, on: db)
             _ = try await LinkGrantService.visibleMedia(assetID, snagID: snagID, grant: grant, project: project, on: db)
         }
         return Response(status: .ok, headers: ["Content-Type": "image/jpeg", "Cache-Control": "private, no-store", "Vary": "Cookie", "Content-Disposition": "inline; filename=snag-photo.jpg", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer"], body: .init(data: bytes))

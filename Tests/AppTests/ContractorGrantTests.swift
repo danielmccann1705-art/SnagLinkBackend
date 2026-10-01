@@ -156,12 +156,14 @@ final class ContractorGrantTests: XCTestCase {
     /// same grant, project and snag.
     func testSingleStatementLoadMatchesTheSequentialChecksRefusalByRefusal() async throws {
         struct Outcome: Equatable { var ok: String? = nil; var status: UInt? = nil; var reason: String? = nil; var identifier: String? = nil }
-        func run(_ new: Bool, token: String, snag: UUID, cookie: String?, write: Bool) async -> Outcome {
+        func run(_ mode: Int, token: String, snag: UUID, cookie: String?, write: Bool) async -> Outcome {
+            let new = mode > 0
             let req = Request(application: app, on: app.eventLoopGroup.next())
             if let cookie { req.headers.replaceOrAdd(name: .cookie, value: cookie) }
             do {
                 return .init(ok: try await app.db.transaction { db -> String in
-                    let (grant, project) = new ? try await LinkGrantService.load(token, req: req, on: db) : try await LinkGrantService.loadSequential(token, req: req, on: db)
+                    let (grant, project) = mode == 2 ? try await LinkGrantService.load(token, req: req, shared: true, on: db)
+                        : new ? try await LinkGrantService.load(token, req: req, on: db) : try await LinkGrantService.loadSequential(token, req: req, on: db)
                     let item = new ? try await LinkGrantService.item(snag, grant: grant, project: project, write: write, on: db)
                                    : try await LinkGrantService.itemSequential(snag, grant: grant, project: project, write: write, on: db)
                     return "\(try grant.decode(column: "id", as: UUID.self)) \(try project.requireID()) \(try item.requireID()) \(item.contractorId?.uuidString ?? "-")"
@@ -171,9 +173,10 @@ final class ContractorGrantTests: XCTestCase {
             } catch { return .init(reason: "non-Abort \(type(of: error))") }
         }
         func compare(_ label: String, token: String, snag: UUID, cookie: String? = nil, write: Bool = true) async -> Outcome {
-            let new = await run(true, token: token, snag: snag, cookie: cookie, write: write)
-            let old = await run(false, token: token, snag: snag, cookie: cookie, write: write)
-            XCTAssertEqual(new, old, label); return new
+            let new = await run(1, token: token, snag: snag, cookie: cookie, write: write)
+            let old = await run(0, token: token, snag: snag, cookie: cookie, write: write)
+            let shared = await run(2, token: token, snag: snag, cookie: cookie, write: write)
+            XCTAssertEqual(new, old, label); XCTAssertEqual(shared, old, "shared: " + label); return new
         }
         let sql = try VerifiedIdentityService.sql(app.db)
         func scenario(_ label: String, pin: String? = nil, expect: UInt?, identifier: String? = nil, _ mutate: (User, UUID, UUID, UUID, PlatformProjectResponse) async throws -> Void) async throws {
@@ -233,6 +236,97 @@ final class ContractorGrantTests: XCTestCase {
             XCTAssertEqual(o6.status, 403)
             let o7 = await compare("read-only link, read", token: token, snag: snag.snag.id, write: false)
             XCTAssertNotNil(o7.ok)
+        }
+    }
+    /// Lane A P5: the read routes' shared variant. Read-only (a write in that transaction fails), refuses instead of falling
+    /// back to `check` (which may write and locks exclusively), and the lock semantics: an exclusive holder makes reads wait
+    /// and then answer 503 workspace_busy; a shared holder does not; PostgreSQL's fair queue puts a later reader behind a
+    /// waiting writer; verifyPIN stays exclusive and its failure counter commits.
+    func testSharedReadPathIsReadOnlyRefusesInsteadOfFallingBackAndKeepsTheLockSemantics() async throws {
+        let sql = try VerifiedIdentityService.sql(app.db)
+        func workspace(_ project: PlatformProjectResponse) async throws -> UUID {
+            try await sql.raw("SELECT workspace_id FROM projects WHERE id = \(bind: project.project.id)").first()!.decode(column: "workspace_id", as: UUID.self)
+        }
+        /// Holds the workspace key (exclusive or shared) on its own pooled connection for `seconds`.
+        func hold(_ shared: Bool, _ ws: UUID, seconds: Double) -> Task<Void, Error> {
+            Task {
+                try await self.app.db.transaction { db in
+                    let fn = shared ? "pg_advisory_xact_lock_shared" : "pg_advisory_xact_lock"
+                    try await VerifiedIdentityService.sql(db).raw("SELECT \(unsafeRaw: fn)(hashtextextended(\(bind: "workspace:" + ws.uuidString), 0)) IS NULL AS held").run()
+                    try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                }
+            }
+        }
+        let (owner, project, snag, activation, token, photo) = try await fixture(photo: true)
+        let ws = try await workspace(project)
+        // Read-only: after the shared load, a write in the same transaction is refused by PostgreSQL.
+        let req = Request(application: app, on: app.eventLoopGroup.next())
+        do {
+            try await app.db.transaction { db in
+                _ = try await LinkGrantService.load(token, req: req, shared: true, on: db)
+                try await VerifiedIdentityService.sql(db).raw("UPDATE link_grants SET revision = revision WHERE id = \(bind: activation.grant.id)").run()
+            }
+            XCTFail("a write after the shared load must fail")
+        } catch { XCTAssertTrue(String(reflecting: error).contains("25006") || String(reflecting: error).lowercased().contains("read-only"), String(reflecting: error)) }
+        // The routes still answer (so they issue no write) and download is served.
+        let page = try await call(.GET, "api/v2/contractor/\(token)", nil); XCTAssertEqual(page.status, .ok, page.body.string)
+        let media = "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media/\(photo!)/content"
+        let image = try await call(.GET, media, nil); XCTAssertEqual(image.status, .ok)
+        // (b) A shared holder elsewhere does not block the read routes (they never take the key exclusively).
+        do {
+            let holder = hold(true, ws, seconds: 4); try await Task.sleep(nanoseconds: 300_000_000)
+            let started = Date()
+            let a = try await call(.GET, "api/v2/contractor/\(token)", nil), b = try await call(.GET, media, nil)
+            XCTAssertEqual(a.status, .ok); XCTAssertEqual(b.status, .ok)
+            XCTAssertLessThan(Date().timeIntervalSince(started), 3, "a read waited for a shared holder")
+            try await holder.value
+        }
+        // (a) An exclusive holder makes a read wait for the 8 s read bound, then 503 workspace_busy with Retry-After.
+        do {
+            let holder = hold(false, ws, seconds: 11); try await Task.sleep(nanoseconds: 300_000_000)
+            let started = Date()
+            let busy = try await call(.GET, "api/v2/contractor/\(token)", nil)
+            let waited = Date().timeIntervalSince(started)
+            XCTAssertEqual(busy.status, .serviceUnavailable, busy.body.string); XCTAssertTrue(busy.body.string.contains("workspace_busy"), busy.body.string)
+            XCTAssertNotNil(busy.headers.first(name: "Retry-After")); XCTAssertGreaterThan(waited, 7); XCTAssertLessThan(waited, 10.5)
+            try await holder.value
+        }
+        // (c) Fair queue: with a shared holder, a writer (allocate) waits; a reader arriving after it queues behind it.
+        do {
+            let holder = hold(true, ws, seconds: 2.5); try await Task.sleep(nanoseconds: 300_000_000)
+            let path = "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media"
+            let writer = Task { () -> (HTTPStatus, Date) in let r = try await self.call(.POST, path, nil, body: self.command(snag, purpose: "completion", intent: UUID())); return (r.status, Date()) }
+            try await Task.sleep(nanoseconds: 500_000_000)
+            let reader = Task { () -> (HTTPStatus, Date) in let r = try await self.call(.GET, "api/v2/contractor/\(token)", nil); return (r.status, Date()) }
+            let w = try await writer.value, r = try await reader.value
+            try await holder.value
+            XCTAssertEqual(w.0, .ok); XCTAssertEqual(r.0, .ok)
+            XCTAssertLessThanOrEqual(w.1, r.1, "the later reader must not overtake the waiting writer")
+        }
+        // (d) verifyPIN stays exclusive (it writes failure counters) and its failure counter commits.
+        do {
+            let (_, pinProject, _, pinActivation, pinToken, _) = try await fixture(pin: "482915")
+            let pinWS = try await workspace(pinProject)
+            let holder = hold(true, pinWS, seconds: 2); try await Task.sleep(nanoseconds: 300_000_000)
+            let started = Date()
+            let wrong = try await call(.POST, "api/v2/contractor/\(pinToken)/verify-pin", nil, body: ["pin": "000000"])
+            XCTAssertEqual(wrong.status, .forbidden); XCTAssertGreaterThan(Date().timeIntervalSince(started), 1.2, "verifyPIN did not wait for the shared holder")
+            try await holder.value
+            let failures = try await sql.raw("SELECT pin_failures FROM link_grants WHERE id = \(bind: pinActivation.grant.id)").first()!.decode(column: "pin_failures", as: Int.self)
+            XCTAssertEqual(failures, 1)
+        }
+        // Fallback refuses without upgrading or writing: a project detached from its workspace (corrupted state).
+        do {
+            try await app.db.transaction { db in
+                let s = try VerifiedIdentityService.sql(db)
+                try await s.raw("SET LOCAL session_replication_role = replica").run()
+                try await s.raw("UPDATE projects SET workspace_id = NULL WHERE id = \(bind: project.project.id)").run()
+            }
+            let refused = try await call(.GET, "api/v2/contractor/\(token)", nil)
+            XCTAssertEqual(refused.status, .gone, refused.body.string); XCTAssertTrue(refused.body.string.contains("link_issuer_inactive"), refused.body.string)
+            let stillDetached = try await sql.raw("SELECT workspace_id FROM projects WHERE id = \(bind: project.project.id)").first()!.decode(column: "workspace_id", as: UUID?.self)
+            XCTAssertNil(stillDetached, "the shared read path must not attach (write) the project")
+            _ = owner
         }
     }
     /// Lane A P0: phase timing is staging-only (RUNTIME_DIAGNOSTICS=enabled) and carries fixed
