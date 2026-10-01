@@ -246,7 +246,8 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
     /// the point of the nonce in the key.
     @discardableResult
     private func boundButEmpty(_ target: Target) async throws -> String {
-        await store.failNextPut()
+        // Two failures: the first attempt and WP1's one retry of a `not_landed` PUT.
+        await store.failNextPut(); await store.failNextPut()
         let response = try await put(target)
         XCTAssertEqual(response.status, .serviceUnavailable, response.body.string)
         XCTAssertTrue(response.body.string.contains("media_unavailable"), response.body.string)
@@ -344,6 +345,117 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
             XCTAssertEqual(box.drain(), [.init(kind: "created", role: "original", keys: ["kind", "role"]),
                                          .init(kind: "created", role: "rendition", keys: ["kind", "role"])],
                            route.rawValue)
+        }
+    }
+
+    /// WP1 (Lane A, Fable's R2): row 14a once — the first PUT's outcome is unknown and the readback finds nothing —
+    /// is retried once, inside the same intent, with the same key and bytes; the retry's `created` settles it. One intent,
+    /// no second object, and the log reads `not_landed` then the settling rows.
+    func testANotLandedPutIsRetriedOnceInsideTheSameIntentAndSettlesOnBothRoutes() async throws {
+        let box = capturingLogs()
+        for route in Route.allCases {
+            let target = try await allocated(route)
+            await store.failNextPut()
+            let mark = await mark()
+            box.drain()
+            let response = try await put(target)
+            XCTAssertEqual(response.status, .ok, route.rawValue + " → " + response.body.string)
+            assertEqual(try await state(target), "ready", route.rawValue)
+            let key = try unwrap(await originalKey(target))
+            let calls = await calls(since: mark)
+            XCTAssertEqual(calls.count, 4, route.rawValue + ": put, readback, the same put again, then the rendition — \(calls)")
+            XCTAssertEqual(calls[0], .put(key: key, byteCount: Self.png.count, contentType: "image/png"), route.rawValue)
+            XCTAssertEqual(calls[1], .read(key: key, maximumBytes: PrivateContent.maximumBytes), route.rawValue)
+            XCTAssertEqual(calls[2], .put(key: key, byteCount: Self.png.count, contentType: "image/png"), route.rawValue + ": the same key and bytes")
+            assertEqual(try await intents(target).map(\.state), ["settled", "settled"], route.rawValue + ": one intent for the original, not two")
+            XCTAssertEqual(box.drain(), [.init(kind: "not_landed", role: nil, keys: ["kind"]),
+                                         .init(kind: "created", role: "original", keys: ["kind", "role"]),
+                                         .init(kind: "created", role: "rendition", keys: ["kind", "role"])], route.rawValue)
+        }
+    }
+
+    /// WP1: the retry is bounded to one. Two `not_landed` attempts end exactly as row 14a did before: 503
+    /// `media_unavailable`, the intent `uncertain`, nothing at the address — and no third PUT.
+    func testASecondNotLandedPutEndsAsBeforeWithoutAThirdAttemptOnBothRoutes() async throws {
+        for route in Route.allCases {
+            let target = try await allocated(route)
+            let mark = await mark()
+            let key = try await boundButEmpty(target)
+            let puts = await calls(since: mark).filter { if case .put = $0 { return true } else { return false } }
+            XCTAssertEqual(puts.count, 2, route.rawValue + ": the first attempt and one retry, never a third")
+            assertEqual(try await intents(target).map(\.state), ["uncertain"], route.rawValue)
+            assertNil(await store.object(at: key), route.rawValue)
+        }
+    }
+
+    /// WP1: the first PUT reached storage only after its readback had found nothing. The retry sends the same bytes
+    /// to the same create-only address, meets `alreadyExists`, reads back our own digest and settles as
+    /// `existing_verified` — nothing overwritten, no second object, one intent.
+    func testARetryThatMeetsTheFirstAttemptsLateBytesSettlesAsExistingVerifiedOnBothRoutes() async throws {
+        let box = capturingLogs()
+        for route in Route.allCases {
+            let target = try await allocated(route)
+            await store.failNextPut()
+            await store.landLateAfterNextRead(data: Self.png, contentType: "image/png")
+            let mark = await mark()
+            box.drain()
+            let response = try await put(target)
+            XCTAssertEqual(response.status, .ok, route.rawValue + " → " + response.body.string)
+            assertEqual(try await state(target), "ready", route.rawValue)
+            let key = try unwrap(await originalKey(target))
+            let calls = await calls(since: mark)
+            XCTAssertEqual(calls.count, 5, route.rawValue + ": put, readback, the same put, readback, then the rendition — \(calls)")
+            XCTAssertEqual(calls[2], .put(key: key, byteCount: Self.png.count, contentType: "image/png"), route.rawValue)
+            XCTAssertEqual(calls[3], .read(key: key, maximumBytes: PrivateContent.maximumBytes),
+                           route.rawValue + ": an `alreadyExists` retry is read back, never trusted")
+            assertEqual(await store.object(at: key)?.data, Self.png, route.rawValue)
+            assertEqual(try await intents(target).map(\.state), ["settled", "settled"], route.rawValue)
+            XCTAssertEqual(box.drain(), [.init(kind: "not_landed", role: nil, keys: ["kind"]),
+                                         .init(kind: "existing_verified", role: "original", keys: ["kind", "role"]),
+                                         .init(kind: "created", role: "rendition", keys: ["kind", "role"])], route.rawValue)
+        }
+    }
+
+    /// WP1: only `not_landed` is retried. A readback that does not answer (14b), a fence, a cancellation, an address
+    /// already holding our bytes and somebody else's object each end after one PUT, exactly as before.
+    func testOnlyNotLandedIsRetried() async throws {
+        for route in Route.allCases {
+            let unreachable = try await allocated(route)
+            await store.failNextPut(); await store.failNextRead()
+            var since = await mark()
+            let r1 = try await put(unreachable)
+            XCTAssertEqual(r1.status, .serviceUnavailable, r1.body.string)
+            assertEqual(await calls(since: since).filter { if case .put = $0 { return true } else { return false } }.count, 1, route.rawValue + ": 14b is not retried")
+            let fenced = try await allocated(route)
+            let fencedKey = try await boundButEmpty(fenced)
+            try await store.seedErasureFence(key: fencedKey)
+            await store.failNextPut()
+            since = await mark()
+            let r2 = try await put(fenced)
+            XCTAssertEqual(r2.status, .gone, r2.body.string)
+            assertEqual(await calls(since: since).filter { if case .put = $0 { return true } else { return false } }.count, 1, route.rawValue + ": a fence is not retried")
+            let cancelled = try await allocated(route)
+            await store.failNextPut(with: CancellationError())
+            since = await mark()
+            _ = try await put(cancelled)
+            assertEqual(await calls(since: since).filter { if case .put = $0 { return true } else { return false } }.count, 1, route.rawValue + ": a cancellation is not retried")
+            // An address already taken by our own bytes (row 5) settles after one PUT and its readback.
+            let ours = try await allocated(route)
+            let oursKey = try await boundButEmpty(ours)
+            try await store.seedContent(key: oursKey, data: Self.png, contentType: "image/png")
+            since = await mark()
+            let r4 = try await put(ours)
+            XCTAssertEqual(r4.status, .ok, r4.body.string)
+            assertEqual(await calls(since: since).filter { $0 == .put(key: oursKey, byteCount: Self.png.count, contentType: "image/png") }.count,
+                           1, route.rawValue + ": `alreadyExists` is not retried")
+            // Somebody else's object at the address (row 7) is a terminal conflict after one PUT.
+            let theirs = try await allocated(route)
+            let theirsKey = try await boundButEmpty(theirs)
+            try await store.seedContent(key: theirsKey, data: Self.foreign, contentType: "image/png")
+            since = await mark()
+            let r5 = try await put(theirs)
+            XCTAssertEqual(r5.status, .conflict, r5.body.string)
+            assertEqual(await calls(since: since).filter { if case .put = $0 { return true } else { return false } }.count, 1, route.rawValue + ": a key conflict is not retried")
         }
     }
 
@@ -521,7 +633,8 @@ final class PrivateMediaWriteServiceTests: XCTestCase {
             observed += box.drain()
             XCTAssertEqual(readbackResponse.status, .serviceUnavailable, route.rawValue + " → " + readbackResponse.body.string)
 
-            XCTAssertEqual(observed.map(\.kind), ["not_landed", "storage_unreachable", "exists_then_absent", "readback_unavailable"],
+            // 14a logs twice: the first attempt's `not_landed` (then the one WP1 retry), and the final refusal.
+            XCTAssertEqual(observed.map(\.kind), ["not_landed", "not_landed", "storage_unreachable", "exists_then_absent", "readback_unavailable"],
                            route.rawValue + ": each row logs its own kind, in the order the four were driven")
             XCTAssertTrue(observed.allSatisfy { $0.keys == ["kind"] && $0.role == nil },
                           route.rawValue + ": a refusal's line carries its kind and nothing else — \(observed)")

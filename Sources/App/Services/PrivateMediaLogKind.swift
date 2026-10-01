@@ -42,7 +42,10 @@ enum PrivateMediaLogKind: String, Sendable, Equatable, CaseIterable {
 
     /// Row 14a. The PUT's outcome was unknown and nothing is at the address: the
     /// write never landed. This is the row the readback was built for — it is the
-    /// one that says a retry will help.
+    /// one that says a retry will help. Since WP1 (1 Oct 2026) the server makes that
+    /// retry itself, once, 300 ms later, inside the same intent: a `not_landed`
+    /// line followed by a settling line is the retry carrying the path; two
+    /// `not_landed` lines for one photo are the 503 the client sees.
     case notLanded = "not_landed"
 
     // MARK: - Both

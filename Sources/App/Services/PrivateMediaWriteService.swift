@@ -281,7 +281,7 @@ enum PrivateMediaWriteService {
             while true {
                 do {
                     let settled = try await PrivateObjectAllocationPolicy.write(
-                        allocation, data: original, contentType: mimeType, source: source, app: app, on: database,
+                        allocation, data: original, contentType: mimeType, source: source, app: app, on: database, logger: logger,
                         authorize: binding(assetID, in: workspaceID, to: allocation, authorize))
                     log(.init(settled), role: .original, to: logger)
                     break
@@ -301,7 +301,7 @@ enum PrivateMediaWriteService {
             // processing meets its own earlier object instead of creating a second.
             let renditionAllocation = try PrivateObjectAllocationPolicy.rendition(of: allocation, sha256: renditionSHA, app: app)
             let renditionSettled = try await PrivateObjectAllocationPolicy.write(
-                renditionAllocation, data: rendition, contentType: "image/jpeg", source: source, app: app, on: database,
+                renditionAllocation, data: rendition, contentType: "image/jpeg", source: source, app: app, on: database, logger: logger,
                 authorize: confirmation(assetID, in: workspaceID, boundTo: allocation, authorize))
             log(.init(renditionSettled), role: .rendition, to: logger)
             return .init(originalKey: allocation.key, renditionKey: renditionAllocation.key, renditionSHA256: renditionSHA)

@@ -53,9 +53,11 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     private var calls: [Call] = []
     private var objects: [String: Object] = [:]
     private var written = 0
-    private var putFailure: (any Error)?
+    /// Queued: each `failNextPut` fails one more `put` (the WP1 retry needs two failures to reach row 14a).
+    private var putFailures: [any Error] = []
     private var readFailure: (any Error)?
     private var dropPutResponse = false
+    private var lateLanding: (data: Data, contentType: String)?
 
     init(configuration: PrivateStorageTargetConfiguration) { self.configuration = configuration }
 
@@ -101,7 +103,7 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     /// The next content `put` throws and stores nothing. With the default error
     /// this is a PUT whose request never reached storage: paired with a readback
     /// that finds nothing, it is the fixture for "the write never landed".
-    func failNextPut(with error: any Error = PrivateContentStoreError.transportUnavailable) { putFailure = error }
+    func failNextPut(with error: any Error = PrivateContentStoreError.transportUnavailable) { putFailures.append(error) }
 
     /// The next content `read` throws. Default: storage did not answer.
     func failNextRead(with error: any Error = PrivateContentStoreError.transportUnavailable) { readFailure = error }
@@ -116,6 +118,11 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     /// because the real provider would have refused that write before the response
     /// was lost.
     func dropNextPutResponse() { dropPutResponse = true }
+
+    /// The next content `read` answers exactly as it would, and *then* these bytes land at the key it read — a
+    /// first PUT that reached storage only after its readback had found nothing. The fixture for WP1's retry
+    /// meeting its own earlier attempt: create-only answers `alreadyExists`, and the readback decides.
+    func landLateAfterNextRead(data: Data, contentType: String) { lateLanding = (data, contentType) }
 
     /// Places content without going through `put`, for a test that needs an object
     /// to exist already. Not recorded as a call.
@@ -163,7 +170,7 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     /// refusal is an outcome rather than an error.
     func put(key: String, data: Data, contentType: String) async throws -> PutOutcome {
         calls.append(.put(key: key, byteCount: data.count, contentType: contentType))
-        if let putFailure { self.putFailure = nil; self.dropPutResponse = false; throw putFailure }
+        if !putFailures.isEmpty { let failure = putFailures.removeFirst(); self.dropPutResponse = false; throw failure }
         try configuration.validateContentKey(key)
         guard PrivateContent.mimeTypes.contains(contentType),
               contentType != ObjectErasureFenceService.contentType else { throw PrivateContentStoreError.invalidContent }
@@ -186,6 +193,9 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     func read(key: String, maximumBytes: Int) async throws -> Readback {
         calls.append(.read(key: key, maximumBytes: maximumBytes))
         if let readFailure { self.readFailure = nil; throw readFailure }
+        defer {
+            if let late = lateLanding { lateLanding = nil; _ = place(key: key, data: late.data, contentType: late.contentType, metadata: [:]) }
+        }
         try configuration.validateContentKey(key)
         guard maximumBytes > 0, maximumBytes <= PrivateContent.maximumBytes else { throw PrivateContentStoreError.invalidContent }
         guard let object = objects[key] else { throw PrivateContentStoreError.absent }

@@ -391,7 +391,7 @@ enum PrivateObjectAllocationPolicy {
     /// ahead of `begin`.
     @discardableResult
     static func write(_ allocation: Allocation, data: Data, contentType: String,
-                      source: ObjectWriteIntentService.Source, app: Application, on database: Database,
+                      source: ObjectWriteIntentService.Source, app: Application, on database: Database, logger: Logger? = nil,
                       authorize: @escaping @Sendable (Database) async throws -> ObjectWriteIntentService.Scope) async throws -> Settled {
         try requireContent(allocation, data: data, contentType: contentType)
         let store: any PrivateContentStorage
@@ -402,7 +402,30 @@ enum PrivateObjectAllocationPolicy {
         let key = allocation.key, sha256 = object.sha256
         return try await ObjectWriteIntentService.write(object, source: source, allocation: allocation,
                                                         on: database, authorize: authorize) {
-            try await issue(store: store, key: key, data: data, contentType: contentType, sha256: sha256)
+            try await issue(store: store, key: key, data: data, contentType: contentType, sha256: sha256, logger: logger ?? app.logger)
+        }
+    }
+
+    /// Pause before the one retry below: long enough for a dropped connection to be replaced, short against the
+    /// request's budget (two 30 s attempts plus readbacks stay inside the page's 180 s upload timeout).
+    static let notLandedRetryPause: UInt64 = 300_000_000
+
+    /// WP1 (Lane A, Fable's R2, 1 Oct 2026): exactly one retry, for exactly one row of B2's table — the first PUT's
+    /// outcome was unknown (a transport error) and the readback proved the object absent (row 14a, `not_landed`).
+    /// It runs inside the same `execute` closure, so the intent is still `active`; it sends the same bytes to the same
+    /// create-only address, so a first PUT that did land after all is met as `alreadyExists`, read back and verified
+    /// (`existing_verified`) — never overwritten, never a second object. Every other row is answered exactly as before:
+    /// no retry on `created`, `alreadyExists`, cancellation, an unreachable readback, a fence, or a content/key refusal.
+    /// If the retry also ends `not_landed`, the existing path applies (`uncertain`, 503 `media_unavailable`).
+    private static func issue(store: any PrivateContentStorage, key: String, data: Data,
+                              contentType: String, sha256: String, logger: Logger) async throws -> Settled {
+        do {
+            return try await issueOnce(store: store, key: key, data: data, contentType: contentType, sha256: sha256)
+        } catch PrivateMediaWriteService.Refusal.unavailable(.some(.notLanded)) {
+            // The first attempt's own line, in the existing vocabulary; the retry's outcome is logged by the caller as today.
+            logger.info("Private media write", metadata: ["kind": .string(PrivateMediaLogKind.notLanded.rawValue)])
+            try await Task.sleep(nanoseconds: notLandedRetryPause)
+            return try await issueOnce(store: store, key: key, data: data, contentType: contentType, sha256: sha256)
         }
     }
 
@@ -421,8 +444,8 @@ enum PrivateObjectAllocationPolicy {
     /// than this object's byte count, so an object of the wrong size comes back and
     /// is classified by its digest — a terminal conflict — instead of looking like
     /// a transport failure that a retry might clear.
-    private static func issue(store: any PrivateContentStorage, key: String, data: Data,
-                              contentType: String, sha256: String) async throws -> Settled {
+    private static func issueOnce(store: any PrivateContentStorage, key: String, data: Data,
+                                  contentType: String, sha256: String) async throws -> Settled {
         var outcome: PutOutcome?
         do {
             outcome = try await store.put(key: key, data: data, contentType: contentType)
@@ -451,7 +474,8 @@ enum PrivateObjectAllocationPolicy {
             throw PrivateMediaWriteService.Refusal.unavailable(nil)             // row 15
         } catch PrivateContentStoreError.absent {
             // Rows 8a and 14a. The second is the row this design was built for:
-            // the write never landed, and a retry is the answer.
+            // the write never landed, and a retry is the answer — made once by
+            // `issue` above (WP1) before the client is ever told.
             throw PrivateMediaWriteService.Refusal.unavailable(existed ? .existsThenAbsent : .notLanded)
         } catch PrivateContentStoreError.invalidKey, PrivateContentStoreError.invalidContent {
             // Row 17. Refused before the GET was issued, about a key this policy
