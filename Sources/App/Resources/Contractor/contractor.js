@@ -123,9 +123,38 @@
     throw new Error(heic ? 'This photo format could not be converted on this device. Choose a JPEG or PNG photo.' : 'This photo is too large to send. Choose a photo up to 10 MB.');
   }
   const photoURL = (item,photo) => `${root}/snags/${item.id}/media/${photo.id}/content`;
+  /* Card photos are fetched once each, only when their card is near the screen, two at a time, and never while this
+     page is sending a submission: the contractor's own upload goes first. Each is kept as a blob: URL so re-drawing the
+     list does not download it again (the server marks photos no-store). */
+  const photoBlobs = new Map(), photoState = new Map(); let photoActive = 0;
+  const photoObserver = 'IntersectionObserver' in window ? new IntersectionObserver(entries => {
+    for (const entry of entries) if (entry.isIntersecting) { photoObserver.unobserve(entry.target); wantPhoto(entry.target.dataset.src); }
+  }, {rootMargin:'300px 0px'}) : null;
+  function wantPhoto(url) { if (!photoBlobs.has(url) && !photoState.has(url)) photoState.set(url,'queued'); pumpPhotos(); }
+  function pumpPhotos() {
+    if (busy) return;
+    for (const [url,state] of photoState) {
+      if (photoActive >= 2) return;
+      if (state !== 'queued') continue;
+      photoState.set(url,'loading'); photoActive++;
+      fetch(url,{credentials:'same-origin',cache:'no-store',priority:'low'})
+        .then(r => r.ok ? r.blob() : Promise.reject(new Error(String(r.status))))
+        .then(blob => { photoBlobs.set(url,URL.createObjectURL(blob)); photoState.delete(url); }, () => { photoState.set(url,'failed'); })
+        .finally(() => { photoActive--; showPhotos(url); pumpPhotos(); });
+    }
+  }
+  function photoUnavailable(img) { const button = img.closest('button'); if(button){button.disabled=true;button.querySelector('span').textContent='Photo unavailable · check for updates';} }
+  function showPhotos(only) {
+    content.querySelectorAll('.photo-button img[data-src]').forEach(img => {
+      const url = img.dataset.src; if (only && url !== only) return;
+      if (photoBlobs.has(url)) { if (img.getAttribute('src') !== photoBlobs.get(url)) img.src = photoBlobs.get(url); }
+      else if (photoState.get(url) === 'failed') photoUnavailable(img);
+      else if (!only) { if (photoObserver) photoObserver.observe(img); else wantPhoto(url); }
+    });
+  }
   function renderPhotos(item) {
     if (!item.photos.length) return '<p class="empty-photo">No shared photos for this snag.</p>';
-    return `<div class="photo-grid">${item.photos.map(p => `<button class="photo-button" data-photo="${p.id}" data-snag="${item.id}" aria-label="Enlarge ${escape(p.label.toLowerCase())} photo for ${escape(item.reference)}"><img src="${photoURL(item,p)}" alt="${escape(p.label)} evidence for ${escape(item.title)}" loading="lazy"><span>${escape(p.label)} photo · Enlarge</span></button>`).join('')}</div>`;
+    return `<div class="photo-grid">${item.photos.map(p => `<button class="photo-button" data-photo="${p.id}" data-snag="${item.id}" aria-label="Enlarge ${escape(p.label.toLowerCase())} photo for ${escape(item.reference)}"><img data-src="${photoURL(item,p)}" alt="${escape(p.label)} evidence for ${escape(item.title)}" decoding="async"><span>${escape(p.label)} photo · Enlarge</span></button>`).join('')}</div>`;
   }
   function fileState(file) {
     if (file.ready) return 'Uploaded and checked';
@@ -183,7 +212,8 @@
       ${pageError?`<p class="error" role="alert">${escape(pageError)}</p>`:''}
       ${current.items.length?current.items.map(card).join(''):'<div class="empty"><h2>No snags to show</h2><p>This link has no current snag assignments. Ask the project manager if you expected work here.</p></div>'}
       ${page>1||current.hasMore?`<nav class="pagination" aria-label="Snag pages"><button class="secondary" data-page="${page-1}" ${page===1||busy?'disabled':''}>Previous</button><span>Page ${page}</span><button class="secondary" data-page="${page+1}" ${!current.hasMore||busy?'disabled':''}>Next</button></nav>`:''}`;
-    content.querySelectorAll('.photo-button img').forEach(img => img.addEventListener('error',()=>{ const button = img.closest('button'); if(button){button.disabled=true;button.querySelector('span').textContent='Photo unavailable · check for updates';} }));
+    content.querySelectorAll('.photo-button img').forEach(img => img.addEventListener('error',()=>photoUnavailable(img)));
+    showPhotos();
     if (focused) { const el = document.getElementById(focused); if(el){el.focus({preventScroll:true}); if(typeof start === 'number' && el.setSelectionRange) el.setSelectionRange(start,end); } }
     scrollTo({top:y,behavior:'instant'});
   }
@@ -212,6 +242,7 @@
     try {
       const result = await request(root+'?page='+page,undefined,'GET');
       current = result; pageError = '';
+      for (const [url,state] of photoState) if (state === 'failed') photoState.delete(url);
       for(const item of current.items){const draft=drafts.get(item.id); if(draft&&item.submissions.some(s=>s.id===draft.intent)) forget(item.id);}
       await restore();
       render();
@@ -286,7 +317,7 @@
       Object.assign(item,{status:result.status,revision:result.revision,workflowRevision:result.workflowRevision});
       forget(id);sent=true;notice=`Your fix for ${item.reference} was sent for review. The manager will check your evidence.`;
     }catch(error){draft.error=error.message;if(error.status===409){await load();}else if(error.identifier==='pin_required'){gate(error);}}
-    finally{busy=false;if(drafts.get(id))drafts.get(id).stage='';
+    finally{busy=false;if(drafts.get(id))drafts.get(id).stage='';pumpPhotos();
       if(sent){render();document.getElementById('snag-'+id)?.focus({preventScroll:true});load();}
       else await load();}
   });
@@ -295,7 +326,7 @@
     if(button.hasAttribute('data-refresh')){await load();return;}
     if(button.dataset.choose){document.getElementById('files-'+button.dataset.choose)?.click();return;}
     if(button.dataset.page){page=Number(button.dataset.page);await load();content.focus();scrollTo({top:0,behavior:'instant'});return;}
-    if(button.dataset.photo){const item=current.items.find(i=>i.id===button.dataset.snag),photo=item.photos.find(p=>p.id===button.dataset.photo);const dialog=document.getElementById('photo-viewer'),img=dialog.querySelector('img');img.src=photoURL(item,photo);img.alt=`${photo.label} evidence for ${item.reference} · ${item.title}`;dialog.showModal();return;}
+    if(button.dataset.photo){const item=current.items.find(i=>i.id===button.dataset.snag),photo=item.photos.find(p=>p.id===button.dataset.photo);const dialog=document.getElementById('photo-viewer'),img=dialog.querySelector('img');img.src=photoBlobs.get(photoURL(item,photo))||photoURL(item,photo);img.alt=`${photo.label} evidence for ${item.reference} · ${item.title}`;dialog.showModal();return;}
     if(button.dataset.discard){if(busy||!confirm('Discard the unsent notes and photos saved for this snag?'))return;forget(button.dataset.discard);render();return;}
     const id=button.dataset.open||button.dataset.cancel||button.dataset.rebase||button.dataset.start||button.dataset.snag;
     if(!id||busy)return;const item=current.items.find(i=>i.id===id),draft=draftFor(item);
