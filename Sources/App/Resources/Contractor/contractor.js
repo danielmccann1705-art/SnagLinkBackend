@@ -186,7 +186,7 @@
   }
   function gate(error) {
     const needsPIN = error.identifier === 'pin_required';
-    content.innerHTML = `<section class="gate"><p class="eyebrow">Contractor link</p><h1>${needsPIN?'Enter your PIN':error.network?'No connection':'This link is unavailable'}</h1><p>${escape(error.message)}</p>${needsPIN?`<form class="pin-form"><label for="link-pin">PIN from your project manager</label><input id="link-pin" name="pin" type="password" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required><p class="pin-error" role="alert"></p><button class="primary">Open snag list</button></form>`:error.network?'<button class="secondary" data-refresh>Try again</button>':'<p class="help">Ask the project manager to share a new Contractor link.</p><button class="secondary" data-refresh>Try again</button>'}</section>`;
+    content.innerHTML = `<section class="gate">${notice?`<p class="notice success" role="status">${escape(notice)}</p>`:''}<p class="eyebrow">Contractor link</p><h1>${needsPIN?'Enter your PIN':error.network?'No connection':'This link is unavailable'}</h1><p>${escape(error.message)}</p>${needsPIN?`<form class="pin-form"><label for="link-pin">PIN from your project manager</label><input id="link-pin" name="pin" type="password" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required><p class="pin-error" role="alert"></p><button class="primary">Open snag list</button></form>`:error.network?'<button class="secondary" data-refresh>Try again</button>':'<p class="help">Ask the project manager to share a new Contractor link.</p><button class="secondary" data-refresh>Try again</button>'}</section>`;
     const form = content.querySelector('.pin-form');
     form?.addEventListener('submit',async event=>{event.preventDefault();const button=form.querySelector('button');button.disabled=true;try{await request(root+'/verify-pin',{pin:form.elements.pin.value});form.elements.pin.value='';await load();}catch(e){form.querySelector('.pin-error').textContent=e.message;button.disabled=false;}});
   }
@@ -231,9 +231,9 @@
     await request(`${root}/snags/${item.id}/media`,file.command);
     bytes ||= await file.file.arrayBuffer();
     status(`${label} · Uploading 0%`);
-    const result=await upload(`${root}/snags/${item.id}/media/${file.command.id}/content`,bytes,file.file.type,share=>status(share<1?`${label} · Uploading ${Math.round(share*100)}%`:`${label} · Checking photo…`));
+    const result=await upload(`${root}/snags/${item.id}/media/${file.command.id}/content`,bytes,file.file.type,share=>status(share<1?`${label} · Uploading ${Math.round(share*100)}%`:`${label} · Checking and storing photo…`));
     if(result.state!=='ready')throw new Error('This photo is not ready. Try again before submitting.');
-    file.ready=true;file.progress='';persist(item.id);render();
+    file.ready=true;file.progress='';draft.stage=`Uploading photos… ${draft.files.filter(f=>f.ready).length} of ${total} sent`;persist(item.id);render();
   }
   content.addEventListener('toggle',event=>{if(event.target.dataset.history)histories.set(event.target.dataset.history,event.target.open);},true);
   content.addEventListener('input',event=>{const id=event.target.dataset.note;if(id){drafts.get(id).note=event.target.value;persistSoon(id);}});
@@ -254,16 +254,22 @@
     if(!actionable(item)||draft.revision!==item.revision||draft.workflowRevision!==item.workflowRevision)return;
     if(!draft.files.length){draft.error='Add at least one after photo showing the completed work.';render();return;}
     if(navigator.onLine===false){offline=true;draft.error=interrupted().message;render();return;}
-    busy=true;draft.error='';notice='';draft.stage='Uploading photos…';render();
+    busy=true;draft.error='';notice='';draft.stage=`Uploading photos… ${draft.files.filter(f=>f.ready).length} of ${draft.files.length} sent`;render();
     let sent=false;
     try{for(const [index,file] of draft.files.entries())await processFile(item,draft,file,index,draft.files.length);
       if(!draft.request){draft.request={mutation:meta(),expectedRevision:draft.revision,expectedWorkflowRevision:draft.workflowRevision,attemptId:draft.intent,notes:draft.note,evidenceIds:draft.files.map(f=>f.command.id)};persist(id);}
       draft.stage='Sending your fix for review…';render();
       const result=await request(`${root}/snags/${id}/workflow/submit`,draft.request);
       if(result.status!=='awaiting_review')throw new Error('Check the latest snag status before taking further action.');
+      /* The server answers after its commit, so this is the durable acknowledgement: show it now and let the
+         list refresh follow in the background. The card takes the status and revisions from that answer only;
+         the submission history fills in from the refresh. */
+      Object.assign(item,{status:result.status,revision:result.revision,workflowRevision:result.workflowRevision});
       forget(id);sent=true;notice=`Your fix for ${item.reference} was sent for review. The manager will check your evidence.`;
     }catch(error){draft.error=error.message;if(error.status===409){await load();}else if(error.identifier==='pin_required'){gate(error);}}
-    finally{busy=false;if(drafts.get(id))drafts.get(id).stage='';await load();if(sent)document.getElementById('snag-'+id)?.focus({preventScroll:true});}
+    finally{busy=false;if(drafts.get(id))drafts.get(id).stage='';
+      if(sent){render();document.getElementById('snag-'+id)?.focus({preventScroll:true});load();}
+      else await load();}
   });
   content.addEventListener('click',async event=>{
     const button=event.target.closest('button');if(!button||button.disabled)return;
