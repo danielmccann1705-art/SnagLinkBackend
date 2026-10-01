@@ -41,11 +41,12 @@ enum ObjectWriteIntentService {
                                   allocation: PrivateObjectAllocationPolicy.Allocation? = nil, on database: Database,
                                   authorize: @escaping @Sendable (Database) async throws -> Scope,
                                   operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        let ticket = try await database.transaction { db in
+        // ServerTiming.measure is a plain call unless a staging route installed a recorder.
+        let ticket = try await ServerTiming.measure("intent") { try await database.transaction { db in
             let scope = try await authorize(db)
             return try await begin(object, source: source, scope: scope, allocation: allocation, on: db)
-        }
-        return try await execute(ticket, on: database, operation: operation)
+        } }
+        return try await ServerTiming.measure("put") { try await execute(ticket, on: database, operation: operation) }
     }
     /// Execute only after begin has committed. Exposed for existing services
     /// whose own authority transaction must declare the intent atomically.

@@ -23,10 +23,20 @@ struct ContractorGrantController: RouteCollection {
         grant.post("verify-pin", use: verifyPIN)
         let snag = grant.grouped("snags", ":snagId")
         for action in [WorkflowAction.start, .submit] {
-            snag.post("workflow", PathComponent(stringLiteral: action.rawValue)) { req async throws -> ContractorWorkflowResult in try await self.workflow(req, action: action) }
+            snag.post("workflow", PathComponent(stringLiteral: action.rawValue)) { req async throws -> Response in
+                try await ServerTiming.respond(req) { try await ServerTiming.measure(action.rawValue) { try await self.workflow(req, action: action) } }
+            }
         }
-        snag.post("media", use: allocate)
-        snag.on(.PUT, "media", ":assetId", "content", body: .collect(maxSize: "10mb"), use: upload)
+        // Staging only: ServerTiming adds phase durations to these answers; elsewhere it is a no-op.
+        snag.post("media") { req async throws -> Response in
+            try await ServerTiming.respond(req) { try await ServerTiming.measure("allocate") { try await self.allocate(req: req) } }
+        }
+        snag.on(.PUT, "media", ":assetId", "content", body: .collect(maxSize: "10mb")) { req async throws -> Response in
+            // PrivateMediaWriteService writes the original, then the rendition: one intent + one PUT each.
+            try await ServerTiming.respond(req, rename: ["intent": "intent_original", "put": "put_original", "intent_2": "intent_rendition", "put_2": "put_rendition"]) {
+                try await self.upload(req: req)
+            }
+        }
         snag.get("media", ":assetId", "content", use: download)
     }
     @Sendable func resource(req: Request) async throws -> Response {
@@ -117,7 +127,7 @@ struct ContractorGrantController: RouteCollection {
         try LinkGrantService.requireWrite(req)
         let token = try Self.token(req), snagID = try LinkGrantController.id("snagId", req), assetID = try LinkGrantController.id("assetId", req)
         guard let bytes = req.body.data else { throw Abort(.badRequest, reason: "Photo bytes are missing") }; let data = Data(buffer: bytes)
-        let upload: Upload = try await req.db.transaction { db in
+        let upload: Upload = try await ServerTiming.measure("auth") { try await req.db.transaction { db in
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
             let snag = try await LinkGrantService.item(snagID, grant: grant, project: project, write: true, on: db)
             let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: project.requireID(), on: db)
@@ -127,9 +137,9 @@ struct ContractorGrantController: RouteCollection {
             guard data.count == media.byteCount, PrivateImageProcessor.digest(data) == media.originalSHA256, req.headers.contentType?.description == media.mimeType else { throw Abort(.unprocessableEntity, reason: "This photo differs from the original upload. Choose it again", identifier: "media_mismatch") }
             return try .init(media: media, workspaceID: row.decode(column: "workspace_id", as: UUID.self),
                              projectID: project.requireID(), originalKey: row.decode(column: "original_key", as: String?.self))
-        }
+        } }
         if upload.media.state == "ready" { return .init(upload.media) }
-        let processed = try await req.application.threadPool.runIfActive(eventLoop: req.eventLoop) { try PrivateImageProcessor.process(data, mime: upload.media.mimeType) }.get()
+        let processed = try await ServerTiming.measure("process") { try await req.application.threadPool.runIfActive(eventLoop: req.eventLoop) { try PrivateImageProcessor.process(data, mime: upload.media.mimeType) }.get() }
         let authorizeWrite: @Sendable (Database) async throws -> ObjectWriteIntentService.Scope = { db in
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
             let snag = try await LinkGrantService.item(snagID, grant: grant, project: project, write: true, on: db)
@@ -142,7 +152,7 @@ struct ContractorGrantController: RouteCollection {
             assetID: assetID, workspaceID: upload.workspaceID, projectID: upload.projectID,
             boundOriginalKey: upload.originalKey, original: data, mimeType: upload.media.mimeType,
             rendition: processed.jpeg, app: req.application, on: req.db, logger: req.logger, authorize: authorizeWrite)
-        return try await req.db.transaction { db in
+        return try await ServerTiming.measure("ready") { try await req.db.transaction { db in
             // Recheck grant, PIN, assignment and uploader AFTER processing/storage.
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
             let snag = try await LinkGrantService.item(snagID, grant: grant, project: project, write: true, on: db)
@@ -169,7 +179,7 @@ struct ContractorGrantController: RouteCollection {
             try PrivateMediaService.submittable(snag)
             try await VerifiedIdentityService.sql(db).raw("UPDATE media_assets SET state = 'ready', revision = revision + 1, ready_at = \(bind: Date()), rendition_key = \(bind: written.renditionKey), rendition_sha256 = \(bind: written.renditionSHA256), rendition_size = \(bind: processed.jpeg.count), width = \(bind: processed.width), height = \(bind: processed.height) WHERE id = \(bind: assetID)").run()
             return try await .init(MediaAssetResponse(PrivateMediaService.row(assetID, snagID: snagID, projectID: project.requireID(), on: db)))
-        }
+        } }
     }
     @Sendable func download(req: Request) async throws -> Response {
         let token = try Self.token(req), snagID = try LinkGrantController.id("snagId", req), assetID = try LinkGrantController.id("assetId", req)

@@ -151,6 +151,44 @@ final class ContractorGrantTests: XCTestCase {
         let put = try await call(.PUT, path + "/\(media.id)/content", nil, bytes: Self.png, cookie: cookie)
         XCTAssertEqual(put.status, .ok, put.body.string); return media.id
     }
+    /// Lane A P0: phase timing is staging-only (RUNTIME_DIAGNOSTICS=enabled) and carries fixed
+    /// phase names with durations only — no token, id, key or image fact can appear in it.
+    func testServerTimingIsStagingOnlyAndCarriesOnlyPhaseDurations() async throws {
+        unsetenv(RuntimeDiagnostics.variable)
+        func run() async throws -> [String?] {
+            let (_, _, snag, _, token, _) = try await fixture()
+            let path = "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media", intent = UUID()
+            let allocate = try await call(.POST, path, nil, body: command(snag, purpose: "completion", intent: intent))
+            XCTAssertEqual(allocate.status, .ok, allocate.body.string)
+            let media = try allocate.content.decode(ContractorGrantController.PhotoResult.self)
+            let put = try await call(.PUT, path + "/\(media.id)/content", nil, bytes: Self.png)
+            XCTAssertEqual(put.status, .ok, put.body.string)
+            let submit = try await call(.POST, "api/v2/contractor/\(token)/snags/\(snag.snag.id)/workflow/submit", nil, body: action(snag, extra: ["attemptId": intent.uuidString, "evidenceIds": [media.id.uuidString]]))
+            XCTAssertEqual(submit.status, .ok, submit.body.string)
+            for value in [allocate, put, submit].compactMap({ $0.headers.first(name: "Server-Timing") }) {
+                XCTAssertFalse(value.contains(token)); XCTAssertFalse(value.lowercased().contains(media.id.uuidString.lowercased()))
+                XCTAssertFalse(value.lowercased().contains(snag.snag.id.uuidString.lowercased()))
+            }
+            return [allocate, put, submit].map { $0.headers.first(name: "Server-Timing") }
+        }
+        let off = try await run()
+        XCTAssertEqual(off.compactMap { $0 }, [], "no Server-Timing unless RUNTIME_DIAGNOSTICS is enabled")
+        setenv(RuntimeDiagnostics.variable, "enabled", 1); defer { unsetenv(RuntimeDiagnostics.variable) }
+        let on = try await run()
+        let shape = try NSRegularExpression(pattern: "^[a-z_]+(;dur=[0-9]+\\.[0-9])?(, [a-z_]+(;dur=[0-9]+\\.[0-9])?)*$")
+        let allowed: Set<String> = ["allocate", "submit", "auth", "process", "intent_original", "put_original", "intent_rendition", "put_rendition", "ready", "total", "cold"]
+        for value in on {
+            let value = try XCTUnwrap(value)
+            XCTAssertNotNil(shape.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)), value)
+            let names = Set(value.components(separatedBy: ", ").map { String($0.split(separator: ";")[0]) })
+            XCTAssertTrue(names.isSubset(of: allowed), value); XCTAssertTrue(names.contains("total"), value)
+        }
+        XCTAssertTrue(on[0]!.hasPrefix("allocate;dur="), on[0]!)
+        for phase in ["auth", "process", "intent_original", "put_original", "intent_rendition", "put_rendition", "ready"] {
+            XCTAssertTrue(on[1]!.contains(phase + ";dur="), "\(phase) missing from \(on[1]!)")
+        }
+        XCTAssertTrue(on[2]!.hasPrefix("submit;dur="), on[2]!)
+    }
     func testPINProtectsReadWorkflowAllocateUploadAndDownloadAndLocksGuesses() async throws {
         let (_, project, snag, activation, token, photo) = try await fixture(pin: "618294", photo: true)
         let root = "api/v2/contractor/\(token)", media = root + "/snags/\(snag.snag.id)/media"
