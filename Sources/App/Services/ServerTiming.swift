@@ -1,4 +1,5 @@
 import Vapor
+import Fluent
 import Foundation
 
 /// Staging-only phase timing for the Contractor link upload routes (Lane A, P0, 1 Oct 2026).
@@ -15,6 +16,9 @@ final class ServerTiming: @unchecked Sendable {
 
     private let lock = NSLock()
     private var phases: [(name: String, ms: Double)] = []
+    /// SQL statements this request issued (WP2 profiling): a count, nothing about any statement.
+    private var statements = 0
+    func countStatement() { lock.lock(); statements += 1; lock.unlock() }
 
     static var enabled: Bool { Environment.get(RuntimeDiagnostics.variable) == "enabled" }
 
@@ -36,12 +40,20 @@ final class ServerTiming: @unchecked Sendable {
         return try await body()
     }
 
+    /// Staging only: `db` with every statement issued through it counted into this request's recorder (WP2
+    /// profiling: `sql;desc="N"`, the statements of the transaction body, BEGIN/COMMIT not included); `db` itself when
+    /// no recorder is installed, which is always the case in production.
+    static func counting(_ db: any Database, _ req: Request) -> any Database {
+        guard let recorder = current ?? req.storage[RecorderKey.self] else { return db }
+        return StatementCountingDatabase.wrap(db) { _ in recorder.countStatement() }
+    }
+
     func add(_ name: String, _ ms: Double) { lock.lock(); phases.append((name, ms)); lock.unlock() }
 
     /// Phase list in order. A name seen again is numbered (`intent`, `intent_2`) unless
     /// `rename` gives it a fixed name.
     func header(rename: [String: String], total: Double, cold: Bool) -> String {
-        lock.lock(); let recorded = phases; lock.unlock()
+        lock.lock(); let recorded = phases, statements = self.statements; lock.unlock()
         var seen: [String: Int] = [:]
         var parts: [String] = []
         for phase in recorded {
@@ -50,6 +62,7 @@ final class ServerTiming: @unchecked Sendable {
             parts.append("\(rename[numbered] ?? numbered);dur=\(String(format: "%.1f", phase.ms))")
         }
         parts.append("total;dur=\(String(format: "%.1f", total))")
+        if statements > 0 { parts.append("sql;desc=\"\(statements)\"") }
         if cold { parts.append("cold") }
         return parts.joined(separator: ", ")
     }
@@ -70,3 +83,4 @@ final class ServerTiming: @unchecked Sendable {
         return response
     }
 }
+

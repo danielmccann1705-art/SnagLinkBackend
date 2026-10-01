@@ -353,8 +353,9 @@ final class ContractorGrantTests: XCTestCase {
         XCTAssertEqual(off.compactMap { $0 }, [], "no Server-Timing unless RUNTIME_DIAGNOSTICS is enabled")
         setenv(RuntimeDiagnostics.variable, "enabled", 1); defer { unsetenv(RuntimeDiagnostics.variable) }
         let on = try await run()
-        let shape = try NSRegularExpression(pattern: "^[a-z_]+(;dur=[0-9]+\\.[0-9])?(, [a-z_]+(;dur=[0-9]+\\.[0-9])?)*$")
-        let allowed: Set<String> = ["allocate", "submit", "auth", "queue", "process", "lock", "lock_auth", "lock_intent_original", "lock_intent_rendition", "lock_ready", "intent_original", "put_original", "intent_rendition", "put_rendition", "ready", "total", "cold"]
+        // WP2 profiling adds the request's SQL statement count as `sql;desc="N"` — a number, nothing else.
+        let shape = try NSRegularExpression(pattern: "^[a-z_]+(;dur=[0-9]+\\.[0-9])?(;desc=\"[0-9]+\")?(, [a-z_]+(;dur=[0-9]+\\.[0-9])?(;desc=\"[0-9]+\")?)*$")
+        let allowed: Set<String> = ["allocate", "submit", "auth", "queue", "process", "lock", "lock_auth", "lock_intent_original", "lock_intent_rendition", "lock_ready", "intent_original", "put_original", "intent_rendition", "put_rendition", "ready", "item", "replay", "execute", "record", "sql", "total", "cold"]
         for value in on {
             let value = try XCTUnwrap(value)
             XCTAssertNotNil(shape.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)), value)
@@ -366,6 +367,8 @@ final class ContractorGrantTests: XCTestCase {
             XCTAssertTrue(on[1]!.contains(phase + ";dur="), "\(phase) missing from \(on[1]!)")
         }
         XCTAssertTrue(on[2]!.contains("submit;dur="), on[2]!); XCTAssertTrue(on[2]!.contains("lock;dur="), on[2]!)
+        for phase in ["item", "replay", "execute", "record"] { XCTAssertTrue(on[2]!.contains(phase + ";dur="), "\(phase) missing from \(on[2]!)") }
+        XCTAssertTrue(on[2]!.contains("sql;desc=\""), "statement count missing from \(on[2]!)")
     }
     func testPINProtectsReadWorkflowAllocateUploadAndDownloadAndLocksGuesses() async throws {
         let (_, project, snag, activation, token, photo) = try await fixture(pin: "618294", photo: true)

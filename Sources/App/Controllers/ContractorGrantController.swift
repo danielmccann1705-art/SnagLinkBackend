@@ -98,13 +98,17 @@ struct ContractorGrantController: RouteCollection {
         try LinkGrantService.requireWrite(req)
         let token = try Self.token(req), snagID = try LinkGrantController.id("snagId", req), body = try req.content.decode(WorkflowCommand.self)
         let hash = try PlatformMutationService.requestHash(body, route: "contractor:\(snagID):\(action.rawValue)")
-        return try await req.db.transaction { db in
+        // Staging-only sub-phases and statement count (WP2 profiling): `item`, `replay`, `execute`, `record`, `sql`;
+        // `load` reports its own `lock`. Without RUNTIME_DIAGNOSTICS `counting` returns the handle unchanged.
+        return try await req.db.transaction { transaction in
+            let db = ServerTiming.counting(transaction, req)
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
-            let snag = try await LinkGrantService.item(snagID, grant: grant, project: project, write: true, on: db), id = try grant.decode(column: "id", as: UUID.self)
-            if let old = try await LinkGrantService.replay(ContractorWorkflowResult.self, grantID: id, mutation: body.mutation, hash: hash, on: db) { return old }
-            let response = try await CanonicalWorkflowService.execute(body, action: action, snag: snag, project: project, actorID: nil, grantID: id, actions: [.submitCompletion], on: db)
+            let snag = try await ServerTiming.measure(req, "item") { try await LinkGrantService.item(snagID, grant: grant, project: project, write: true, on: db) }
+            let id = try grant.decode(column: "id", as: UUID.self)
+            if let old = try await ServerTiming.measure(req, "replay", { try await LinkGrantService.replay(ContractorWorkflowResult.self, grantID: id, mutation: body.mutation, hash: hash, on: db) }) { return old }
+            let response = try await ServerTiming.measure(req, "execute") { try await CanonicalWorkflowService.execute(body, action: action, snag: snag, project: project, actorID: nil, grantID: id, actions: [.submitCompletion], on: db) }
             let result = ContractorWorkflowResult(response)
-            try await LinkGrantService.record(result, grantID: id, mutation: body.mutation, hash: hash, on: db)
+            try await ServerTiming.measure(req, "record") { try await LinkGrantService.record(result, grantID: id, mutation: body.mutation, hash: hash, on: db) }
             return result
         }
     }
