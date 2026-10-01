@@ -33,7 +33,7 @@ struct ContractorGrantController: RouteCollection {
         }
         snag.on(.PUT, "media", ":assetId", "content", body: .collect(maxSize: "10mb")) { req async throws -> Response in
             // PrivateMediaWriteService writes the original, then the rendition: one intent + one PUT each.
-            try await ServerTiming.respond(req, rename: ["intent": "intent_original", "put": "put_original", "intent_2": "intent_rendition", "put_2": "put_rendition"]) {
+            try await ServerTiming.respond(req, rename: ["intent": "intent_original", "put": "put_original", "intent_2": "intent_rendition", "put_2": "put_rendition", "lock": "lock_auth", "lock_2": "lock_intent_original", "lock_3": "lock_intent_rendition", "lock_4": "lock_ready"]) {
                 try await self.upload(req: req)
             }
         }

@@ -99,11 +99,12 @@ enum LinkGrantService {
     static func load(_ token: String, req: Request, verifySession: Bool = true, on db: Database) async throws -> (SQLRow, Project) {
         guard token.hasPrefix("c2_"), token.count <= 100 else { throw Abort(.notFound, reason: "Contractor link unavailable") }
         let sql = try VerifiedIdentityService.sql(db)
-        guard let found = try await sql.raw("""
+        // "lock" (staging-only Server-Timing): this statement, i.e. mostly the wait for the workspace lock.
+        guard let found = try await ServerTiming.measure("lock", { try await sql.raw("""
             SELECT g.id, g.project_id, g.workspace_id, pg_advisory_xact_lock(hashtextextended('workspace:' || upper(g.workspace_id::text), 0)) IS NULL AS locked
             FROM link_grants g, (SELECT set_config('lock_timeout', \(bind: WorkspaceAccessService.commandLockTimeout), true) AS applied) AS bound
             WHERE g.token_hash = \(bind: SHA256Hasher.hash(token: token)) AND bound.applied IS NOT NULL
-            """).first() else { throw Abort(.notFound, reason: "Contractor link unavailable") }
+            """).first() }) else { throw Abort(.notFound, reason: "Contractor link unavailable") }
         let grantID = try found.decode(column: "id", as: UUID.self), workspaceID = try found.decode(column: "workspace_id", as: UUID.self)
         let row = try await self.row(grantID, projectID: found.decode(column: "project_id", as: UUID.self), on: db)
         guard try row.decode(column: "state", as: String.self) == "active", try row.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "This Contractor link expired or was revoked. Ask the project manager for a new link") }
