@@ -56,6 +56,50 @@ struct PlatformMutationService {
             VALUES (\(bind: workspaceID), \(bind: sequence), \(bind: projectID), \(bind: type), \(bind: entityID), \(bind: revision), \(bind: kind), \(bind: fields.sorted()), \(bind: encode(payload)), \(bind: actorID), \(bind: grantID), \(bind: Date()), \(bind: groupID))
             """).run()
     }
+    /// One `platform_changes` row, built in memory and written later by `changes` (Lane A WP2, Fable §3.2 rule 4).
+    /// The payload is encoded when the row is built, from the value as it is at that moment, exactly as `change`
+    /// encodes it when it writes.
+    struct PendingChange: Sendable {
+        let projectID: UUID?, type: String, entityID: UUID, revision: Int64, kind: String, fields: [String]
+        let payloadJSON: String, actorID: UUID?, grantID: UUID?
+        init<T: Encodable>(projectID: UUID?, type: String, entityID: UUID, revision: Int64, kind: String, fields: [String],
+                           payload: T, actorID: UUID?, grantID: UUID? = nil) throws {
+            self.projectID = projectID; self.type = type; self.entityID = entityID; self.revision = revision; self.kind = kind
+            self.fields = fields; self.payloadJSON = try PlatformMutationService.encode(payload); self.actorID = actorID; self.grantID = grantID
+        }
+    }
+
+    /// The change rows one command collects, in the order the per-row path would have written them.
+    final class Batch: @unchecked Sendable {
+        private(set) var items: [PendingChange] = []
+        func append(_ change: PendingChange) { items.append(change) }
+    }
+
+    /// `change` for several rows in one pass (Lane A WP2, Fable §3.2 rule 4). Same workspace lock (re-entrant, taken
+    /// once), the same transaction-local change group read once, one bound check that is exactly the per-row one
+    /// summed — each row of `change` requires `groupCount < 1000` before it, so n rows succeed iff
+    /// `groupCount + n <= 1000` — one `UPDATE teams … + n RETURNING`, and one multi-row INSERT with sequences
+    /// `s−n+1 … s` in the order given. Under the exclusive workspace lock no other writer can take a sequence in
+    /// between, so contiguous numbering is what the per-row path produces. Every row gets its own `Date()` as before.
+    static func changes(_ pending: [PendingChange], workspaceID: UUID, on db: Database) async throws {
+        guard !pending.isEmpty else { return }
+        try await WorkspaceAccessService.lock(workspaceID, on: db)
+        let sql = try VerifiedIdentityService.sql(db)
+        let setting = try await sql.raw("SELECT current_setting('snaglist.change_group', true) AS value").first()!.decode(column: "value", as: String?.self)
+        let groupID = setting.flatMap(UUID.init(uuidString:)) ?? UUID()
+        if setting != groupID.uuidString {
+            _ = try await sql.raw("SELECT set_config('snaglist.change_group', \(bind: groupID.uuidString), true)").first()
+        }
+        let groupCount = try await sql.raw("SELECT count(*) AS n FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND transaction_group = \(bind: groupID)").first()!.decode(column: "n", as: Int.self)
+        guard groupCount + pending.count <= 1000 else { throw Abort(.payloadTooLarge, reason: "Split this operation into smaller batches. No changes were committed", identifier: "change_group_too_large") }
+        guard let row = try await sql.raw("UPDATE teams SET change_sequence = change_sequence + \(bind: Int64(pending.count)) WHERE id = \(bind: workspaceID) RETURNING change_sequence").first() else { throw Abort(.notFound) }
+        let first = try row.decode(column: "change_sequence", as: Int64.self) - Int64(pending.count) + 1
+        let values = pending.enumerated().map { (offset, change) -> SQLQueryString in
+            "(\(bind: workspaceID), \(bind: first + Int64(offset)), \(bind: change.projectID), \(bind: change.type), \(bind: change.entityID), \(bind: change.revision), \(bind: change.kind), \(bind: change.fields.sorted()), \(bind: change.payloadJSON), \(bind: change.actorID), \(bind: change.grantID), \(bind: Date()), \(bind: groupID))"
+        }
+        try await sql.raw(SQLQueryString("INSERT INTO platform_changes (workspace_id, sequence, project_id, entity_type, entity_id, revision, kind, changed_fields, payload_json, actor_id, actor_grant_id, created_at, transaction_group) VALUES ")
+                          + values.joined(separator: ", ")).run()
+    }
     static func checkRevision(_ expected: Int64, snag: Snag, workspaceID: UUID, on db: Database) async throws {
         guard expected > 0 else { throw Abort(.badRequest, reason: "A positive base revision is required") }
         guard expected != snag.revision else { return }

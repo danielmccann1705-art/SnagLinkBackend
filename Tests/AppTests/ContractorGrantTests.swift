@@ -370,6 +370,246 @@ final class ContractorGrantTests: XCTestCase {
         for phase in ["item", "replay", "execute", "record"] { XCTAssertTrue(on[2]!.contains(phase + ";dur="), "\(phase) missing from \(on[2]!)") }
         XCTAssertTrue(on[2]!.contains("sql;desc=\""), "statement count missing from \(on[2]!)")
     }
+    // MARK: - Lane A WP2: the batched submission against the per-row reference (Fable §3.3)
+
+    /// One workflow command, run as the Contractor-link route runs it (exclusive workspace lock first) through either
+    /// the batched path or the per-row reference, in a transaction of its own. Everything the command wrote is read
+    /// back inside that transaction — timestamps and freshly drawn decision ids masked — and the transaction is then
+    /// rolled back, so the next run starts from exactly the same state. The statements are counted through a
+    /// `StatementCountingDatabase` over the transaction; only the first words of each are kept, never a bound value.
+    private struct WorkflowRun: Equatable {
+        var outcome: String; var changes: [String] = []; var groups = 0; var evidence: [String] = []; var media: [String] = []
+        var attempts: [String] = []; var outbox: [String] = []; var activity: [String] = []; var snag = ""
+    }
+    private struct CapturedRun: Error { let run: WorkflowRun; let statements: [String] }
+    private final class StatementSink: @unchecked Sendable {
+        private let lock = NSLock(); private var lines: [String] = []
+        func add(_ sql: String) { lock.lock(); lines.append(sql.split(whereSeparator: \.isWhitespace).prefix(4).joined(separator: " ")); lock.unlock() }
+        func reset() { lock.lock(); lines = []; lock.unlock() }
+        var all: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+    }
+    private static func masked(_ text: String, decisions: [UUID]) -> String {
+        var value = text.replacingOccurrences(of: #"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}(:\d{2})?)?"#, with: "<time>", options: .regularExpression)
+        for (index, id) in decisions.enumerated() {
+            value = value.replacingOccurrences(of: id.uuidString, with: "<decision-\(index)>").replacingOccurrences(of: id.uuidString.lowercased(), with: "<decision-\(index)>")
+        }
+        return value
+    }
+    private static func describe(_ error: any Error) -> String {
+        if let abort = error as? any AbortError { return "refused \(abort.status.code) \(abort.reason) \((abort as? any DebuggableError)?.identifier ?? "")" }
+        return "error \(String(reflecting: type(of: error)))"
+    }
+    private func capture(reference: Bool, action: WorkflowAction, snagID: UUID, projectID: UUID, actorID: UUID?, grantID: UUID?,
+                         actions: Set<ProjectAccessPolicy.Action>, prepare: (@Sendable (Database) async throws -> Void)? = nil,
+                         command: @escaping @Sendable (Snag) -> WorkflowCommand) async throws -> (WorkflowRun, [String]) {
+        let sink = StatementSink()
+        do {
+            try await app.db.transaction { tx in
+                let sql = try VerifiedIdentityService.sql(tx)
+                guard let project = try await Project.find(projectID, on: tx), let snag = try await Snag.find(snagID, on: tx) else { throw Abort(.notFound) }
+                let workspaceID = project.workspaceId!
+                try await WorkspaceAccessService.lock(workspaceID, on: tx)
+                if let prepare { try await prepare(tx) }
+                let before = try await sql.raw("SELECT change_sequence FROM teams WHERE id = \(bind: workspaceID)").first()!.decode(column: "change_sequence", as: Int64.self)
+                let body = command(snag)
+                let counted = StatementCountingDatabase.wrap(tx) { sink.add($0) }
+                var run: WorkflowRun
+                do {
+                    let response = reference
+                        ? try await PerRowWorkflowReference.execute(body, action: action, snag: snag, project: project, actorID: actorID, grantID: grantID, actions: actions, on: counted)
+                        : try await CanonicalWorkflowService.execute(body, action: action, snag: snag, project: project, actorID: actorID, grantID: grantID, actions: actions, on: counted)
+                    run = .init(outcome: try PlatformMutationService.encode(response))
+                } catch {
+                    throw CapturedRun(run: .init(outcome: Self.describe(error)), statements: sink.all)
+                }
+                let statements = sink.all
+                func lines(_ query: SQLQueryString) async throws -> [String] {
+                    try await sql.raw(SQLQueryString("SELECT row_to_json(t)::text AS line FROM (") + query + SQLQueryString(") t")).all().map { try $0.decode(column: "line", as: String.self) }
+                }
+                let decisions = try await sql.raw("SELECT id FROM review_decisions WHERE snag_id = \(bind: snagID) ORDER BY kind").all().map { try $0.decode(column: "id", as: UUID.self) }
+                run.changes = try await lines("SELECT sequence, project_id, entity_type, entity_id, revision, kind, changed_fields, payload_json, actor_id, actor_grant_id FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND sequence > \(bind: before) ORDER BY sequence")
+                run.groups = try await sql.raw("SELECT count(DISTINCT transaction_group) AS n FROM platform_changes WHERE workspace_id = \(bind: workspaceID) AND sequence > \(bind: before)").first()!.decode(column: "n", as: Int.self)
+                run.evidence = try await lines("SELECT attempt_id, asset_id, snag_id, project_id, position FROM completion_evidence WHERE snag_id = \(bind: snagID) ORDER BY attempt_id, position")
+                run.media = try await lines("SELECT id, state, revision, attached_at IS NOT NULL AS attached FROM media_assets WHERE snag_id = \(bind: snagID) ORDER BY id")
+                run.attempts = try await lines("SELECT id, attempt_number, actor_id, actor_grant_id, actor_kind, notes, state, revision FROM completion_attempts WHERE snag_id = \(bind: snagID) ORDER BY attempt_number")
+                run.outbox = try await lines("SELECT workspace_id, project_id, snag_id, actor_id, actor_grant_id, event_kind, payload_json, dedupe_key FROM workflow_outbox WHERE snag_id = \(bind: snagID) ORDER BY dedupe_key")
+                run.activity = try await lines("SELECT workspace_id, actor_user_id, actor_grant_id, action, target_id, detail FROM workspace_activity WHERE workspace_id = \(bind: workspaceID) AND target_id = \(bind: snagID) ORDER BY created_at, action")
+                run.snag = try await lines("SELECT status, revision, workflow_revision, closed_at IS NOT NULL AS closed, workflow_qualification FROM snags WHERE id = \(bind: snagID)").joined()
+                run.outcome = Self.masked(run.outcome, decisions: decisions); run.changes = run.changes.map { Self.masked($0, decisions: decisions) }
+                run.outbox = run.outbox.map { Self.masked($0, decisions: decisions) }
+                throw CapturedRun(run: run, statements: statements)
+            }
+            XCTFail("a captured run always rolls back"); throw Abort(.internalServerError)
+        } catch let captured as CapturedRun { return (captured.run, captured.statements) }
+    }
+    private func entityTypes(_ run: WorkflowRun) -> [String] {
+        run.changes.compactMap { line in (try? JSONSerialization.jsonObject(with: Data(line.utf8))).flatMap { ($0 as? [String: Any])?["entity_type"] as? String } }
+    }
+    private func profile(_ label: String, _ statements: [String]) -> String {
+        var counts: [(String, Int)] = []
+        for statement in statements { if let index = counts.firstIndex(where: { $0.0 == statement }) { counts[index].1 += 1 } else { counts.append((statement, 1)) } }
+        return "WP2-PROFILE \(label) statements=\(statements.count): " + counts.map { "\($0.0) x\($0.1)" }.joined(separator: " | ")
+    }
+    private func contractorAllocated(_ token: String, _ snag: PlatformSnagResponse, intent: UUID) async throws -> UUID {
+        let result = try await call(.POST, "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media", nil, body: command(snag, purpose: "completion", intent: intent))
+        XCTAssertEqual(result.status, .ok, result.body.string)
+        return try result.content.decode(ContractorGrantController.PhotoResult.self).id
+    }
+    private func submission(_ operation: MutationMetadata, attempt: UUID, evidence: [UUID], notes: String? = "Resealed and tested on site",
+                            reason: String? = nil, waiver: String? = nil) -> @Sendable (Snag) -> WorkflowCommand {
+        { snag in .init(mutation: operation, expectedRevision: snag.revision, expectedWorkflowRevision: snag.workflowRevision, attemptId: attempt,
+                        expectedAttemptRevision: nil, notes: notes, reason: reason, evidenceIds: evidence, waiverReason: waiver) }
+    }
+
+    /// Lane A WP2 golden test (Fable §3.3): for 1, 3, 5 and 20 Contractor-link photos, and for the internal submit,
+    /// internal fix and waiver paths, the batched path writes exactly what the per-row reference writes — the same
+    /// response, the same `platform_changes` rows at the same sequences in one change group (media in evidence order,
+    /// then decisions, the snag and the completionAttempt), the same evidence positions, media revisions, attempt,
+    /// snag, activity and outbox rows. The batched statement count does not grow with the number of photos.
+    func testBatchedSubmissionWritesExactlyWhatThePerRowReferenceWrites() async throws {
+        var batchedCounts: [Int: Int] = [:]
+        for count in [1, 3, 5, 20] {
+            let (_, project, snag, activation, token, _) = try await fixture()
+            let attempt = UUID(), operation = MutationMetadata(operationId: UUID(), deviceId: UUID())
+            var ids: [UUID] = []
+            for _ in 0..<count { ids.append(try await contractorAfter(token, snag, intent: attempt)) }
+            let make = submission(operation, attempt: attempt, evidence: ids)
+            let (reference, perRow) = try await capture(reference: true, action: .submit, snagID: snag.snag.id, projectID: project.project.id, actorID: nil, grantID: activation.grant.id, actions: [.submitCompletion], command: make)
+            let (batched, batchedSQL) = try await capture(reference: false, action: .submit, snagID: snag.snag.id, projectID: project.project.id, actorID: nil, grantID: activation.grant.id, actions: [.submitCompletion], command: make)
+            XCTAssertFalse(reference.outcome.hasPrefix("refused"), reference.outcome)
+            XCTAssertEqual(batched, reference, "\(count) Contractor-link photos")
+            XCTAssertEqual(entityTypes(batched), Array(repeating: "media", count: count) + ["snag", "completionAttempt"])
+            XCTAssertEqual(batched.groups, 1); XCTAssertEqual(batched.evidence.count, count); XCTAssertEqual(batched.outbox.count, 1)
+            batchedCounts[count] = batchedSQL.count
+            print("WP2-PROFILE contractor submit photos=\(count) per-row=\(perRow.count) batched=\(batchedSQL.count)")
+            if count == 3 { print(profile("per-row 3 photos", perRow)); print(profile("batched 3 photos", batchedSQL)) }
+            XCTAssertLessThan(batchedSQL.count, perRow.count)
+        }
+        XCTAssertEqual(Set(batchedCounts.values).count, 1, "flat in the number of photos: \(batchedCounts)")
+        XCTAssertLessThanOrEqual(batchedCounts[3] ?? 99, 20, "execute's own statements for three photos: \(batchedCounts)")
+
+        // The internal paths share createAttempt and the change batch: submit, internal fix (a decision between the
+        // media rows and the snag), and a reasoned waiver (no evidence; the decision comes first).
+        for path in ["submit", "internal-fix", "waiver"] {
+            let (owner, project, snag, _, _, _) = try await fixture()
+            let attempt = UUID(), operation = MutationMetadata(operationId: UUID(), deviceId: UUID())
+            var ids: [UUID] = []
+            if path != "waiver" { for _ in 0..<3 { ids.append(try await after(owner, project: project, snag: snag, intent: attempt)) } }
+            let action: WorkflowAction = path == "internal-fix" ? .internalFix : .submit
+            let make = submission(operation, attempt: attempt, evidence: ids, reason: path == "internal-fix" ? "Fixed by our own team" : nil,
+                                  waiver: path == "waiver" ? "The area was boarded over before a photo could be taken" : nil)
+            let actor = try owner.requireID()
+            let (reference, _) = try await capture(reference: true, action: action, snagID: snag.snag.id, projectID: project.project.id, actorID: actor, grantID: nil, actions: [.submitCompletion, .review], command: make)
+            let (batched, _) = try await capture(reference: false, action: action, snagID: snag.snag.id, projectID: project.project.id, actorID: actor, grantID: nil, actions: [.submitCompletion, .review], command: make)
+            XCTAssertFalse(reference.outcome.hasPrefix("refused"), path + ": " + reference.outcome)
+            XCTAssertEqual(batched, reference, path)
+            let expected: [String] = path == "submit" ? ["media", "media", "media", "snag", "completionAttempt"]
+                : path == "internal-fix" ? ["media", "media", "media", "reviewDecision", "snag", "completionAttempt"]
+                : ["reviewDecision", "snag", "completionAttempt"]
+            XCTAssertEqual(entityTypes(batched), expected, path); XCTAssertEqual(batched.groups, 1, path)
+        }
+    }
+
+    /// Lane A WP2 (Fable §3.3 refusal order): one read of every evidence row, then the per-photo checks in the order of
+    /// `evidenceIds`, refuse exactly as the per-row reads did — the first failing photo decides, with its own answer.
+    func testBatchedEvidenceChecksRefuseInTheSameOrderAsThePerRowReference() async throws {
+        let (owner, project, snag, activation, token, _) = try await fixture()
+        let attempt = UUID(), grant = activation.grant.id
+        let ready = [try await contractorAfter(token, snag, intent: attempt), try await contractorAfter(token, snag, intent: attempt)]
+        let notReady = try await contractorAllocated(token, snag, intent: attempt)
+        let otherIntent = try await contractorAfter(token, snag, intent: UUID())
+        let ownersPhoto = try await after(owner, project: project, snag: snag, intent: attempt)
+        let missing = UUID()
+        func update(_ id: UUID, _ assignment: String) -> @Sendable (Database) async throws -> Void {
+            { db in try await VerifiedIdentityService.sql(db).raw("UPDATE media_assets SET \(unsafeRaw: assignment) WHERE id = \(bind: id)").run() }
+        }
+        let cases: [(String, [UUID], (@Sendable (Database) async throws -> Void)?, String)] = [
+            ("a missing photo before one that is not ready", [ready[0], missing, notReady], nil, "refused 404 Photo unavailable"),
+            ("another uploader's photo before a missing one", [ownersPhoto, ready[0], missing], nil, "refused 404 Upload unavailable"),
+            ("a photo that is not ready", [ready[0], notReady, missing], nil, "refused 422 Use processed after photos"),
+            ("a photo for another completion intention", [ready[0], otherIntent], nil, "refused 422 Use processed after photos"),
+            ("a photo already attached", [ready[0], ready[1]], update(ready[1], "attached_at = now()"), "refused 422 Use processed after photos"),
+            ("an expired unattached photo", [ready[0], ready[1]], update(ready[1], "expires_at = now() - interval '1 minute'"), "refused 410 This unattached upload expired"),
+            ("a duplicate photo", [ready[0], ready[0]], nil, "refused 400 Choose up to 20 distinct after photos"),
+        ]
+        for (label, ids, prepare, expected) in cases {
+            let make = submission(MutationMetadata(operationId: UUID(), deviceId: UUID()), attempt: attempt, evidence: ids)
+            let (reference, _) = try await capture(reference: true, action: .submit, snagID: snag.snag.id, projectID: project.project.id, actorID: nil, grantID: grant, actions: [.submitCompletion], prepare: prepare, command: make)
+            let (batched, _) = try await capture(reference: false, action: .submit, snagID: snag.snag.id, projectID: project.project.id, actorID: nil, grantID: grant, actions: [.submitCompletion], prepare: prepare, command: make)
+            XCTAssertEqual(batched.outcome, reference.outcome, label)
+            XCTAssertTrue(batched.outcome.hasPrefix(expected), label + ": " + batched.outcome)
+        }
+    }
+
+    /// Lane A WP2 (Fable §3.3 change-group bound): each per-row change requires fewer than 1,000 rows in the command's
+    /// change group before it, so 20 photos (22 rows) fit after 978 existing rows and not after 979 — on both paths,
+    /// with the same 413 and nothing kept.
+    func testTheChangeGroupBoundIsExactlyThePerRowOne() async throws {
+        let (_, project, snag, activation, token, _) = try await fixture()
+        let attempt = UUID(), operation = MutationMetadata(operationId: UUID(), deviceId: UUID())
+        var ids: [UUID] = []
+        for _ in 0..<20 { ids.append(try await contractorAfter(token, snag, intent: attempt)) }
+        let workspaceID = project.workspaceId, projectID = project.project.id, snagID = snag.snag.id, grantID = activation.grant.id
+        for (existing, fits) in [(978, true), (979, false)] {
+            let prepare: @Sendable (Database) async throws -> Void = { db in
+                let sql = try VerifiedIdentityService.sql(db), group = UUID()
+                _ = try await sql.raw("SELECT set_config('snaglist.change_group', \(bind: group.uuidString), true)").first()
+                try await sql.raw("""
+                    INSERT INTO platform_changes (workspace_id, sequence, project_id, entity_type, entity_id, revision, kind, changed_fields, payload_json, actor_id, actor_grant_id, created_at, transaction_group)
+                    SELECT \(bind: workspaceID), 1000000 + g, \(bind: projectID), 'snag', \(bind: snagID), 1, 'synthetic_bound', ARRAY[]::text[], '{}', NULL, \(bind: grantID), now(), \(bind: group)
+                    FROM generate_series(1, \(bind: existing)) AS g
+                    """).run()
+            }
+            let make = submission(operation, attempt: attempt, evidence: ids)
+            let (reference, _) = try await capture(reference: true, action: .submit, snagID: snagID, projectID: projectID, actorID: nil, grantID: activation.grant.id, actions: [.submitCompletion], prepare: prepare, command: make)
+            let (batched, _) = try await capture(reference: false, action: .submit, snagID: snagID, projectID: projectID, actorID: nil, grantID: activation.grant.id, actions: [.submitCompletion], prepare: prepare, command: make)
+            XCTAssertEqual(batched, reference, "\(existing) existing rows")
+            if fits { XCTAssertFalse(batched.outcome.hasPrefix("refused"), batched.outcome) }
+            else { XCTAssertTrue(batched.outcome.hasPrefix("refused 413") && batched.outcome.hasSuffix("change_group_too_large"), batched.outcome) }
+        }
+    }
+
+    /// Lane A WP2 (Fable §3.3 replay and concurrency), through the Contractor-link route: the same request twice is
+    /// answered from the receipt with one attempt and one set of evidence; a changed body under the same operation is
+    /// 409 `operation_reused`; a manager's edit between upload and submit is 409 `revision_conflict`; a second
+    /// submission against the old revisions is a 409 conflict.
+    func testBatchedSubmissionReplaysRefusesReuseAndConflictsAsBefore() async throws {
+        let (owner, project, snag, _, token, _) = try await fixture()
+        let attempt = UUID()
+        var ids: [UUID] = []
+        for _ in 0..<3 { ids.append(try await contractorAfter(token, snag, intent: attempt)) }
+        let path = "api/v2/contractor/\(token)/snags/\(snag.snag.id)/workflow/submit"
+        let body = action(snag, extra: ["attemptId": attempt.uuidString, "evidenceIds": ids.map(\.uuidString), "notes": "Resealed and tested on site"])
+        let first = try await call(.POST, path, nil, body: body)
+        XCTAssertEqual(first.status, .ok, first.body.string)
+        let again = try await call(.POST, path, nil, body: body)
+        XCTAssertEqual(again.status, .ok, again.body.string)
+        // The receipt's answer is the same value (the live encoder does not sort keys, so compare decoded objects).
+        let firstObject = try JSONSerialization.jsonObject(with: Data(first.body.string.utf8)) as? NSDictionary
+        let againObject = try JSONSerialization.jsonObject(with: Data(again.body.string.utf8)) as? NSDictionary
+        XCTAssertNotNil(firstObject); XCTAssertEqual(againObject, firstObject)
+        let sql = try VerifiedIdentityService.sql(app.db)
+        func count(_ query: SQLQueryString) async throws -> Int { try await sql.raw(query).first()!.decode(column: "n", as: Int.self) }
+        let attempts = try await count("SELECT count(*) AS n FROM completion_attempts WHERE snag_id = \(bind: snag.snag.id)")
+        let evidence = try await count("SELECT count(*) AS n FROM completion_evidence WHERE snag_id = \(bind: snag.snag.id)")
+        let outbox = try await count("SELECT count(*) AS n FROM workflow_outbox WHERE snag_id = \(bind: snag.snag.id)")
+        let attemptChanges = try await count("SELECT count(*) AS n FROM platform_changes WHERE entity_type = 'completionAttempt' AND entity_id = \(bind: attempt)")
+        XCTAssertEqual([attempts, evidence, outbox, attemptChanges], [1, 3, 1, 1])
+        var changed = body; changed["notes"] = "Different words under the same operation"
+        let reused = try await call(.POST, path, nil, body: changed)
+        XCTAssertEqual(reused.status, .conflict, reused.body.string); XCTAssertTrue(reused.body.string.contains("operation_reused"), reused.body.string)
+        let stale = try await call(.POST, path, nil, body: action(snag, extra: ["attemptId": UUID().uuidString, "evidenceIds": [ids[0].uuidString]]))
+        XCTAssertEqual(stale.status, .conflict, stale.body.string)
+
+        // A manager edits the snag after the contractor uploaded and before they submit.
+        let (owner2, project2, snag2, _, token2, _) = try await fixture()
+        let attempt2 = UUID(), photo = try await contractorAfter(token2, snag2, intent: attempt2)
+        let edit = try await call(.PATCH, "api/v2/projects/\(project2.project.id)/snags/\(snag2.snag.id)", owner2, body: ["mutation": meta(), "expectedRevision": snag2.revision, "fields": ["title": "Seal shower tray and regrout"]])
+        XCTAssertEqual(edit.status, .ok, edit.body.string)
+        let late = try await call(.POST, "api/v2/contractor/\(token2)/snags/\(snag2.snag.id)/workflow/submit", nil, body: action(snag2, extra: ["attemptId": attempt2.uuidString, "evidenceIds": [photo.uuidString]]))
+        XCTAssertEqual(late.status, .conflict, late.body.string); XCTAssertTrue(late.body.string.contains("revision_conflict"), late.body.string)
+        _ = owner; _ = project
+    }
     func testPINProtectsReadWorkflowAllocateUploadAndDownloadAndLocksGuesses() async throws {
         let (_, project, snag, activation, token, photo) = try await fixture(pin: "618294", photo: true)
         let root = "api/v2/contractor/\(token)", media = root + "/snags/\(snag.snag.id)/media"
