@@ -271,7 +271,7 @@
       if (item.submissions.some(s=>s.id===record.intent) || !actionable(item)) { device.remove(item.id); continue; }
       const files = (record.files||[]).filter(f=>f.file instanceof Blob).map(f=>({file:f.file instanceof File ? f.file : new File([f.file],'photo.jpg',{type:f.file.type}),command:f.command||null,ready:Boolean(f.ready)}));
       /* WP4: a stored "ready" is a hint; the server's own record decides (reconcile) before Submit can rely on it. */
-      files.forEach(f=>{f.preview=preview(f.file);f.key=uuid();f.status='queued';if(early()){f.ready=false;}});
+      files.forEach(f=>{f.preview=preview(f.file);f.key=uuid();f.status='queued';f.restoredCommand=Boolean(f.command);if(early()){f.ready=false;}});
       drafts.set(item.id,{open:true,restored:true,note:record.note||'',files,intent:record.intent,revision:record.revision,workflowRevision:record.workflowRevision,request:record.request||null,
         requestSent:Boolean(record.requestSent),submitRequested:Boolean(record.submitRequested),tombstones:new Set(record.tombstones||[]),toRetire:record.toRetire||[],error:''});
     }
@@ -365,7 +365,7 @@
   function remint(id,draft,f,retireOld) {
     if (f.command) { draft.tombstones.add(f.command.id); if (retireOld) queueRetire(id,f.command.id); }
     if (f.command) f.command = {...f.command,mutation:meta(),id:uuid(),expectedRevision:draft.revision};
-    f.ready = false; f.status = 'queued'; f.attempts = 0;
+    f.ready = false; f.status = 'queued'; f.attempts = 0; f.allocated = false; f.restoredCommand = false;
     if (draft.request && !draft.requestSent) draft.request = {...draft.request,mutation:meta(),evidenceIds:draft.files.map(x=>x.command?.id)};
   }
   /* Server state wins (§4.6): `drafts` lists this link's own unattached uploads. Local photos are kept, re-sent or re-minted. */
@@ -378,6 +378,7 @@
       const d = server.get(f.command.id), fresh = d && Date.parse(d.expiresAt) > now;
       if (d && fresh && d.state === 'ready' && d.sha256 === f.command.sha256) { f.ready = true; f.verified = true; f.status = 'ready'; }
       else if (d && fresh && d.state === 'allocated') { f.ready = false; f.status = 'queued'; }
+      else if (!d && !f.allocated && !f.restoredCommand) { f.status = 'queued'; }   // minted this session, not sent yet: keep it
       else remint(item.id,draft,f,Boolean(d));
     }
   }
@@ -399,6 +400,7 @@
       if (gone(item.id,draft,f)) return;
       f.status = 'allocating'; updateLine(draft,f);
       await request(`${root}/snags/${item.id}/media`,f.command);
+      f.allocated = true;
       if (gone(item.id,draft,f)) return;
       const bytes = await f.file.arrayBuffer();
       f.status = 'uploading'; f.share = 0; updateLine(draft,f);
