@@ -19,6 +19,24 @@ final class ServerTiming: @unchecked Sendable {
     /// SQL statements this request issued (WP2 profiling): a count, nothing about any statement.
     private var statements = 0
     func countStatement() { lock.lock(); statements += 1; lock.unlock() }
+    /// Staging only (P0e, 503 diagnosis): what happened on the way to a failure, in fixed vocabulary — a refusal kind,
+    /// a retry, an error's type — never a message, key, token or value. Read by the 5xx record, never sent to a client.
+    private var notes: [String] = []
+    func note(_ value: String) { lock.lock(); notes.append(value); lock.unlock() }
+    static func note(_ value: String) { current?.note(value) }
+    /// The route's phase names (`respond(rename:)`), so the failure record names phases exactly as the header does.
+    private var rename: [String: String] = [:]
+    /// Phases in completion order (a phase that threw is recorded too, when it unwound) and the notes, for the 5xx record.
+    var failureContext: (phases: String, notes: String) {
+        lock.lock(); defer { lock.unlock() }
+        var seen: [String: Int] = [:]
+        let named = phases.map { phase -> String in
+            let count = (seen[phase.name] ?? 0) + 1; seen[phase.name] = count
+            let numbered = count == 1 ? phase.name : "\(phase.name)_\(count)"
+            return "\(rename[numbered] ?? numbered):\(Int(phase.ms))"
+        }
+        return (named.joined(separator: ","), notes.joined(separator: ","))
+    }
 
     static var enabled: Bool { Environment.get(RuntimeDiagnostics.variable) == "enabled" }
 
@@ -73,6 +91,7 @@ final class ServerTiming: @unchecked Sendable {
                                                    _ body: @escaping () async throws -> T) async throws -> Response {
         guard enabled else { return try await body().encodeResponse(for: req) }
         let recorder = ServerTiming()
+        recorder.lock.lock(); recorder.rename = rename; recorder.lock.unlock()
         req.storage[RecorderKey.self] = recorder
         let start = DispatchTime.now().uptimeNanoseconds
         let response = try await $current.withValue(recorder) { try await body().encodeResponse(for: req) }

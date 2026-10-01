@@ -54,10 +54,11 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     private var objects: [String: Object] = [:]
     private var written = 0
     /// Queued: each `failNextPut` fails one more `put` (the WP1 retry needs two failures to reach row 14a).
-    private var putFailures: [any Error] = []
+    private var putFailures: [(any Error)?] = []
     private var readFailure: (any Error)?
     private var dropPutResponse = false
     private var lateLanding: (data: Data, contentType: String)?
+    private var afterRead: (@Sendable () async throws -> Void)?
 
     init(configuration: PrivateStorageTargetConfiguration) { self.configuration = configuration }
 
@@ -104,6 +105,8 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     /// this is a PUT whose request never reached storage: paired with a readback
     /// that finds nothing, it is the fixture for "the write never landed".
     func failNextPut(with error: any Error = PrivateContentStoreError.transportUnavailable) { putFailures.append(error) }
+    /// Queues a `put` that behaves normally, so a later queued failure lands on a later PUT (for example the rendition's).
+    func passNextPut() { putFailures.append(nil) }
 
     /// The next content `read` throws. Default: storage did not answer.
     func failNextRead(with error: any Error = PrivateContentStoreError.transportUnavailable) { readFailure = error }
@@ -123,6 +126,13 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     /// first PUT that reached storage only after its readback had found nothing. The fixture for WP1's retry
     /// meeting its own earlier attempt: create-only answers `alreadyExists`, and the readback decides.
     func landLateAfterNextRead(data: Data, contentType: String) { lateLanding = (data, contentType) }
+
+    /// The next content `read` answers exactly as it would, and then `hook` runs before the caller sees the answer —
+    /// the window between WP1's readback and its retry, where a test can revoke a link, expire or delete the upload,
+    /// or have a deletion fence the key.
+    func afterNextRead(_ hook: @escaping @Sendable () async throws -> Void) { afterRead = hook }
+    /// Places the erasure fence at a key now, as a deletion pass would (used from inside an `afterNextRead` hook).
+    func fenceNow(key: String) throws { _ = try seedErasureFence(key: key) }
 
     /// Places content without going through `put`, for a test that needs an object
     /// to exist already. Not recorded as a call.
@@ -170,7 +180,7 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     /// refusal is an outcome rather than an error.
     func put(key: String, data: Data, contentType: String) async throws -> PutOutcome {
         calls.append(.put(key: key, byteCount: data.count, contentType: contentType))
-        if !putFailures.isEmpty { let failure = putFailures.removeFirst(); self.dropPutResponse = false; throw failure }
+        if !putFailures.isEmpty, let failure = putFailures.removeFirst() { self.dropPutResponse = false; throw failure }
         try configuration.validateContentKey(key)
         guard PrivateContent.mimeTypes.contains(contentType),
               contentType != ObjectErasureFenceService.contentType else { throw PrivateContentStoreError.invalidContent }
@@ -191,6 +201,13 @@ actor InMemoryPrivateContentStore: PrivateContentStorage, ObjectErasureFenceStor
     /// Content, the exact fence that replaced it, or `absent`. Absence is what an
     /// empty address answers; it is never what a failure answers.
     func read(key: String, maximumBytes: Int) async throws -> Readback {
+        let answer: Result<Readback, any Error>
+        do { answer = .success(try await readNow(key: key, maximumBytes: maximumBytes)) } catch { answer = .failure(error) }
+        if let hook = afterRead { afterRead = nil; try await hook() }
+        return try answer.get()
+    }
+
+    private func readNow(key: String, maximumBytes: Int) async throws -> Readback {
         calls.append(.read(key: key, maximumBytes: maximumBytes))
         if let readFailure { self.readFailure = nil; throw readFailure }
         defer {

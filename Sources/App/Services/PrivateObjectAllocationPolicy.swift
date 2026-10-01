@@ -402,7 +402,8 @@ enum PrivateObjectAllocationPolicy {
         let key = allocation.key, sha256 = object.sha256
         return try await ObjectWriteIntentService.write(object, source: source, allocation: allocation,
                                                         on: database, authorize: authorize) {
-            try await issue(store: store, key: key, data: data, contentType: contentType, sha256: sha256, logger: logger ?? app.logger)
+            try await issue(store: store, key: key, data: data, contentType: contentType, sha256: sha256, logger: logger ?? app.logger,
+                            recheck: { try await recheckBeforeRetry(key: key, authorize: authorize, on: database) })
         }
     }
 
@@ -418,14 +419,35 @@ enum PrivateObjectAllocationPolicy {
     /// no retry on `created`, `alreadyExists`, cancellation, an unreachable readback, a fence, or a content/key refusal.
     /// If the retry also ends `not_landed`, the existing path applies (`uncertain`, 503 `media_unavailable`).
     private static func issue(store: any PrivateContentStorage, key: String, data: Data,
-                              contentType: String, sha256: String, logger: Logger) async throws -> Settled {
+                              contentType: String, sha256: String, logger: Logger,
+                              recheck: @Sendable () async throws -> Void) async throws -> Settled {
         do {
             return try await issueOnce(store: store, key: key, data: data, contentType: contentType, sha256: sha256)
         } catch PrivateMediaWriteService.Refusal.unavailable(.some(.notLanded)) {
             // The first attempt's own line, in the existing vocabulary; the retry's outcome is logged by the caller as today.
             logger.info("Private media write", metadata: ["kind": .string(PrivateMediaLogKind.notLanded.rawValue)])
+            ServerTiming.note("media_write.retry_after_not_landed")
             try await Task.sleep(nanoseconds: notLandedRetryPause)
+            try await recheck()
             return try await issueOnce(store: store, key: key, data: data, contentType: contentType, sha256: sha256)
+        }
+    }
+
+    /// The conditions Dan set for any retry (1 Oct), checked again immediately before the one retry, in a transaction
+    /// of its own: the write is re-authorised exactly as its intent was — the same `authorize` the intent ran, so the
+    /// uploader, the link or membership, revocation, the upload's expiry and retirement, the row and its bound key —
+    /// and the key is checked against the erasure-fence register. A refusal from either is answered as itself and the
+    /// PUT is not repeated: a write is never retried past a permission, expiry, revocation or deletion, and nothing can
+    /// be written to an address a deletion has claimed. (Create-only `If-None-Match: *` still refuses a fence written
+    /// after this check; the readback then answers `media_erased`.)
+    static func recheckBeforeRetry(key: String, authorize: @escaping @Sendable (Database) async throws -> ObjectWriteIntentService.Scope,
+                                   on database: Database) async throws {
+        try await database.transaction { db in
+            _ = try await authorize(db)
+            let fenced = try await VerifiedIdentityService.sql(db).raw("""
+                SELECT 1 AS fenced FROM object_erasure_fences WHERE ltrim(object_key, '/') = ltrim(\(bind: key), '/') LIMIT 1
+                """).first()
+            if fenced != nil { throw PrivateMediaWriteService.Refusal.erased }
         }
     }
 
@@ -451,6 +473,7 @@ enum PrivateObjectAllocationPolicy {
             outcome = try await store.put(key: key, data: data, contentType: contentType)
         } catch is CancellationError {
             // Row 15. Nobody is waiting, and the PUT may yet land: uncertain.
+            ServerTiming.note("media_write.cancelled_put")
             throw PrivateMediaWriteService.Refusal.unavailable(nil)
         } catch PrivateContentStoreError.invalidKey {
             // Row 9. Unreachable: this policy validated the key when it allocated
@@ -471,6 +494,7 @@ enum PrivateObjectAllocationPolicy {
         do {
             readback = try await store.read(key: key, maximumBytes: PrivateContent.maximumBytes)
         } catch is CancellationError {
+            ServerTiming.note("media_write.cancelled_readback")
             throw PrivateMediaWriteService.Refusal.unavailable(nil)             // row 15
         } catch PrivateContentStoreError.absent {
             // Rows 8a and 14a. The second is the row this design was built for:

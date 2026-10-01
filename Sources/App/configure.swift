@@ -167,6 +167,7 @@ public func configure(_ app: Application,
         app.migrations.add(CreateAppSessionRevocations())
         app.migrations.add(CreateIssuedReports())
         app.migrations.add(AddRetentionMaintenanceM1())
+        app.migrations.add(CreateDiagnosticRequestFailures())
 
         try await app.autoMigrate()
     } else {

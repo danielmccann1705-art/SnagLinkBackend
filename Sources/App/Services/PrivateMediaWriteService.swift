@@ -171,6 +171,8 @@ enum PrivateMediaWriteService {
     /// key, an ETag, a bucket, a namespace or a grant token is interpolated: a 4xx
     /// reason ships to the client verbatim, and only a 5xx is replaced wholesale.
     static func abort(_ error: any Error, logger: Logger) -> any Error {
+        // Staging only (P0e): which row of the table this write ended on, for the 5xx record. No-op elsewhere.
+        ServerTiming.note("media_write." + noteName(refusal(for: error), error: error))
         switch refusal(for: error) {
         case .erased:
             // The address belongs to a deleted account. Worth a line of its own:
@@ -205,6 +207,20 @@ enum PrivateMediaWriteService {
             // retired upload, a snag that moved — keeps its own status and
             // reason. Only storage refusals are this service's to name.
             return error
+        }
+    }
+
+    /// Fixed vocabulary for the staging failure record: the refusal, or the type of an unclassified error.
+    private static func noteName(_ refusal: Refusal?, error: any Error) -> String {
+        switch refusal {
+        case .erased: return "erased"
+        case .keyConflict: return "key_conflict"
+        case .mismatch: return "mismatch"
+        case .reallocate: return "reallocate"
+        case .storageUnavailable: return "storage_unavailable"
+        case .unavailable(let kind): return "unavailable(" + (kind?.rawValue ?? (error is CancellationError ? "cancelled" : "unknown")) + ")"
+        case .requestFailed: return "request_failed"
+        case .none: return "passthrough(" + String(reflecting: type(of: error)) + ")"
         }
     }
 
