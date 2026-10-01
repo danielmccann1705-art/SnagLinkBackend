@@ -50,6 +50,20 @@ final class ContractorLinkTermsNoticeTests: XCTestCase {
                        ["usesnaglist.com/terms#contractor-links", "usesnaglist.com/privacy"])
     }
 
+    /// WP4 client (staging-only switch): the disclosure is shown above the photo control when photos upload as they are
+    /// added; the switch is the server's `earlyUpload` (staging only) unless the address carries #wp4=off; the old
+    /// upload-at-Submit request is still built exactly as before when the switch is off.
+    func testTheEarlyUploadClientIsBehindTheStagingSwitchWithTheDisclosure() async throws {
+        let script = String(decoding: try await served("contractor.js"), as: UTF8.self)
+        XCTAssertTrue(script.contains("Photos upload as you add them. Shared with the project team when you submit."))
+        XCTAssertTrue(script.contains("const early = () => current?.earlyUpload === true && !/(^|[#&])wp4=off(&|$)/.test(location.hash);"))
+        XCTAssertTrue(script.contains("Keep this page open until your photos finish uploading."))
+        XCTAssertTrue(script.contains("aria-live"))
+        // Never claims background completion or an early success.
+        XCTAssertFalse(script.contains("will finish in the background"))
+        XCTAssertFalse(script.lowercased().contains("uploading continues"))
+    }
+
     /// The page names its script by content, so the new bytes reach a contractor's
     /// browser at once instead of an hour-cached older copy.
     func testTheScriptAddressChangesWithItsBytes() async throws {
