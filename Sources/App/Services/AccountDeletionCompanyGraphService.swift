@@ -235,6 +235,9 @@ extension AccountDeletionGraphService {
             "DELETE FROM drawing_processing_jobs WHERE project_id IN (SELECT id FROM account_deletion_projects)",
             "DELETE FROM drawing_asset_pages WHERE project_id IN (SELECT id FROM account_deletion_projects)",
             "DELETE FROM drawing_assets WHERE project_id IN (SELECT id FROM account_deletion_projects)",
+            // `upload_retirements` is deliberately not a graph table (Lane A WP4, Fable §8.4): its rows go with their media row
+            // (ON DELETE CASCADE), and that row's original and rendition keys - retired or not - are already in this job's
+            // manifest, whose deletion fence is unconditional and idempotent over a retirement fence.
             "DELETE FROM media_assets WHERE project_id IN (SELECT id FROM account_deletion_projects)",
             "DELETE FROM assignment_history WHERE project_id IN (SELECT id FROM account_deletion_projects)",
             "DELETE FROM issued_reports WHERE project_id IN (SELECT id FROM account_deletion_projects)",

@@ -65,6 +65,10 @@ enum AccountDeletionHealth {
         var lastSuccessfulPassAt: Date?
         var schedulerStale: Bool
         var thresholds: Thresholds
+        /// WP4 (Fable §8.4): retired uploads whose erasure fence is still pending, and those no longer tried because they
+        /// reached the attempt ceiling — pending bytes nobody can see are the failure mode to avoid. Absent if unreadable.
+        var uploadFencesPending: Int? = nil
+        var uploadFencesAtCeiling: Int? = nil
     }
 
     /// What each maintenance pass records. No timestamps and no identifiers, so it
@@ -147,7 +151,16 @@ enum AccountDeletionHealth {
 
     static func report(on db: Database, now: Date = Date()) async throws -> Report {
         let last = try await CleanupService.lastSuccessfulRun(on: db)
-        return summarise(try await groups(on: db, now: now), now: now, lastSuccessfulPass: last)
+        var report = summarise(try await groups(on: db, now: now), now: now, lastSuccessfulPass: last)
+        if let row = try? await VerifiedIdentityService.sql(db).raw("""
+            SELECT count(*) FILTER (WHERE state = 'pending') AS pending,
+                   count(*) FILTER (WHERE state = 'pending' AND attempts >= \(bind: RetentionMaintenanceService.fenceAttemptCeiling)) AS ceiling
+            FROM upload_retirements
+            """).first() {
+            report.uploadFencesPending = try? row.decode(column: "pending", as: Int.self)
+            report.uploadFencesAtCeiling = try? row.decode(column: "ceiling", as: Int.self)
+        }
+        return report
     }
 
     /// The pass's own record. `previousPass` is the last successful pass before this

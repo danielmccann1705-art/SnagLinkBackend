@@ -704,6 +704,26 @@ final class ContractorGrantTests: XCTestCase {
         for id in [ready, allocated] { XCTAssertFalse(otherPage.body.string.lowercased().contains(id.uuidString.lowercased()), "another link's page") }
         let download = try await call(.GET, "api/v2/contractor/\(token2)/snags/\(snag.snag.id)/media/\(ready)/content", nil, contractorHeader: false)
         XCTAssertNotEqual(download.status, .ok, "another link cannot download a draft")
+        // Fable §8.1: every remaining reader of the §4.3 table, with the drafts present.
+        let ids = [ready, allocated].flatMap { [$0.uuidString, $0.uuidString.lowercased()] }
+        let readers: [(String, HTTPMethod, String, [String: Any])] = [
+            ("project register", .GET, "api/v2/projects/\(project.project.id)/snags", [:]),
+            ("work table", .GET, "api/v2/workspaces/\(project.workspaceId)/snags", [:]),
+            ("work summary", .GET, "api/v2/workspaces/\(project.workspaceId)/work-summary", [:]),
+            ("register sync snapshot", .POST, "api/v2/projects/\(project.project.id)/register-snapshots", [:]),
+            ("issued report preview", .POST, "api/v2/projects/\(project.project.id)/reports/preview", ["title": "Handover", "scope": [String: Any]()]),
+        ]
+        for (label, method, path, body) in readers {
+            let response = try await call(method, path, owner, body: body)
+            XCTAssertEqual(response.status, .ok, label + ": " + response.body.string)
+            for id in ids { XCTAssertFalse(response.body.string.contains(id), label + " shows a draft") }
+        }
+        let outbox = try await VerifiedIdentityService.sql(app.db).raw("SELECT count(*) AS n FROM workflow_outbox WHERE snag_id = \(bind: snag.snag.id)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(outbox, 0, "no notification for a draft")
+        let ownPage = try await call(.GET, "api/v2/contractor/\(token)", nil, contractorHeader: false)
+        let ownItem = try XCTUnwrap(try ownPage.content.decode(ContractorPage.self).items.first { $0.id == snag.snag.id })
+        XCTAssertTrue(Set([ready, allocated]).isSubset(of: Set(ownItem.drafts.map(\.id))), "the link sees its own drafts under drafts")
+        XCTAssertTrue(Set(ownItem.photos.map(\.id)).isDisjoint(with: [ready, allocated]), "and never under photos")
     }
 
     /// WP4 §4.5: the hourly pass retires unattached uploads 7 days past expiry (leaving one with an `active` write intent
@@ -760,6 +780,46 @@ final class ContractorGrantTests: XCTestCase {
         XCTAssertEqual(retiredPut.status, .gone, retiredPut.body.string)
         let stillFenced = await memoryStore.isFenced(original)
         XCTAssertTrue(stillFenced)
+    }
+
+    /// WP4 (Fable §8.3/§8.4): retirements are fenced per object — an upload holding two rendition addresses (one known only to
+    /// its write intents) has each fenced on its own, and a failure stays pending whatever its sibling did — and outstanding
+    /// fences, pending and pending at the attempt ceiling, are visible in the deletion-health report.
+    func testUploadFencesArePerObjectAndOutstandingOnesAreReported() async throws {
+        let (_, _, snag, _, token, _) = try await fixture()
+        let asset = try await contractorAfter(token, snag, intent: UUID())
+        let sql = try VerifiedIdentityService.sql(app.db)
+        let keys = try await sql.raw("SELECT original_key, rendition_key FROM media_assets WHERE id = \(bind: asset)").first()!
+        let original = try keys.decode(column: "original_key", as: String.self), rendition = try keys.decode(column: "rendition_key", as: String.self)
+        let before = try await AccountDeletionHealth.report(on: app.db)
+        let retired = try await call(.DELETE, "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media/\(asset)", nil)
+        XCTAssertEqual(retired.status, .ok, retired.body.string)
+        let marker = try XCTUnwrap(rendition.range(of: "view-"))
+        let second = String(rendition[..<marker.upperBound]) + String(repeating: "c", count: 64) + ".jpg"
+        try await sql.raw("INSERT INTO upload_retirements (asset_id, role, object_key, state, attempts, created_at) VALUES (\(bind: asset), 'rendition', \(bind: second), 'pending', 0, now())").run()
+        let queued = try await AccountDeletionHealth.report(on: app.db)
+        XCTAssertEqual((queued.uploadFencesPending ?? -99) - (before.uploadFencesPending ?? 0), 3, "original, rendition and the intent-only rendition")
+
+        let counts = try await RetentionMaintenanceService.run(on: app.db, fenceStore: KeyFailingFenceStore(inner: memoryStore, failing: second))
+        XCTAssertEqual(counts.failed, [])
+        var states: [String: String] = [:]
+        for row in try await sql.raw("SELECT object_key, state, attempts FROM upload_retirements WHERE asset_id = \(bind: asset)").all() {
+            states[try row.decode(column: "object_key", as: String.self)] = try row.decode(column: "state", as: String.self) + ":" + String(try row.decode(column: "attempts", as: Int.self))
+        }
+        XCTAssertEqual(states[original], "fenced:0"); XCTAssertEqual(states[rendition], "fenced:0")
+        XCTAssertEqual(states[second], "pending:1", "a sibling's fence never marks this address fenced")
+        let renditionFenced = await memoryStore.isFenced(rendition), secondFenced = await memoryStore.isFenced(second)
+        XCTAssertTrue(renditionFenced); XCTAssertFalse(secondFenced)
+
+        let mid = try await AccountDeletionHealth.report(on: app.db)
+        try await sql.raw("UPDATE upload_retirements SET attempts = \(bind: RetentionMaintenanceService.fenceAttemptCeiling) WHERE asset_id = \(bind: asset) AND object_key = \(bind: second)").run()
+        let atCeiling = try await AccountDeletionHealth.report(on: app.db)
+        XCTAssertEqual((atCeiling.uploadFencesAtCeiling ?? -99) - (mid.uploadFencesAtCeiling ?? 0), 1, "a key at the ceiling is counted on its own")
+        XCTAssertEqual((atCeiling.uploadFencesPending ?? -99) - (mid.uploadFencesPending ?? 0), 0, "and is still pending")
+        let skipped = try await RetentionMaintenanceService.run(on: app.db, fenceStore: memoryStore)
+        XCTAssertGreaterThanOrEqual(skipped.uploadFencesAtCeiling ?? 0, 1, "the pass reports it too, and no longer tries it")
+        let stillUnfenced = await memoryStore.isFenced(second)
+        XCTAssertFalse(stillUnfenced)
     }
 
     /// WP4: the early-upload switch is on only where RUNTIME_DIAGNOSTICS is enabled (staging; production refuses it),
@@ -1007,6 +1067,20 @@ final class ContractorGrantTests: XCTestCase {
         XCTAssertEqual(revoked.status, .ok, revoked.body.string)
         let cleared = try await call(.GET, base, owner)
         XCTAssertEqual(try cleared.content.decode(CompanyAdministrationController.MemberLinkPage.self).items.count, 0)
+    }
+}
+
+/// The in-memory store, except that one address always fails: a fence recorded per role would mark it fenced anyway.
+private struct KeyFailingFenceStore: ObjectErasureFenceStorage {
+    let inner: InMemoryPrivateContentStore; let failing: String
+    var target: ObjectStorageWriteTarget { inner.target }
+    func replaceWithEmptyFence(key: String, contentType: String, metadata: [String: String]) async throws -> String {
+        if key == failing { throw FailingFenceStore.Unavailable() }
+        return try await inner.replaceWithEmptyFence(key: key, contentType: contentType, metadata: metadata)
+    }
+    func readFence(key: String, maximumBytes: Int) async throws -> ObjectErasureFenceReadback {
+        if key == failing { throw FailingFenceStore.Unavailable() }
+        return try await inner.readFence(key: key, maximumBytes: maximumBytes)
     }
 }
 

@@ -516,6 +516,56 @@ final class AccountDeletionObjectFenceTests: XCTestCase {
         XCTAssertEqual(try attested.decode(column: "n", as: Int.self), 2, "both addresses carry durable, verified evidence")
     }
 
+    /// Lane A WP4 (Fable §8.4 Q2). A draft upload that was retired — its row `retired`, both keys still `pending` in
+    /// `upload_retirements` — is erased by the account-deletion graph like any other media row: both addresses are in the
+    /// job's manifest and both carry an attested deletion fence; the row goes, and its retirement rows go with it (cascade),
+    /// so the hourly pass has nothing left to act on. `upload_retirements` is deliberately not a graph table.
+    func testARetiredUploadStillAwaitingItsFenceEndsWithAttestedDeletionFences() async throws {
+        let configuration = try installedNamespace()
+        let graph = try await personalGraph()
+        let allocation = try PrivateObjectAllocationPolicy.allocateMedia(workspaceID: graph.workspaceID, projectID: graph.projectID, app: app)
+        let rendition = try PrivateObjectAllocationPolicy.rendition(of: allocation, sha256: String(repeating: "3", count: 64), app: app)
+        let assetID = UUID(), sql = try VerifiedIdentityService.sql(app.db)
+        try await sql.raw("""
+            INSERT INTO media_assets(id,workspace_id,project_id,snag_id,creator_id,purpose,state,original_sha256,original_size,
+                original_mime,original_key,rendition_key,rendition_sha256,rendition_size,width,height,revision,base_snag_revision,
+                created_at,expires_at,ready_at)
+            VALUES(\(bind: assetID),\(bind: graph.workspaceID),\(bind: graph.projectID),\(bind: graph.snagID),\(bind: graph.userID),
+                'capture','ready',\(bind: String(repeating: "a", count: 64)),100,'image/jpeg',\(bind: allocation.key),\(bind: rendition.key),
+                \(bind: String(repeating: "3", count: 64)),90,10,10,1,1,NOW(),NOW()+INTERVAL '1 day',NOW())
+            """).run()
+        try await intent(userID: graph.userID, key: allocation.key, target: configuration.target)
+        try await intent(userID: graph.userID, key: rendition.key, target: configuration.target)
+        let row = try await sql.raw("SELECT * FROM media_assets WHERE id = \(bind: assetID)").first()!
+        try await UploadRetirementService.retire(row, on: app.db)
+        let queued = try await sql.raw("SELECT object_key FROM upload_retirements WHERE asset_id = \(bind: assetID) AND state = 'pending'").all()
+            .map { try $0.decode(column: "object_key", as: String.self) }
+        XCTAssertEqual(Set(queued), Set([allocation.key, rendition.key]), "retired, both keys awaiting the hourly fence")
+
+        let lease = try await endAndLease(graph.userID)
+        let storage = Storage(target: configuration.target)
+        app.storage[AccountDeletionFenceProvider.InjectionKey.self] = storage
+        app.storage[AccountDeletionWorkerDependenciesKey.self] = .init(
+            revokeApple: { _, _, _ in .revoked },
+            deleteObject: { _, _ in XCTFail("A fenced photograph is never physically deleted") })
+        let manifested = try await manifestKeys(lease)
+        XCTAssertEqual(manifested, Set([allocation.key, rendition.key]), "a retired row's addresses are in the manifest like any other")
+        let rows = try await sql.raw("SELECT (SELECT count(*) FROM media_assets WHERE id = \(bind: assetID)) AS media, (SELECT count(*) FROM upload_retirements WHERE asset_id = \(bind: assetID)) AS retirements").first()!
+        XCTAssertEqual(try rows.decode(column: "media", as: Int.self), 0, "the graph deleted the row")
+        XCTAssertEqual(try rows.decode(column: "retirements", as: Int.self), 0, "and its retirement rows went with it")
+
+        try await AccountDeletionWorker.perform(lease, app: app, on: app.db)
+        let state = try await AccountDeletionWorker.finish(lease, on: app.db)
+        XCTAssertEqual(state, "completed")
+        let puts = await storage.putCount()
+        XCTAssertEqual(puts, 2, "one deletion fence per address")
+        let attested = try await sql.raw("""
+            SELECT count(*) AS n FROM object_erasure_fence_attestations a JOIN object_erasure_fences f ON f.id=a.fence_id
+            WHERE f.job_id=\(bind: lease.id) AND f.object_key = ANY(\(bind: [allocation.key, rendition.key]))
+            """).first()!
+        XCTAssertEqual(try attested.decode(column: "n", as: Int.self), 2, "both addresses end with an attested deletion fence")
+    }
+
     /// Matrix #39. A namespaced address is fenced or it is blocked; it is never
     /// physically deleted, and the physical-delete path is deliberately not taught
     /// its shape. The rule is the create-only exclusion in the delete branch. This

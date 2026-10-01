@@ -288,7 +288,9 @@ enum RetentionMaintenanceService {
                     ORDER BY r.attempts, r.created_at LIMIT \(bind: min(n, fenceBatch))
                     """).all()
                 for entry in pending {
-                    let assetID = try entry.decode(column: "asset_id", as: UUID.self), role = try entry.decode(column: "role", as: String.self)
+                    // Recorded per object, the table's key: an upload can hold two addresses in one role (Fable §8.3), and a
+                    // sibling's fence must never mark this one fenced, nor its failure count against this one.
+                    let assetID = try entry.decode(column: "asset_id", as: UUID.self)
                     let key = try entry.decode(column: "object_key", as: String.self)
                     do {
                         _ = try await fenceStore.replaceWithEmptyFence(key: key, contentType: ObjectErasureFenceService.contentType,
@@ -296,13 +298,13 @@ enum RetentionMaintenanceService {
                         let readback = try await fenceStore.readFence(key: key, maximumBytes: 1)
                         try await sql.raw("""
                             UPDATE upload_retirements SET state = 'fenced', etag = \(bind: readback.etag), fenced_at = \(bind: now), last_kind = NULL
-                            WHERE asset_id = \(bind: assetID) AND role = \(bind: role) AND state = 'pending'
+                            WHERE asset_id = \(bind: assetID) AND object_key = \(bind: key) AND state = 'pending'
                             """).run()
                         written += 1
                     } catch {
                         try await sql.raw("""
                             UPDATE upload_retirements SET attempts = attempts + 1, last_kind = \(bind: String(describing: type(of: error)))
-                            WHERE asset_id = \(bind: assetID) AND role = \(bind: role) AND state = 'pending'
+                            WHERE asset_id = \(bind: assetID) AND object_key = \(bind: key) AND state = 'pending'
                             """).run()
                         failures += 1
                     }
