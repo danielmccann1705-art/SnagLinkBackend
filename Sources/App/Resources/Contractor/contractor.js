@@ -18,6 +18,9 @@
      and every photo keeps its own retry identity, so a second upload in flight only overlaps waiting. */
   const IN_FLIGHT = 2;
   const uuid = () => crypto.randomUUID();
+  /* The server spells ids in upper case (Swift's UUID); this page mints them in lower case. Ids are compared through these. */
+  const low = value => String(value ?? '').toLowerCase();
+  const same = (a,b) => a != null && b != null && low(a) === low(b);
   let current, page = 1, busy = false, pageError = '', notice = '', offline = navigator.onLine === false, storageReady = false;
   let deviceId = uuid();
   let stored = null;
@@ -29,6 +32,11 @@
   const RETRY_DELAYS = [2000,5000];
   const ACTIVE = ['preparing','allocating','uploading','checking'];
   let inFlight = 0, pinGate = false;
+  /* Identities with an allocate or PUT still out (id -> snag), and identities the server has confirmed retired. A retirement
+     that races its own allocation (404 while the allocate is out) is kept and sent again once that answer is in. */
+  const sending = new Map(), retiredIds = new Set();
+  /* A discarded draft's intent is remembered so a reload retires any of its uploads that landed late; for at least this long. */
+  const RETIRED_INTENT_MS = 120000;
   /* One persistent live region for upload and send announcements (the list itself is re-drawn, so it cannot carry them). */
   const announcer = (() => { const el = document.createElement('p'); el.setAttribute('role','status'); el.setAttribute('aria-live','polite');
     el.style.cssText = 'position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0';
@@ -78,9 +86,9 @@
      before the network call that uses them (WP4 4.7). */
   function persistNow(id) {
     const draft = drafts.get(id); if (!draft || !storageReady) return Promise.resolve(false);
-    if (!(draft.note || draft.files.length || draft.request || draft.toRetire?.length)) { device.remove(id); return Promise.resolve(true); }
+    if (!(draft.note || draft.files.length || draft.request || draft.toRetire?.length || draft.retiredIntents?.length)) { device.remove(id); return Promise.resolve(true); }
     return device.put(id,{note:draft.note,intent:draft.intent,revision:draft.revision,workflowRevision:draft.workflowRevision,request:draft.request||null,
-      requestSent:Boolean(draft.requestSent),submitRequested:Boolean(draft.submitRequested),tombstones:[...(draft.tombstones||[])],toRetire:draft.toRetire||[],
+      requestSent:Boolean(draft.requestSent),submitRequested:Boolean(draft.submitRequested),tombstones:[...(draft.tombstones||[])],toRetire:draft.toRetire||[],retiredIntents:draft.retiredIntents||[],
       linkExpiresAt:current?.expiresAt||null,files:draft.files.map(f=>({file:f.file,command:f.command||null,ready:Boolean(f.ready)}))});
   }
   function persist(id) { persistNow(id); }
@@ -88,6 +96,8 @@
   const preview = file => { try { return URL.createObjectURL(file); } catch { return ''; } };
   const release = files => files.forEach(f => { if (f.preview) URL.revokeObjectURL(f.preview); });
   function forget(id) { const draft = drafts.get(id); if (draft) release(draft.files); drafts.delete(id); device.remove(id); }
+  /* A draft the server has accepted is forgotten; retirements it still owed (removed photos) are kept in a holder and sent. */
+  function forgetSent(id) { const owed = drafts.get(id)?.toRetire || []; forget(id); for (const a of owed) queueRetire(id,a); if (owed.length && early()) drainRetirements(id); }
 
   async function request(path, body, method = 'POST', mime = 'application/json') {
     let response;
@@ -198,7 +208,7 @@
     const adding = wp4 ? (locked || Boolean(draft.submitRequested)) : locked;
     const ready = draft.files.filter(f=>f.ready).length, uploading = draft.files.some(f=>ACTIVE.includes(f.status)||f.status==='retrying');
     const remaining = draft.files.length - ready;
-    const submitLabel = busy ? (draft.stage||'Sending your fix…') : wp4 && draft.submitRequested ? `Sending when photos finish · ${ready} of ${draft.files.length} uploaded` : draft.request && (!wp4 || draft.requestSent) ? 'Retry submission' : 'Submit for review';
+    const submitLabel = busy ? (draft.stage||'Sending your fix…') : wp4 && draft.submitRequested && remaining === 0 ? 'Sending your fix for review…' : wp4 && draft.submitRequested ? `Sending when photos finish · ${ready} of ${draft.files.length} uploaded` : draft.request && (!wp4 || draft.requestSent) ? 'Retry submission' : 'Submit for review';
     return `<form class="submission" data-submit="${item.id}">
       <h3>Submit your fix for review</h3><p class="help">Add after photos showing the completed work. The manager will review your evidence before this snag is closed.</p>
       ${draft.restored?`<p class="notice restored">Restored from this device: the notes and photos you had not sent yet. <button type="button" class="link-button" data-discard="${item.id}" ${busy?'disabled':''}>Discard them</button></p>`:''}
@@ -212,7 +222,7 @@
       ${draft.files.length?`<p class="help" aria-live="polite">${ready} of ${draft.files.length} photo${draft.files.length===1?'':'s'} uploaded${storageReady?' · Unsent work is kept on this device':''}</p>`:''}
       <p class="help terms-notice" id="terms-${item.id}">Your photos and notes will be shared with the project team and may appear in project reports. Upload only information you have permission to share. By submitting, you agree to the <a href="https://usesnaglist.com/terms#contractor-links" target="_blank" rel="noopener noreferrer" aria-label="Contractor link terms (opens in a new tab)">Contractor link terms</a>. Read our <a href="https://usesnaglist.com/privacy" target="_blank" rel="noopener noreferrer" aria-label="privacy notice (opens in a new tab)">privacy notice</a> to understand how your information is used.</p>
       ${draft.error?`<p class="error" role="alert">${escape(draft.error)}</p>`:''}
-      <div class="actions"><button type="submit" class="primary" aria-describedby="terms-${item.id}" ${busy||stale||draft.preparing||(wp4&&draft.submitRequested)?'disabled':''}>${escape(submitLabel)}</button>${wp4&&draft.submitRequested&&!busy?`<button type="button" class="secondary" data-cancel-send="${item.id}">Don’t send yet</button>`:''}<button type="button" class="secondary" data-cancel="${item.id}" ${busy?'disabled':''}>Back to snag</button></div>
+      <div class="actions"><button type="submit" class="primary" aria-describedby="terms-${item.id}" ${busy||stale||draft.preparing||(wp4&&draft.submitRequested)?'disabled':''}>${escape(submitLabel)}</button>${wp4&&draft.submitRequested&&!busy&&remaining?`<button type="button" class="secondary" data-cancel-send="${item.id}">Don’t send yet</button>`:''}<button type="button" class="secondary" data-cancel="${item.id}" ${busy?'disabled':''}>Back to snag</button></div>
       ${wp4&&draft.submitRequested&&remaining?`<p class="help" role="status">Your fix will be sent when ${remaining===1?'the last photo finishes':`the remaining ${remaining} photos finish`} uploading. Nothing has been sent yet.</p>`:''}
       <p class="help">${wp4&&!storageReady?'Keep this page open until your fix is sent: this browser is not keeping unsent notes and photos.':wp4?(uploading||draft.submitRequested?'Keep this page open until your photos finish uploading. Unsent notes and photos stay on this device for 7 days.':'You can leave this page: unsent notes and photos stay on this device for 7 days. Uploaded photos are kept privately for 24 hours and are sent again after that.'):storageReady?'You can leave this page: unsent notes and photos stay on this device for 7 days.':'Keep this page open while your photos upload.'} We’ll confirm when your fix has been sent for review.</p></form>`;
   }
@@ -268,12 +278,15 @@
     for (const item of current.items) {
       const record = stored.get(item.id); if (!record || drafts.has(item.id)) continue;
       stored.delete(item.id);
-      if (item.submissions.some(s=>s.id===record.intent) || !actionable(item)) { device.remove(item.id); continue; }
+      if (item.submissions.some(s=>same(s.id,record.intent)) || !actionable(item)) { device.remove(item.id); for (const a of record.toRetire||[]) queueRetire(item.id,a); continue; }
       const files = (record.files||[]).filter(f=>f.file instanceof Blob).map(f=>({file:f.file instanceof File ? f.file : new File([f.file],'photo.jpg',{type:f.file.type}),command:f.command||null,ready:Boolean(f.ready)}));
       /* WP4: a stored "ready" is a hint; the server's own record decides (reconcile) before Submit can rely on it. */
       files.forEach(f=>{f.preview=preview(f.file);f.key=uuid();f.status='queued';f.restoredCommand=Boolean(f.command);if(early()){f.ready=false;}});
-      drafts.set(item.id,{open:true,restored:true,note:record.note||'',files,intent:record.intent,revision:record.revision,workflowRevision:record.workflowRevision,request:record.request||null,
-        requestSent:Boolean(record.requestSent),submitRequested:Boolean(record.submitRequested),tombstones:new Set(record.tombstones||[]),toRetire:record.toRetire||[],error:''});
+      /* A record holding only retirements (a discarded draft whose uploads are still being retired) is not a draft to show. */
+      const shown = Boolean(record.note || files.length || record.request);
+      drafts.set(item.id,{open:shown,restored:shown,note:record.note||'',files,intent:record.intent,revision:record.revision,workflowRevision:record.workflowRevision,request:record.request||null,
+        requestSent:Boolean(record.requestSent),submitRequested:Boolean(record.submitRequested),tombstones:new Set(record.tombstones||[]),toRetire:record.toRetire||[],
+        retiredIntents:record.retiredIntents||[],error:''});
     }
   }
   async function load() {
@@ -281,7 +294,7 @@
       const result = await request(root+'?page='+page,undefined,'GET');
       current = result; pageError = '';
       for (const [url,state] of photoState) if (state === 'failed') photoState.delete(url);
-      for(const item of current.items){const draft=drafts.get(item.id); if(draft&&item.submissions.some(s=>s.id===draft.intent)) forget(item.id);}
+      for(const item of current.items){const draft=drafts.get(item.id); if(draft&&item.submissions.some(s=>same(s.id,draft.intent))) forgetSent(item.id);}
       await restore();
       pinGate = false;
       if (early()) { for (const item of current.items) reconcile(item); }
@@ -293,7 +306,7 @@
     }
   }
   function draftFor(item) {
-    if(!drafts.has(item.id))drafts.set(item.id,{open:false,note:'',files:[],intent:uuid(),revision:item.revision,workflowRevision:item.workflowRevision,error:'',tombstones:new Set(),toRetire:[]});
+    if(!drafts.has(item.id))drafts.set(item.id,{open:false,note:'',files:[],intent:uuid(),revision:item.revision,workflowRevision:item.workflowRevision,error:'',tombstones:new Set(),toRetire:[],retiredIntents:[]});
     return drafts.get(item.id);
   }
   async function processFile(item,draft,file,index,total) {
@@ -331,56 +344,106 @@
      At most IN_FLIGHT photos upload at once across the page; the server still checks one photo at a time. `busy` covers only
      the final send. Every retry reuses the photo's persisted command (same asset id and operation); a photo that was removed
      is tombstoned, so a late answer for it changes nothing; its server upload is retired. */
-  const gone = (id,draft,f) => drafts.get(id) !== draft || !draft.files.includes(f) || Boolean(f.command && draft.tombstones?.has(f.command.id));
+  const gone = (id,draft,f) => drafts.get(id) !== draft || !draft.files.includes(f) || Boolean(f.command && draft.tombstones?.has(low(f.command.id)));
   function updateLine(draft,f) {
     const el = document.getElementById('upload-'+f.key);
     if (el) el.textContent = fileState(f,draft.files.indexOf(f),draft.files.length);
+  }
+  /* Reads the chosen photo. A read that fails (H113 W5: WebKit could not read the file while offline) is treated like a lost
+     connection - waited for, retried, resumed when the browser is back online - never as a refusal: nothing reached the server. */
+  async function readBytes(f) {
+    try { return await f.file.arrayBuffer(); }
+    catch { throw Object.assign(new Error('This photo could not be read on this device. Try again, or remove it and add it again.'),{readFailed:true}); }
   }
   /* The photo's identity: minted once, saved before it is used, reused by every retry. */
   function ensureCommand(id,draft,f) {
     if (f.command) return Promise.resolve();
     return f.commandPromise ||= (async () => {
-      const bytes = await f.file.arrayBuffer(), sha = hex(await crypto.subtle.digest('SHA-256',bytes));
+      const bytes = await readBytes(f), sha = hex(await crypto.subtle.digest('SHA-256',bytes));
       if (!f.command) f.command = {mutation:meta(),id:uuid(),expectedRevision:draft.revision,purpose:'completion',intentId:draft.intent,sha256:sha,byteCount:bytes.byteLength,mimeType:f.file.type};
       await persistNow(id);
     })().finally(() => { f.commandPromise = null; });
   }
+  /* Queues the retirement of one of this link's uploads for a snag. A snag whose draft is gone (sent, discarded, tidied) gets an
+     empty holder, so a late answer for a photo the page no longer wants is still retired (§4.4). */
   function queueRetire(id,assetId) {
-    const draft = drafts.get(id); if (!draft) return;
-    draft.toRetire ||= []; if (!draft.toRetire.includes(assetId)) draft.toRetire.push(assetId);
+    let draft = drafts.get(id);
+    if (!draft) { const item = current?.items.find(i=>i.id===id); draft = {open:false,note:'',files:[],intent:uuid(),revision:item?.revision,workflowRevision:item?.workflowRevision,error:'',tombstones:new Set(),toRetire:[],retiredIntents:[]}; drafts.set(id,draft); }
+    const key = low(assetId); draft.tombstones?.add(key);
+    draft.toRetire ||= []; if (!draft.toRetire.includes(key)) draft.toRetire.push(key);
   }
-  /* Retires this link's unattached uploads that the page no longer wants. Offline, they stay listed and go on the next load. */
+  /* Forgets a draft that holds nothing any more: no note, photos, request, pending retirement, remembered discarded intent or
+     upload still out. */
+  function tidy(id) {
+    const d = drafts.get(id);
+    if (!d || d.open || d.note || d.files.length || d.request || (d.toRetire||[]).length || (d.retiredIntents||[]).length || d.draining || [...sending.values()].includes(id)) return false;
+    forget(id); return true;
+  }
+  /* Retires this link's unattached uploads that the page no longer wants, through DELETE …/media/:id. Offline (or behind the PIN
+     gate) they stay listed and go on the next drain; a 404 for an identity whose allocate is still out is sent again when that
+     answer is in; any other refusal ends it (an attached upload belongs to a submission; a lapsed link leaves it to expiry). */
   async function drainRetirements(only) {
     for (const [id,draft] of [...drafts]) {
-      if ((only && id !== only) || (!only && !(draft.toRetire||[]).length)) continue;
-      for (const assetId of [...(draft.toRetire||[])]) {
-        try { await request(`${root}/snags/${id}/media/${assetId}`,undefined,'DELETE'); }
-        catch (error) { if (error.network) continue; }
-        draft.toRetire = (draft.toRetire||[]).filter(x => x !== assetId);
-      }
-      if (drafts.get(id) === draft) { if (!draft.files.length && !draft.note && !draft.request && !draft.toRetire.length && !draft.open) forget(id); else persist(id); }
+      if (only && id !== only) continue;
+      if (draft.draining) { draft.drainAgain = true; continue; }
+      if (!(draft.toRetire||[]).length) { tidy(id); continue; }
+      draft.draining = true;
+      try {
+        do {
+          draft.drainAgain = false;
+          for (const assetId of [...(draft.toRetire||[])]) {
+            try { await request(`${root}/snags/${id}/media/${assetId}`,undefined,'DELETE'); retiredIds.add(assetId); }
+            catch (error) {
+              if (error.network || error.identifier === 'pin_required') continue;
+              if (error.status === 404 && sending.has(assetId)) continue;
+            }
+            draft.toRetire = (draft.toRetire||[]).filter(x => x !== assetId);
+          }
+        } while (draft.drainAgain);
+      } finally { draft.draining = false; }
+      if (drafts.get(id) === draft && !tidy(id)) persist(id);
     }
   }
   /* A new identity for a photo whose upload the server has expired, retired or erased (same intent, same file). */
   function remint(id,draft,f,retireOld) {
-    if (f.command) { draft.tombstones.add(f.command.id); if (retireOld) queueRetire(id,f.command.id); }
+    if (f.command) { draft.tombstones.add(low(f.command.id)); if (retireOld) queueRetire(id,f.command.id); }
     if (f.command) f.command = {...f.command,mutation:meta(),id:uuid(),expectedRevision:draft.revision};
     f.ready = false; f.status = 'queued'; f.attempts = 0; f.allocated = false; f.restoredCommand = false;
     if (draft.request && !draft.requestSent) draft.request = {...draft.request,mutation:meta(),evidenceIds:draft.files.map(x=>x.command?.id)};
   }
-  /* Server state wins (§4.6): `drafts` lists this link's own unattached uploads. Local photos are kept, re-sent or re-minted. */
+  /* Server state wins (§4.6): `drafts` lists this link's own unattached, unretired uploads (ids in upper case).
+     - A local photo whose upload is listed ready, unexpired and with the same digest is done; listed allocated, it is sent again
+       under the same identity; listed but expired, in another state or with another digest, it gets a new identity and the old
+       upload is retired.
+     - A local photo whose identity is not listed is sent again under the same identity: allocation is idempotent, so an
+       allocation that landed after the list was read is adopted, and one the server retired or erased is renewed by
+       uploadFailed (410). It is never re-minted on absence alone (H111: that left the first upload behind).
+     - A listed upload no local photo holds is retired when this device knows it abandoned it: its intent was discarded here,
+       its identity was removed or replaced here, or it duplicates (same digest, same intent) a photo held under another
+       identity. Any other unheld upload — another device's, another tab's, or a draft this browser never kept — is left to
+       the expiry cleanup: unattachable 24 h after allocation, retired and fenced by the hourly pass 7 days after that. */
   function reconcile(item) {
     const draft = drafts.get(item.id); if (!draft) return;
-    const server = Array.isArray(item.drafts) ? new Map(item.drafts.map(d=>[d.id,d])) : null, now = Date.now();
+    const list = Array.isArray(item.drafts) ? item.drafts : null;
+    const server = list ? new Map(list.map(d=>[low(d.id),d])) : null, now = Date.now();
     for (const f of draft.files) {
       if (f.verified || ACTIVE.includes(f.status) || f.status === 'retrying' || f.status === 'failed') continue;
       if (!f.command || !server) { f.ready = false; f.status = 'queued'; continue; }
-      const d = server.get(f.command.id), fresh = d && Date.parse(d.expiresAt) > now;
-      if (d && fresh && d.state === 'ready' && d.sha256 === f.command.sha256) { f.ready = true; f.verified = true; f.status = 'ready'; }
-      else if (d && fresh && d.state === 'allocated') { f.ready = false; f.status = 'queued'; }
-      else if (!d && !f.allocated && !f.restoredCommand) { f.status = 'queued'; }   // minted this session, not sent yet: keep it
-      else remint(item.id,draft,f,Boolean(d));
+      const d = server.get(low(f.command.id)), fresh = d && Date.parse(d.expiresAt) > now;
+      if (!d) { f.ready = false; f.status = 'queued'; }
+      else if (fresh && d.state === 'ready' && same(d.sha256,f.command.sha256)) { f.ready = true; f.verified = true; f.status = 'ready'; }
+      else if (fresh && d.state === 'allocated' && same(d.sha256,f.command.sha256)) { f.ready = false; f.status = 'queued'; }
+      else remint(item.id,draft,f,true);
     }
+    if (!list) return;
+    const held = new Set([...draft.files.map(f=>low(f.command?.id)), ...(draft.request?.evidenceIds||[]).map(low)].filter(Boolean));
+    const shas = new Set(draft.files.map(f=>low(f.command?.sha256)).filter(Boolean));
+    const discarded = new Set((draft.retiredIntents||[]).map(r=>low(r.id)));
+    for (const d of list) {
+      const key = low(d.id); if (held.has(key)) continue;
+      if (discarded.has(low(d.intentId)) || draft.tombstones?.has(key) || (same(d.intentId,draft.intent) && shas.has(low(d.sha256)))) queueRetire(item.id,key);
+    }
+    draft.retiredIntents = (draft.retiredIntents||[]).filter(r => now - r.at < RETIRED_INTENT_MS || list.some(d=>same(d.intentId,r.id)));
   }
   function pump() {
     if (!early() || !current || pinGate || navigator.onLine === false) return;
@@ -395,14 +458,16 @@
   }
   async function startUpload(item,draft,f) {
     inFlight++; f.status = 'preparing'; f.error = ''; updateLine(draft,f);
+    let sent = null;
     try {
       await ensureCommand(item.id,draft,f);
       if (gone(item.id,draft,f)) return;
       f.status = 'allocating'; updateLine(draft,f);
+      sent = low(f.command.id); sending.set(sent,item.id);
       await request(`${root}/snags/${item.id}/media`,f.command);
       f.allocated = true;
       if (gone(item.id,draft,f)) return;
-      const bytes = await f.file.arrayBuffer();
+      const bytes = await readBytes(f);
       f.status = 'uploading'; f.share = 0; updateLine(draft,f);
       const result = await upload(`${root}/snags/${item.id}/media/${f.command.id}/content`,bytes,f.file.type,
         share => { if (gone(item.id,draft,f)) return; f.share = share; f.status = share < 1 ? 'uploading' : 'checking'; updateLine(draft,f); },
@@ -416,29 +481,34 @@
       if (!gone(item.id,draft,f)) uploadFailed(item,draft,f,error);
     } finally {
       inFlight--; f.xhr = null;
+      /* Removed or discarded while its allocate or PUT was out: whatever the server made of it is retired now (H111 W3). */
+      if (sent) { sending.delete(sent); if (gone(item.id,draft,f) && !retiredIds.has(sent)) { queueRetire(item.id,sent); drainRetirements(item.id); } }
       if (!busy) render();
       pump(); maybeSend(item.id);
       if (inFlight === 0) pumpPhotos();
     }
   }
   /* Retry policy (R1 as queue policy, Fable §2.2): the same command again, at most twice (2 s, then 5 s), for the app's own
-     503 (`media_unavailable`, `workspace_busy`), an edge answer without a body, or a connection lost while online. Never a 4xx.
-     An upload the server expired, retired or erased gets a new identity; a PIN request pauses the queue at the gate. */
+     503 (`media_unavailable`, `workspace_busy`), an edge answer without a body, a connection lost while online, or a failed read
+     of the photo on this device. Never a 4xx. Offline, the photo waits for signal; one that failed for want of a connection or a
+     read resumes by itself when the browser is back online. An upload the server expired, retired or erased gets a new
+     identity; a PIN request pauses the queue at the gate. */
   function uploadFailed(item,draft,f,error) {
     const status = error.status, id = error.identifier, n = draft.files.indexOf(f)+1;
     if (id === 'pin_required') { f.status = 'queued'; pinGate = true; gate(error); return; }
-    if (error.network && navigator.onLine === false) { f.status = 'queued'; f.waitingForSignal = true; return; }
+    const transient = Boolean(error.network || error.readFailed);
+    if (transient && navigator.onLine === false) { f.status = 'queued'; f.waitingForSignal = true; return; }
     if (status === 409 && (id === 'revision_conflict' || id === 'workflow_conflict')) { f.status = 'queued'; load(); return; }
     const renew = (status === 410 && (id === 'media_erased' || id === 'media_reallocate' || /expired|retired/i.test(error.message||''))) || (status === 409 && id === 'media_key_conflict');
     if (renew && (f.renewals||0) < 2) { f.renewals = (f.renewals||0) + 1; remint(item.id,draft,f,true); persist(item.id); drainRetirements(item.id); return; }
-    const retryable = error.network || (status === 503 && (id === 'media_unavailable' || id === 'workspace_busy'));
+    const retryable = transient || (status === 503 && (id === 'media_unavailable' || id === 'workspace_busy'));
     if (retryable && (f.attempts||0) < RETRY_DELAYS.length) {
       const delay = RETRY_DELAYS[f.attempts||0]; f.attempts = (f.attempts||0) + 1; f.status = 'retrying';
       announce(`Retrying photo ${n} of ${draft.files.length}`);
       f.retryTimer = setTimeout(() => { f.retryTimer = null; if (!gone(item.id,draft,f) && f.status === 'retrying') { f.status = 'queued'; pump(); } }, delay);
       return;
     }
-    f.status = 'failed'; f.attempts = 0; f.error = error.message || 'This photo could not be uploaded.';
+    f.status = 'failed'; f.attempts = 0; f.networkFailed = transient; f.error = error.message || 'This photo could not be uploaded.';
     announce(`Photo ${n} of ${draft.files.length} was not uploaded. ${f.error}`);
     if (draft.submitRequested && !draft.requestSent) {
       draft.submitRequested = false; draft.request = null;
@@ -465,7 +535,7 @@
       const result = await request(`${root}/snags/${id}/workflow/submit`,draft.request);
       if (result.status !== 'awaiting_review') throw new Error('Check the latest snag status before taking further action.');
       Object.assign(item,{status:result.status,revision:result.revision,workflowRevision:result.workflowRevision});
-      forget(id); sent = true; notice = `Your fix for ${item.reference} was sent for review. The manager will check your evidence.`;
+      forgetSent(id); sent = true; notice = `Your fix for ${item.reference} was sent for review. The manager will check your evidence.`;
       announce(notice);
     } catch (error) {
       draft.error = error.message;
@@ -485,24 +555,33 @@
   async function removeFile(item,draft,f) {
     if (f.retryTimer) { clearTimeout(f.retryTimer); f.retryTimer = null; }
     if (f.xhr) { try { f.xhr.abort(); } catch {} }
-    if (f.command) { draft.tombstones.add(f.command.id); queueRetire(item.id,f.command.id); }
+    if (f.command) { draft.tombstones.add(low(f.command.id)); queueRetire(item.id,f.command.id); }
     f.status = 'removed'; release([f]); draft.files.splice(draft.files.indexOf(f),1);
     if (draft.request && !draft.requestSent) { draft.request = null; draft.submitRequested = false; }
     await persistNow(item.id); render(); announce('Photo removed');
     drainRetirements(item.id);
   }
+  /* Discard (§4.4): every upload of this draft is retired at once through the retire route — each photo's identity, and every
+     upload the server last listed under this draft's intent that no photo holds (one a reload left behind). An allocate or PUT
+     still out is retired when its answer comes in; offline, the retirements wait on this device. The intent is remembered for
+     a while so a reload retires any of its uploads that land later; then the page re-reads the list to check. */
   async function discardDraft(id) {
     const draft = drafts.get(id); if (!draft) return;
+    const item = current?.items.find(i=>i.id===id);
     for (const f of draft.files) {
       if (f.retryTimer) clearTimeout(f.retryTimer);
       if (f.xhr) { try { f.xhr.abort(); } catch {} }
-      if (f.command) { draft.tombstones.add(f.command.id); queueRetire(id,f.command.id); }
+      if (f.command) { draft.tombstones.add(low(f.command.id)); queueRetire(id,f.command.id); }
       f.status = 'removed';
     }
+    for (const d of item?.drafts||[]) if (same(d.intentId,draft.intent)) queueRetire(id,d.id);
     release(draft.files);
-    drafts.set(id,{open:false,note:'',files:[],intent:uuid(),revision:draft.revision,workflowRevision:draft.workflowRevision,error:'',tombstones:new Set(),toRetire:draft.toRetire||[]});
+    const retiredIntents = [...(draft.retiredIntents||[]).filter(r=>!same(r.id,draft.intent)),{id:low(draft.intent),at:Date.now()}];
+    drafts.set(id,{open:false,note:'',files:[],intent:uuid(),revision:draft.revision,workflowRevision:draft.workflowRevision,error:'',
+      tombstones:new Set(draft.tombstones),toRetire:draft.toRetire||[],retiredIntents});
     await persistNow(id); render();
     await drainRetirements(id);
+    if (!busy && navigator.onLine !== false) await load();
   }
   content.addEventListener('toggle',event=>{if(event.target.dataset.history)histories.set(event.target.dataset.history,event.target.open);},true);
   content.addEventListener('input',event=>{const id=event.target.dataset.note;if(id){const draft=drafts.get(id);draft.note=event.target.value;
@@ -567,16 +646,17 @@
     if(button.dataset.open){draft.open=true;render();document.getElementById('note-'+id)?.focus();}
     if(button.dataset.cancel){draft.open=false;render();document.getElementById('open-'+id)?.focus({preventScroll:true});}
     if(button.dataset.remove!==undefined){const f=draft.files.find(x=>x.key===button.dataset.remove);if(!f)return;if(early()){await removeFile(item,draft,f);}else{release(draft.files.splice(draft.files.indexOf(f),1));persist(id);render();}}
-    if(button.dataset.retryFile!==undefined){const f=draft.files.find(x=>x.key===button.dataset.retryFile);if(f&&f.status==='failed'){f.status='queued';f.attempts=0;f.error='';render();pump();}}
+    if(button.dataset.retryFile!==undefined){const f=draft.files.find(x=>x.key===button.dataset.retryFile);if(f&&f.status==='failed'){f.status='queued';f.attempts=0;f.error='';f.networkFailed=false;render();pump();}}
     if(button.dataset.rebase&&actionable(item)){draft.revision=item.revision;draft.workflowRevision=item.workflowRevision;draft.request=null;draft.requestSent=false;draft.submitRequested=false;draft.error='';
-      for(const f of draft.files)if(!f.ready){if(early()&&f.command){draft.tombstones?.add(f.command.id);queueRetire(id,f.command.id);}if(f.xhr){try{f.xhr.abort();}catch{}}f.command=null;f.status='queued';f.attempts=0;}
+      for(const f of draft.files)if(!f.ready){if(early()&&f.command){draft.tombstones?.add(low(f.command.id));queueRetire(id,f.command.id);}if(f.xhr){try{f.xhr.abort();}catch{}}f.command=null;f.status='queued';f.attempts=0;}
       persist(id);render();if(early()){pump();drainRetirements(id);}}
     if(button.dataset.start){busy=true;draft.error='';render();try{if(!draft.startRequest)draft.startRequest={mutation:meta(),expectedRevision:item.revision,expectedWorkflowRevision:item.workflowRevision};const result=await request(`${root}/snags/${id}/workflow/start`,draft.startRequest);draft.startRequest=null;draft.revision=result.revision;draft.workflowRevision=result.workflowRevision;}catch(error){draft.error=error.message;}finally{busy=false;await load();}}
   });
   const dialog=document.getElementById('photo-viewer');dialog.querySelector('button').addEventListener('click',()=>dialog.close());dialog.addEventListener('close',()=>dialog.querySelector('img').removeAttribute('src'));
   addEventListener('offline',()=>{offline=true;render();});
   addEventListener('online',()=>{offline=false;notice=[...drafts.values()].some(d=>d.note||d.files.length)?'You are back online. Check your photos below and send your fix.':'';
-    for(const d of drafts.values())for(const f of d.files)f.waitingForSignal=false;render();if(!busy)load();});
+    for(const d of drafts.values())for(const f of d.files){f.waitingForSignal=false;if(early()&&f.status==='failed'&&f.networkFailed){f.status='queued';f.attempts=0;f.error='';f.networkFailed=false;}}
+    render();pump();if(!busy)load();});
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){for(const id of drafts.keys())persist(id);}else if(!busy&&current)load();});
   addEventListener('pagehide',()=>{for(const id of drafts.keys())persist(id);});
   addEventListener('beforeunload',event=>{if(busy||inFlight>0||[...drafts.values()].some(d=>d.submitRequested)||(!storageReady&&[...drafts.values()].some(d=>d.note||d.files.length))){event.preventDefault();event.returnValue='';}});
