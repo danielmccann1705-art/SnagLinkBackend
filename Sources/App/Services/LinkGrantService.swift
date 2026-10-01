@@ -117,7 +117,7 @@ enum LinkGrantService {
             FROM link_grants g, (SELECT set_config('lock_timeout', \(bind: WorkspaceAccessService.commandLockTimeout), true) AS applied) AS bound
             WHERE g.token_hash = \(bind: SHA256Hasher.hash(token: token)) AND bound.applied IS NOT NULL
             """
-        guard let found = try await ServerTiming.measure("lock", { try await sql.raw(lookup).first() }) else { throw Abort(.notFound, reason: "Contractor link unavailable") }
+        guard let found = try await ServerTiming.measure(req, "lock", { try await sql.raw(lookup).first() }) else { throw Abort(.notFound, reason: "Contractor link unavailable") }
         let grantID = try found.decode(column: "id", as: UUID.self), workspaceID = try found.decode(column: "workspace_id", as: UUID.self)
         let row = try await self.row(grantID, projectID: found.decode(column: "project_id", as: UUID.self), on: db)
         guard try row.decode(column: "state", as: String.self) == "active", try row.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "This Contractor link expired or was revoked. Ask the project manager for a new link") }

@@ -26,6 +26,16 @@ final class ServerTiming: @unchecked Sendable {
         return try await body()
     }
 
+    /// The same recorder, reachable through the request: work inside a database transaction closure runs in a new task
+    /// (the task-local recorder is not inherited there), so code that holds the request measures through it.
+    struct RecorderKey: StorageKey { typealias Value = ServerTiming }
+    static func measure<T>(_ req: Request, _ name: String, _ body: () async throws -> T) async rethrows -> T {
+        guard let recorder = current ?? req.storage[RecorderKey.self] else { return try await body() }
+        let start = DispatchTime.now().uptimeNanoseconds
+        defer { recorder.add(name, Double(DispatchTime.now().uptimeNanoseconds &- start) / 1_000_000) }
+        return try await body()
+    }
+
     func add(_ name: String, _ ms: Double) { lock.lock(); phases.append((name, ms)); lock.unlock() }
 
     /// Phase list in order. A name seen again is numbered (`intent`, `intent_2`) unless
@@ -50,6 +60,7 @@ final class ServerTiming: @unchecked Sendable {
                                                    _ body: @escaping () async throws -> T) async throws -> Response {
         guard enabled else { return try await body().encodeResponse(for: req) }
         let recorder = ServerTiming()
+        req.storage[RecorderKey.self] = recorder
         let start = DispatchTime.now().uptimeNanoseconds
         let response = try await $current.withValue(recorder) { try await body().encodeResponse(for: req) }
         let total = Double(DispatchTime.now().uptimeNanoseconds &- start) / 1_000_000

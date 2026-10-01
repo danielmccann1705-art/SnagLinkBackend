@@ -361,11 +361,11 @@ final class ContractorGrantTests: XCTestCase {
             let names = Set(value.components(separatedBy: ", ").map { String($0.split(separator: ";")[0]) })
             XCTAssertTrue(names.isSubset(of: allowed), value); XCTAssertTrue(names.contains("total"), value)
         }
-        XCTAssertTrue(on[0]!.hasPrefix("allocate;dur="), on[0]!)
-        for phase in ["auth", "process", "intent_original", "put_original", "intent_rendition", "put_rendition", "ready"] {
+        XCTAssertTrue(on[0]!.hasPrefix("allocate;dur=") || on[0]!.hasPrefix("lock;dur="), on[0]!); XCTAssertTrue(on[0]!.contains("lock;dur="), on[0]!)
+        for phase in ["auth", "process", "intent_original", "put_original", "intent_rendition", "put_rendition", "ready", "lock_auth", "lock_intent_original", "lock_intent_rendition", "lock_ready"] {
             XCTAssertTrue(on[1]!.contains(phase + ";dur="), "\(phase) missing from \(on[1]!)")
         }
-        XCTAssertTrue(on[2]!.hasPrefix("submit;dur="), on[2]!)
+        XCTAssertTrue(on[2]!.contains("submit;dur="), on[2]!); XCTAssertTrue(on[2]!.contains("lock;dur="), on[2]!)
     }
     func testPINProtectsReadWorkflowAllocateUploadAndDownloadAndLocksGuesses() async throws {
         let (_, project, snag, activation, token, photo) = try await fixture(pin: "618294", photo: true)
