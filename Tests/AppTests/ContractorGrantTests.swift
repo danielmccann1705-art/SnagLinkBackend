@@ -260,7 +260,7 @@ final class ContractorGrantTests: XCTestCase {
         setenv(RuntimeDiagnostics.variable, "enabled", 1); defer { unsetenv(RuntimeDiagnostics.variable) }
         let on = try await run()
         let shape = try NSRegularExpression(pattern: "^[a-z_]+(;dur=[0-9]+\\.[0-9])?(, [a-z_]+(;dur=[0-9]+\\.[0-9])?)*$")
-        let allowed: Set<String> = ["allocate", "submit", "auth", "process", "intent_original", "put_original", "intent_rendition", "put_rendition", "ready", "total", "cold"]
+        let allowed: Set<String> = ["allocate", "submit", "auth", "queue", "process", "intent_original", "put_original", "intent_rendition", "put_rendition", "ready", "total", "cold"]
         for value in on {
             let value = try XCTUnwrap(value)
             XCTAssertNotNil(shape.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)), value)

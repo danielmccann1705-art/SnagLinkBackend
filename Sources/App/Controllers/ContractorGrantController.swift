@@ -139,7 +139,13 @@ struct ContractorGrantController: RouteCollection {
                              projectID: project.requireID(), originalKey: row.decode(column: "original_key", as: String?.self))
         } }
         if upload.media.state == "ready" { return .init(upload.media) }
-        let processed = try await ServerTiming.measure("process") { try await req.application.threadPool.runIfActive(eventLoop: req.eventLoop) { try PrivateImageProcessor.process(data, mime: upload.media.mimeType) }.get() }
+        // One photo is processed at a time in this process (ImageProcessingGate, Lane A P2); "queue" is the wait for that turn.
+        try await ServerTiming.measure("queue") { try await ImageProcessingGate.shared.acquire() }
+        let processed: PrivateImageProcessor.Result
+        do {
+            processed = try await ServerTiming.measure("process") { try await req.application.threadPool.runIfActive(eventLoop: req.eventLoop) { try PrivateImageProcessor.process(data, mime: upload.media.mimeType) }.get() }
+            await ImageProcessingGate.shared.release()
+        } catch { await ImageProcessingGate.shared.release(); throw error }
         let authorizeWrite: @Sendable (Database) async throws -> ObjectWriteIntentService.Scope = { db in
             let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
             let snag = try await LinkGrantService.item(snagID, grant: grant, project: project, write: true, on: db)

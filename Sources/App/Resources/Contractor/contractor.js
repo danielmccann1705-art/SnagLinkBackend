@@ -14,6 +14,9 @@
   const histories = new Map();
   const labels = {open:'Open',in_progress:'In progress',awaiting_review:'Awaiting review',changes_requested:'Changes requested',closed:'Closed · accepted'};
   const LIMIT = 10485760, MAX_EDGE = 4096, DRAFT_DAYS = 7;
+  /* At most this many photos upload at once (1 = one after another). The server checks one photo at a time
+     and every photo keeps its own retry identity, so a second upload in flight only overlaps waiting. */
+  const IN_FLIGHT = 2;
   const uuid = () => crypto.randomUUID();
   let current, page = 1, busy = false, pageError = '', notice = '', offline = navigator.onLine === false, storageReady = false;
   let deviceId = uuid();
@@ -235,6 +238,22 @@
     if(result.state!=='ready')throw new Error('This photo is not ready. Try again before submitting.');
     file.ready=true;file.progress='';draft.stage=`Uploading photos… ${draft.files.filter(f=>f.ready).length} of ${total} sent`;persist(item.id);render();
   }
+  /* Uploads every photo that is not yet ready, at most IN_FLIGHT at a time, taking them in list order.
+     The first failure wins: no further photo starts, and every upload already in flight is awaited before
+     this returns, so no late answer can change the draft after the submit handler has finished. Photos
+     that did finish stay ready, so a retry resumes with the rest. */
+  async function uploadAll(item,draft) {
+    const total=draft.files.length; let next=0, failure=null;
+    const worker=async()=>{
+      while(failure===null){
+        const index=next++; if(index>=total)return;
+        const file=draft.files[index]; if(file.ready)continue;
+        try{await processFile(item,draft,file,index,total);}catch(error){if(failure===null)failure=error;return;}
+      }
+    };
+    await Promise.all(Array.from({length:Math.max(1,Math.min(IN_FLIGHT,total))},worker));
+    if(failure!==null)throw failure;
+  }
   content.addEventListener('toggle',event=>{if(event.target.dataset.history)histories.set(event.target.dataset.history,event.target.open);},true);
   content.addEventListener('input',event=>{const id=event.target.dataset.note;if(id){drafts.get(id).note=event.target.value;persistSoon(id);}});
   content.addEventListener('change',async event=>{
@@ -256,7 +275,7 @@
     if(navigator.onLine===false){offline=true;draft.error=interrupted().message;render();return;}
     busy=true;draft.error='';notice='';draft.stage=`Uploading photos… ${draft.files.filter(f=>f.ready).length} of ${draft.files.length} sent`;render();
     let sent=false;
-    try{for(const [index,file] of draft.files.entries())await processFile(item,draft,file,index,draft.files.length);
+    try{await uploadAll(item,draft);
       if(!draft.request){draft.request={mutation:meta(),expectedRevision:draft.revision,expectedWorkflowRevision:draft.workflowRevision,attemptId:draft.intent,notes:draft.note,evidenceIds:draft.files.map(f=>f.command.id)};persist(id);}
       draft.stage='Sending your fix for review…';render();
       const result=await request(`${root}/snags/${id}/workflow/submit`,draft.request);
