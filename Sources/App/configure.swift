@@ -168,6 +168,7 @@ public func configure(_ app: Application,
         app.migrations.add(CreateIssuedReports())
         app.migrations.add(AddRetentionMaintenanceM1())
         app.migrations.add(CreateDiagnosticRequestFailures())
+        app.migrations.add(AddUploadRetirements())
 
         try await app.autoMigrate()
     } else {

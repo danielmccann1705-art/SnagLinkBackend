@@ -38,6 +38,8 @@ struct ContractorGrantController: RouteCollection {
                 try await self.upload(req: req)
             }
         }
+        // WP4 (staging): the uploader retires its own unattached photo — removed from the page or discarded with the draft.
+        snag.delete("media", ":assetId", use: retire)
         snag.get("media", ":assetId", "content") { req async throws -> Response in
             try await ServerTiming.respond(req, rename: ["lock": "lock_imported", "lock_2": "lock_check", "lock_3": "lock_recheck"]) { try await self.download(req: req) }
         }
@@ -110,6 +112,30 @@ struct ContractorGrantController: RouteCollection {
             let result = ContractorWorkflowResult(response)
             try await ServerTiming.measure(req, "record") { try await LinkGrantService.record(result, grantID: id, mutation: body.mutation, hash: hash, on: db) }
             return result
+        }
+    }
+    struct PhotoRetired: Content { let id: UUID; let state: String }
+    /// WP4 (FABLE-DESIGN-A-AMENDMENT §4.4): retire this link's own unattached upload. Exclusive workspace lock (`load`),
+    /// the snag on this link for writing, then the asset's own lock and row. Only an upload this grant made can be
+    /// retired; an attached one is refused 409 (it belongs to a submission now); a retired one answers 200 again, so a
+    /// repeated or late call is harmless. An expired upload can still be retired — that is how the page tidies an
+    /// allocation it had to replace. Any later allocate, PUT or attachment of it is refused 410 by `requireUploader`.
+    @Sendable func retire(req: Request) async throws -> PhotoRetired {
+        try LinkGrantService.requireWrite(req)
+        let token = try Self.token(req), snagID = try LinkGrantController.id("snagId", req), assetID = try LinkGrantController.id("assetId", req)
+        return try await req.db.transaction { db in
+            let (grant, project) = try await LinkGrantService.load(token, req: req, on: db)
+            _ = try await LinkGrantService.item(snagID, grant: grant, project: project, write: true, on: db)
+            try await VerifiedIdentityService.lock("entity:media:\(assetID)", on: db)
+            let row = try await PrivateMediaService.row(assetID, snagID: snagID, projectID: project.requireID(), on: db)
+            guard try row.decode(column: "creator_id", as: UUID?.self) == nil,
+                  try row.decode(column: "creator_grant_id", as: UUID?.self) == grant.decode(column: "id", as: UUID.self) else { throw Abort(.notFound, reason: "Upload unavailable") }
+            if try row.decode(column: "state", as: String.self) == "retired" { return .init(id: assetID, state: "retired") }
+            guard try row.decode(column: "attached_at", as: Date?.self) == nil else {
+                throw Abort(.conflict, reason: "This photo is part of a submission and cannot be removed", identifier: "media_attached")
+            }
+            try await UploadRetirementService.retire(row, on: db)
+            return .init(id: assetID, state: "retired")
         }
     }
     @Sendable func allocate(req: Request) async throws -> PhotoResult {

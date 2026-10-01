@@ -188,7 +188,11 @@ struct CleanupService {
 
         // M1 retention sweeps. Each sweep is isolated: a failure is recorded by name in
         // `retention.failed` and never stops the deletion health read below.
-        removed.retention = try await RetentionMaintenanceService.run(on: db, logger: app.logger)
+        // WP4: retired uploads' keys are fenced with account deletion's own store for the private target, or left
+        // pending when that store is not configured here.
+        let fenceStore: (any ObjectErasureFenceStorage)? = (try? PrivateObjectAllocationPolicy.configuration(app: app))
+            .flatMap { try? AccountDeletionFenceProvider.store(for: $0.target, app: app) }
+        removed.retention = try await RetentionMaintenanceService.run(on: db, fenceStore: fenceStore, logger: app.logger)
 
         // Last, after every piece of work above, so reading health can never stop
         // that work. A pass that cannot read it records `failed`, which is itself

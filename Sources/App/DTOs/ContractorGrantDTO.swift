@@ -38,6 +38,10 @@ struct ContractorItem: Content {
     let id: UUID; let reference: String; let title: String; let description: String?; let location: String?
     let priority: String; let dueDate: String?; let status: String; let revision: Int64; let workflowRevision: Int64
     let photos: [Photo]; let submissions: [Submission]
+    /// WP4 (FABLE-DESIGN-A-AMENDMENT §4.6): this link's own unattached, unretired uploads for the snag, so a resumed page
+    /// can reconcile its local drafts with the server. Own grant only by construction; an older page ignores it.
+    struct Draft: Content { let id: UUID; let state: String; let expiresAt: Date; let sha256: String; let byteCount: Int }
+    let drafts: [Draft]
 }
 struct ContractorPage: Content {
     let projectName: String; let projectAddress: String?; let contractorName: String?

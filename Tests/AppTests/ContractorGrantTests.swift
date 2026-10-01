@@ -610,6 +610,158 @@ final class ContractorGrantTests: XCTestCase {
         XCTAssertEqual(late.status, .conflict, late.body.string); XCTAssertTrue(late.body.string.contains("revision_conflict"), late.body.string)
         _ = owner; _ = project
     }
+    // MARK: - Lane A WP4 (server): retiring unattached uploads, drafts on the page, the hourly retire + fence
+
+    private var memoryStore: InMemoryPrivateContentStore { app.storage[PrivateContentStoreProvider.InjectionKey.self] as! InMemoryPrivateContentStore }
+    private func pageItem(_ token: String, _ snagID: UUID) async throws -> ContractorItem {
+        let response = try await call(.GET, "api/v2/contractor/\(token)", nil, contractorHeader: false)
+        XCTAssertEqual(response.status, .ok, response.body.string)
+        return try XCTUnwrap(try response.content.decode(ContractorPage.self).items.first { $0.id == snagID })
+    }
+    private func retirements(_ assetID: UUID) async throws -> [String] {
+        try await VerifiedIdentityService.sql(app.db).raw("SELECT role || ':' || state AS line FROM upload_retirements WHERE asset_id = \(bind: assetID) ORDER BY role").all().map { try $0.decode(column: "line", as: String.self) }
+    }
+    private func mediaState(_ assetID: UUID) async throws -> (String, Bool) {
+        let row = try await VerifiedIdentityService.sql(app.db).raw("SELECT state, retired_at IS NOT NULL AS retired FROM media_assets WHERE id = \(bind: assetID)").first()!
+        return (try row.decode(column: "state", as: String.self), try row.decode(column: "retired", as: Bool.self))
+    }
+
+    /// WP4 §4.4: the link retires its own unattached upload (ready or only allocated); a repeat answers 200; every later
+    /// PUT or attachment of it is refused 410 inside its own authorisation; an attached photo is 409; someone else's upload
+    /// is 404; the page's `drafts` lists exactly this link's unattached, unretired uploads (§4.6).
+    func testTheLinkRetiresItsOwnUnattachedUploadsAndNothingCanUseThemAfterwards() async throws {
+        let (owner, project, snag, _, token, _) = try await fixture()
+        let attempt = UUID()
+        let ready = try await contractorAfter(token, snag, intent: attempt)
+        let allocated = try await contractorAllocated(token, snag, intent: attempt)
+        let kept = try await contractorAfter(token, snag, intent: attempt)
+        let ownersDraft = try await after(owner, project: project, snag: snag, intent: UUID())
+        let before = try await pageItem(token, snag.snag.id)
+        XCTAssertEqual(Set(before.drafts.map(\.id)), [ready, allocated, kept], "own drafts only, never the manager's")
+        XCTAssertEqual(before.drafts.first { $0.id == ready }?.state, "ready"); XCTAssertEqual(before.drafts.first { $0.id == allocated }?.state, "allocated")
+
+        let path = "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media"
+        let unheadered = try await call(.DELETE, path + "/\(ready)", nil, contractorHeader: false)
+        XCTAssertEqual(unheadered.status, .forbidden, unheadered.body.string)
+        for _ in 0..<2 {
+            let retired = try await call(.DELETE, path + "/\(ready)", nil)
+            XCTAssertEqual(retired.status, .ok, retired.body.string); XCTAssertTrue(retired.body.string.contains("\"retired\""), retired.body.string)
+        }
+        let (state, stamped) = try await mediaState(ready)
+        XCTAssertEqual(state, "retired"); XCTAssertTrue(stamped)
+        let queued = try await retirements(ready)
+        XCTAssertEqual(queued, ["original:pending", "rendition:pending"], "a ready upload queues both of its keys for the fence")
+        let retiredAllocation = try await call(.DELETE, path + "/\(allocated)", nil)
+        XCTAssertEqual(retiredAllocation.status, .ok, retiredAllocation.body.string)
+        let none = try await retirements(allocated)
+        XCTAssertEqual(none, [], "an allocation that never received bytes has no key to fence")
+        let foreign = try await call(.DELETE, path + "/\(ownersDraft)", nil)
+        XCTAssertEqual(foreign.status, .notFound, foreign.body.string)
+
+        let reupload = try await call(.PUT, path + "/\(ready)/content", nil, bytes: Self.png)
+        XCTAssertEqual(reupload.status, .gone, reupload.body.string); XCTAssertTrue(reupload.body.string.contains("retired"), reupload.body.string)
+        let workflow = "api/v2/contractor/\(token)/snags/\(snag.snag.id)/workflow/submit"
+        let withRetired = try await call(.POST, workflow, nil, body: action(snag, extra: ["attemptId": attempt.uuidString, "evidenceIds": [kept.uuidString, ready.uuidString]]))
+        XCTAssertEqual(withRetired.status, .gone, withRetired.body.string)
+
+        let afterRetire = try await pageItem(token, snag.snag.id)
+        XCTAssertEqual(afterRetire.drafts.map(\.id), [kept])
+        let submitted = try await call(.POST, workflow, nil, body: action(snag, extra: ["attemptId": attempt.uuidString, "evidenceIds": [kept.uuidString]]))
+        XCTAssertEqual(submitted.status, .ok, submitted.body.string)
+        let attached = try await call(.DELETE, path + "/\(kept)", nil)
+        XCTAssertEqual(attached.status, .conflict, attached.body.string); XCTAssertTrue(attached.body.string.contains("media_attached"), attached.body.string)
+        let finished = try await pageItem(token, snag.snag.id)
+        XCTAssertEqual(finished.drafts.map(\.id), [], "an attached photo is no longer a draft")
+        let managerList = try await call(.GET, "api/v2/projects/\(project.project.id)/snags/\(snag.snag.id)/media", owner)
+        XCTAssertEqual(managerList.status, .ok, managerList.body.string)
+        XCTAssertFalse(managerList.body.string.lowercased().contains(ready.uuidString.lowercased()), "a retired upload is not listed")
+        XCTAssertFalse(managerList.body.string.lowercased().contains(allocated.uuidString.lowercased()))
+    }
+
+    /// WP4 §4.3: a link's drafts (allocated and ready) stay invisible to the manager's list and get, to another link on the
+    /// project, and to the change feed, until a submission attaches them.
+    func testDraftsStayPrivateToTheirLinkUntilAttached() async throws {
+        let (owner, project, snag, _, token, _) = try await fixture()
+        let attempt = UUID()
+        let ready = try await contractorAfter(token, snag, intent: attempt)
+        let allocated = try await contractorAllocated(token, snag, intent: attempt)
+        let managerList = try await call(.GET, "api/v2/projects/\(project.project.id)/snags/\(snag.snag.id)/media", owner)
+        XCTAssertEqual(managerList.status, .ok, managerList.body.string)
+        for id in [ready, allocated] {
+            XCTAssertFalse(managerList.body.string.lowercased().contains(id.uuidString.lowercased()), "manager list")
+            let get = try await call(.GET, "api/v2/projects/\(project.project.id)/snags/\(snag.snag.id)/media/\(id)", owner)
+            XCTAssertNotEqual(get.status, .ok, "manager get: " + get.body.string)
+        }
+        let changes = try await VerifiedIdentityService.sql(app.db).raw("SELECT count(*) AS n FROM platform_changes WHERE entity_id = ANY(\(bind: [ready, allocated])::UUID[])").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(changes, 0, "no change row before attachment")
+        // A second link on the same project sees nothing of the first link's drafts.
+        let other = try await logged(owner, project)
+        let contractor2 = try await contractor(owner, project)
+        let assigned = try await assign(owner, project, other, contractor2)
+        let (_, token2) = try await activate(owner, project, try await prepared(owner, project, snags: [assigned.snag.id], contractor: contractor2))
+        let otherPage = try await call(.GET, "api/v2/contractor/\(token2)", nil, contractorHeader: false)
+        XCTAssertEqual(otherPage.status, .ok, otherPage.body.string)
+        for id in [ready, allocated] { XCTAssertFalse(otherPage.body.string.lowercased().contains(id.uuidString.lowercased()), "another link's page") }
+        let download = try await call(.GET, "api/v2/contractor/\(token2)/snags/\(snag.snag.id)/media/\(ready)/content", nil, contractorHeader: false)
+        XCTAssertNotEqual(download.status, .ok, "another link cannot download a draft")
+    }
+
+    /// WP4 §4.5: the hourly pass retires unattached uploads 7 days past expiry (leaving one with an `active` write intent
+    /// for the next pass), then fences their keys with the same zero-byte erasure object account deletion writes. A
+    /// fence that fails stays pending and is completed by a later pass; without a store nothing is written.
+    func testTheHourlyPassRetiresAbandonedUploadsAndFencesTheirKeys() async throws {
+        let (_, _, snag, _, token, _) = try await fixture()
+        let attempt = UUID()
+        let abandoned = try await contractorAfter(token, snag, intent: attempt)
+        let fresh = try await contractorAfter(token, snag, intent: attempt)
+        let sql = try VerifiedIdentityService.sql(app.db)
+        try await sql.raw("UPDATE media_assets SET expires_at = now() - interval '8 days' WHERE id = \(bind: abandoned)").run()
+        let keys = try await sql.raw("SELECT original_key, rendition_key FROM media_assets WHERE id = \(bind: abandoned)").first()!
+        let original = try keys.decode(column: "original_key", as: String.self), rendition = try keys.decode(column: "rendition_key", as: String.self)
+        let hadBytes = await memoryStore.object(at: original) != nil
+        XCTAssertTrue(hadBytes)
+
+        // The first pass runs while another upload's write is in flight (its intent is `active`): inside that upload's
+        // readback, the upload is made 8 days expired and the pass runs, with a fence store that fails every write.
+        final class Box: @unchecked Sendable { var counts: RetentionMaintenanceService.Counts?; var inFlightState: String? }
+        let box = Box(), db = app.db, failing = FailingFenceStore(target: memoryStore.target)
+        let inFlight = try await contractorAllocated(token, snag, intent: attempt)
+        await memoryStore.failNextPut()
+        await memoryStore.afterNextRead {
+            let hookSQL = db as! SQLDatabase
+            try await hookSQL.raw("UPDATE media_assets SET expires_at = now() - interval '8 days' WHERE id = \(bind: inFlight)").run()
+            box.counts = try await RetentionMaintenanceService.run(on: db, fenceStore: failing)
+            box.inFlightState = try await hookSQL.raw("SELECT state FROM media_assets WHERE id = \(bind: inFlight)").first()?.decode(column: "state", as: String.self)
+        }
+        let late = try await call(.PUT, "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media/\(inFlight)/content", nil, bytes: Self.png)
+        XCTAssertEqual(late.status, .gone, "the expired upload is not retried: " + late.body.string)
+        let first = try XCTUnwrap(box.counts)
+        XCTAssertEqual(first.failed, [])
+        XCTAssertGreaterThanOrEqual(first.uploadsRetired ?? 0, 1); XCTAssertGreaterThanOrEqual(first.uploadRetirementsDeferred ?? 0, 1)
+        XCTAssertEqual(box.inFlightState, "allocated", "an active write intent defers retirement")
+        let states = [try await mediaState(abandoned).0, try await mediaState(fresh).0]
+        XCTAssertEqual(states, ["retired", "ready"], "retired; an unexpired upload is untouched")
+        let pendingAfterFailure = try await retirements(abandoned)
+        XCTAssertEqual(pendingAfterFailure, ["original:pending", "rendition:pending"], "a failed fence stays pending")
+        let attempts = try await sql.raw("SELECT min(attempts) AS n FROM upload_retirements WHERE asset_id = \(bind: abandoned)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(attempts, 1)
+
+        let unconfigured = try await RetentionMaintenanceService.run(on: app.db)
+        XCTAssertEqual(unconfigured.uploadFencesWritten, 0); XCTAssertGreaterThanOrEqual(unconfigured.uploadFencesPending ?? 0, 2)
+
+        let second = try await RetentionMaintenanceService.run(on: app.db, fenceStore: memoryStore)
+        XCTAssertEqual(second.failed, []); XCTAssertGreaterThanOrEqual(second.uploadFencesWritten ?? 0, 2)
+        let fencedRows = try await retirements(abandoned)
+        XCTAssertEqual(fencedRows, ["original:fenced", "rendition:fenced"])
+        let fencedOriginal = await memoryStore.isFenced(original), fencedRendition = await memoryStore.isFenced(rendition)
+        XCTAssertTrue(fencedOriginal); XCTAssertTrue(fencedRendition)
+        // A late PUT of the retired upload is refused before it can write anything.
+        let retiredPut = try await call(.PUT, "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media/\(abandoned)/content", nil, bytes: Self.png)
+        XCTAssertEqual(retiredPut.status, .gone, retiredPut.body.string)
+        let stillFenced = await memoryStore.isFenced(original)
+        XCTAssertTrue(stillFenced)
+    }
+
     func testPINProtectsReadWorkflowAllocateUploadAndDownloadAndLocksGuesses() async throws {
         let (_, project, snag, activation, token, photo) = try await fixture(pin: "618294", photo: true)
         let root = "api/v2/contractor/\(token)", media = root + "/snags/\(snag.snag.id)/media"
@@ -840,4 +992,12 @@ final class ContractorGrantTests: XCTestCase {
         let cleared = try await call(.GET, base, owner)
         XCTAssertEqual(try cleared.content.decode(CompanyAdministrationController.MemberLinkPage.self).items.count, 0)
     }
+}
+
+/// A fence store whose every write fails, for the "a failed fence stays pending" case.
+private struct FailingFenceStore: ObjectErasureFenceStorage {
+    let target: ObjectStorageWriteTarget
+    struct Unavailable: Error {}
+    func replaceWithEmptyFence(key: String, contentType: String, metadata: [String: String]) async throws -> String { throw Unavailable() }
+    func readFence(key: String, maximumBytes: Int) async throws -> ObjectErasureFenceReadback { throw Unavailable() }
 }

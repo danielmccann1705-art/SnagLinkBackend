@@ -257,6 +257,12 @@ extension LinkGrantService {
                 ORDER BY a.created_at, a.id
                 """).all()
             let imported = try await importedPhotos(snagIDs: ids, projectID: try project.requireID(), on: db)
+            // WP4: this grant's own drafts — unattached, not retired — and nothing of anyone else's.
+            let drafts = try await sql.raw("""
+                SELECT id, snag_id, state, expires_at, original_sha256, original_size FROM media_assets
+                WHERE creator_grant_id = \(bind: grantID) AND snag_id = ANY(\(bind: ids)::UUID[]) AND attached_at IS NULL AND state <> 'retired'
+                ORDER BY created_at, id
+                """).all()
             let decisions = try await sql.raw("SELECT d.attempt_id, d.reason FROM review_decisions d JOIN completion_attempts a ON a.id = d.attempt_id WHERE a.actor_grant_id = \(bind: grantID) AND a.id = ANY(\(bind: values.map(\.id))::UUID[]) AND d.kind = 'send_back'").all()
             var feedback: [UUID: String] = [:]
             for decision in decisions { feedback[try decision.decode(column: "attempt_id", as: UUID.self)] = try decision.decode(column: "reason", as: String.self) }
@@ -277,7 +283,11 @@ extension LinkGrantService {
                 let submissions = values.filter { $0.snagId == id }.prefix(25).map {
                     ContractorItem.Submission(id: $0.id, number: $0.number, notes: $0.notes, state: $0.state, submittedAt: $0.submittedAt, evidenceIds: $0.evidenceIds, feedback: feedback[$0.id])
                 }
-                result.append(.init(id: id, reference: snag.reference, title: snag.title, description: snag.snagDescription, location: snag.location, priority: snag.priority, dueDate: snag.dueOn ?? snag.dueDate.map(date.string), status: snag.status, revision: snag.revision, workflowRevision: snag.workflowRevision, photos: photos, submissions: submissions))
+                let own = try drafts.filter { try $0.decode(column: "snag_id", as: UUID.self) == id }.map {
+                    try ContractorItem.Draft(id: $0.decode(column: "id", as: UUID.self), state: $0.decode(column: "state", as: String.self), expiresAt: $0.decode(column: "expires_at", as: Date.self),
+                                             sha256: $0.decode(column: "original_sha256", as: String.self), byteCount: $0.decode(column: "original_size", as: Int.self))
+                }
+                result.append(.init(id: id, reference: snag.reference, title: snag.title, description: snag.snagDescription, location: snag.location, priority: snag.priority, dueDate: snag.dueOn ?? snag.dueDate.map(date.string), status: snag.status, revision: snag.revision, workflowRevision: snag.workflowRevision, photos: photos, submissions: submissions, drafts: own))
             }
         }
         let contractor: String?
