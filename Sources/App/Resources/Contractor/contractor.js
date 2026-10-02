@@ -25,13 +25,23 @@
   let deviceId = uuid();
   let stored = null;
   const meta = () => ({operationId:uuid(),deviceId:deviceId});
-  /* WP4, staging-only switch: photos upload as they are added. On only when the server says so (`earlyUpload`, which is true
-     only where RUNTIME_DIAGNOSTICS is enabled - never in production) and the address does not carry #wp4=off (the harness's
-     A/B). Off, the page uploads at Submit exactly as before. */
+  /* WP4: photos upload as they are added. On only when the server says so (`earlyUpload`: U2's product switch, the Worker's
+     CONTRACTOR_EARLY_UPLOAD, off unless activated) and the address does not carry #wp4=off (the harness's A/B; it can only turn
+     the feature off). Off, the page uploads at Submit exactly as before. */
   const early = () => current?.earlyUpload === true && !/(^|[#&])wp4=off(&|$)/.test(location.hash);
   const RETRY_DELAYS = [2000,5000];
   const ACTIVE = ['preparing','allocating','uploading','checking'];
-  let inFlight = 0, pinGate = false;
+  let inFlight = 0;
+  /* The page's gate (U2, FABLE-U1-U2-DESIGN §1.3): null, or {kind:'pin'|'unavailable'|'network', message}. render() paints it and
+     nothing else writes the page, so a list repaint from an upload that finishes behind it cannot draw over it (H117/H202 S-1).
+     authEpoch counts PIN entries: a request sent before the PIN was entered again and refused for the old session is sent again
+     rather than asking for the PIN a second time. */
+  let authGate = null, authEpoch = 0;
+  /* Refusals are told apart by the server's identifier, never by its message (U2, H203 S-2: a revoked link's message says
+     "expired or was revoked"). An upload the server expired, retired or erased is renewed under a new identity; a refusal of the
+     whole link stops the page at the gate with the server's reason and keeps the notes and photos on this device. */
+  const RENEW_410 = new Set(['upload_retired','upload_expired','media_erased','media_reallocate']);
+  const LINK_410 = new Set(['link_unavailable','link_issuer_inactive','contractor_inactive','project_archived']);
   /* Identities with an allocate or PUT still out (id -> snag), and identities the server has confirmed retired. A retirement
      that races its own allocation (404 while the allocate is out) is kept and sent again once that answer is in. */
   const sending = new Map(), retiredIds = new Set();
@@ -246,7 +256,17 @@
     return notice ? `<p class="notice success" role="status">${escape(notice)}</p>` : '';
   }
   function render() {
+    if (authGate) {
+      /* Painted once per gate; later calls refresh only its progress line, error and button, so a PIN being typed is kept. */
+      const key = authGate.kind + '\n' + authGate.message;
+      if (content.dataset.gate !== key) { content.innerHTML = gateHTML(); content.dataset.gate = key; }
+      const progress = content.querySelector('.gate-progress'), text = gateProgress(); if (progress && progress.textContent !== text) progress.textContent = text;
+      const error = content.querySelector('.pin-error'); if (error && error.textContent !== (authGate.pinError || '')) error.textContent = authGate.pinError || '';
+      const button = content.querySelector('.pin-form button'); if (button) button.disabled = Boolean(authGate.verifying);
+      return;
+    }
     if (!current) return;
+    delete content.dataset.gate;
     const y = scrollY, active = document.activeElement, focused = active?.id, start = active?.selectionStart, end = active?.selectionEnd;
     const counts = {work:0,review:0,closed:0};
     current.items.forEach(i=>counts[i.status==='closed'?'closed':i.status==='awaiting_review'?'review':'work']++);
@@ -263,11 +283,42 @@
     if (focused) { const el = document.getElementById(focused); if(el){el.focus({preventScroll:true}); if(typeof start === 'number' && el.setSelectionRange) el.setSelectionRange(start,end); } }
     scrollTo({top:y,behavior:'instant'});
   }
+  function gateHTML() {
+    const pin = authGate.kind === 'pin', network = authGate.kind === 'network';
+    return `<section class="gate">${notice?`<p class="notice success" role="status">${escape(notice)}</p>`:''}<p class="eyebrow">Contractor link</p><h1>${pin?'Enter your PIN':network?'No connection':'This link is unavailable'}</h1><p>${escape(authGate.message)}</p><p class="help gate-progress"></p>${pin?`<form class="pin-form"><label for="link-pin">PIN from your project manager</label><input id="link-pin" name="pin" type="password" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required><p class="pin-error" role="alert"></p><button class="primary">Open snag list</button></form>`:network?'<button class="secondary" data-refresh>Try again</button>':'<p class="help">Ask the project manager to share a new Contractor link.</p><button class="secondary" data-refresh>Try again</button>'}</section>`;
+  }
+  /* What the gate says about unsent work on this page: what is kept, and what happens after the PIN. */
+  function gateProgress() {
+    let total = 0, ready = 0, notes = false, sending = false;
+    for (const d of drafts.values()) { total += d.files.length; ready += d.files.filter(f=>f.ready).length; notes ||= Boolean(d.note); sending ||= Boolean(d.submitRequested); }
+    if (!total && !notes) return '';
+    const pin = authGate?.kind === 'pin';
+    const kept = pin || !storageReady ? 'Your notes and photos are kept on this page' : 'Your notes and photos are kept on this device';
+    const photos = total ? ` · ${ready} of ${total} photo${total===1?'':'s'} uploaded` : '';
+    return `${kept}${photos}.${!pin ? '' : total > ready ? ' The rest upload after you enter it.' : sending ? ' Your fix is sent for review after you enter it.' : ''}`;
+  }
+  /* Raises the gate for a refusal (PIN, unavailable link, no connection). The first refusal raises it; another request refused
+     the same way while it is up changes nothing, so it is painted and announced once (§1.3). */
   function gate(error) {
-    const needsPIN = error.identifier === 'pin_required';
-    content.innerHTML = `<section class="gate">${notice?`<p class="notice success" role="status">${escape(notice)}</p>`:''}<p class="eyebrow">Contractor link</p><h1>${needsPIN?'Enter your PIN':error.network?'No connection':'This link is unavailable'}</h1><p>${escape(error.message)}</p>${needsPIN?`<form class="pin-form"><label for="link-pin">PIN from your project manager</label><input id="link-pin" name="pin" type="password" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required><p class="pin-error" role="alert"></p><button class="primary">Open snag list</button></form>`:error.network?'<button class="secondary" data-refresh>Try again</button>':'<p class="help">Ask the project manager to share a new Contractor link.</p><button class="secondary" data-refresh>Try again</button>'}</section>`;
-    const form = content.querySelector('.pin-form');
-    form?.addEventListener('submit',async event=>{event.preventDefault();const button=form.querySelector('button');button.disabled=true;try{await request(root+'/verify-pin',{pin:form.elements.pin.value});form.elements.pin.value='';await load();}catch(e){form.querySelector('.pin-error').textContent=e.message;button.disabled=false;}});
+    const kind = error.identifier === 'pin_required' ? 'pin' : error.network ? 'network' : 'unavailable';
+    if (authGate?.kind === kind) return;
+    authGate = {kind,message:error.message||'This link is unavailable.'};
+    render();
+    if (kind === 'pin') announce(`Enter your PIN to continue. ${gateProgress()}`.trim());
+  }
+  /* The PIN form: on success the page re-reads the list, which lowers the gate and resumes the same uploads and the same frozen
+     request (load -> reconcile -> pump -> maybeSend). A wrong PIN or a lockout shows the server's reason; nothing else changes. */
+  async function submitPIN(form) {
+    if (authGate?.kind !== 'pin' || authGate.verifying) return;
+    authGate.verifying = true; authGate.pinError = ''; render();
+    try {
+      await request(root+'/verify-pin',{pin:form.elements.pin.value});
+      form.elements.pin.value = ''; authEpoch++;
+      await load();
+      if (authGate) { authGate.verifying = false; render(); }
+    } catch (error) {
+      if (authGate) { authGate.verifying = false; authGate.pinError = error.message; render(); }
+    }
   }
   /* Brings back unsent drafts saved on this device for snags shown on this page. A draft
      whose attempt the server already records, or whose snag no longer needs work, is
@@ -296,12 +347,13 @@
       for (const [url,state] of photoState) if (state === 'failed') photoState.delete(url);
       for(const item of current.items){const draft=drafts.get(item.id); if(draft&&item.submissions.some(s=>same(s.id,draft.intent))) forgetSent(item.id);}
       await restore();
-      pinGate = false;
+      authGate = null;
       if (early()) { for (const item of current.items) reconcile(item); }
       render();
       if (early()) { pump(); drainRetirements(); for (const id of drafts.keys()) maybeSend(id); }
     } catch(error) {
       if(error.status===403||error.status===404||error.status===410){gate(error);return;}
+      if(authGate)return;   // a gate is up: a failed background re-read leaves it as it is
       if(current){pageError=error.message;render();}else gate(error);
     }
   }
@@ -392,9 +444,11 @@
         do {
           draft.drainAgain = false;
           for (const assetId of [...(draft.toRetire||[])]) {
+            const epoch = authEpoch;
             try { await request(`${root}/snags/${id}/media/${assetId}`,undefined,'DELETE'); retiredIds.add(assetId); }
             catch (error) {
-              if (error.network || error.identifier === 'pin_required') continue;
+              if (error.identifier === 'pin_required') { if (epoch === authEpoch) gate(error); continue; }
+              if (error.network) continue;
               if (error.status === 404 && sending.has(assetId)) continue;
             }
             draft.toRetire = (draft.toRetire||[]).filter(x => x !== assetId);
@@ -446,7 +500,7 @@
     draft.retiredIntents = (draft.retiredIntents||[]).filter(r => now - r.at < RETIRED_INTENT_MS || list.some(d=>same(d.intentId,r.id)));
   }
   function pump() {
-    if (!early() || !current || pinGate || navigator.onLine === false) return;
+    if (!early() || !current || authGate || navigator.onLine === false) return;
     for (const item of current.items) {
       const draft = drafts.get(item.id);
       if (!draft || !actionable(item) || isStale(item,draft)) continue;
@@ -458,7 +512,7 @@
   }
   async function startUpload(item,draft,f) {
     inFlight++; f.status = 'preparing'; f.error = ''; updateLine(draft,f);
-    let sent = null;
+    let sent = null, epoch = authEpoch;
     try {
       await ensureCommand(item.id,draft,f);
       if (gone(item.id,draft,f)) return;
@@ -467,7 +521,10 @@
       await request(`${root}/snags/${item.id}/media`,f.command);
       f.allocated = true;
       if (gone(item.id,draft,f)) return;
+      /* The gate went up while this allocate was out: wait for the PIN before sending the photo (§1.3 pause, not abort). */
+      if (authGate) { f.status = 'queued'; return; }
       const bytes = await readBytes(f);
+      epoch = authEpoch;
       f.status = 'uploading'; f.share = 0; updateLine(draft,f);
       const result = await upload(`${root}/snags/${item.id}/media/${f.command.id}/content`,bytes,f.file.type,
         share => { if (gone(item.id,draft,f)) return; f.share = share; f.status = share < 1 ? 'uploading' : 'checking'; updateLine(draft,f); },
@@ -478,7 +535,7 @@
       await persistNow(item.id);
       announce(`Photo ${draft.files.indexOf(f)+1} of ${draft.files.length} uploaded`);
     } catch (error) {
-      if (!gone(item.id,draft,f)) uploadFailed(item,draft,f,error);
+      if (!gone(item.id,draft,f)) uploadFailed(item,draft,f,error,epoch);
     } finally {
       inFlight--; f.xhr = null;
       /* Removed or discarded while its allocate or PUT was out: whatever the server made of it is retired now (H111 W3). */
@@ -492,14 +549,20 @@
      503 (`media_unavailable`, `workspace_busy`), an edge answer without a body, a connection lost while online, or a failed read
      of the photo on this device. Never a 4xx. Offline, the photo waits for signal; one that failed for want of a connection or a
      read resumes by itself when the browser is back online. An upload the server expired, retired or erased gets a new
-     identity; a PIN request pauses the queue at the gate. */
-  function uploadFailed(item,draft,f,error) {
+     identity; a PIN request pauses the queue at the gate; a refusal of the whole link stops it there. Refusals are keyed on the
+     server's identifier only (U2). */
+  function uploadFailed(item,draft,f,error,epoch) {
     const status = error.status, id = error.identifier, n = draft.files.indexOf(f)+1;
-    if (id === 'pin_required') { f.status = 'queued'; pinGate = true; gate(error); return; }
+    /* Paused, not failed (§1.3): the photo keeps its identity and waits behind the gate; other uploads in flight finish. A refusal
+       for a session that was replaced while this request was out is simply sent again. */
+    if (id === 'pin_required') { f.status = 'queued'; if (epoch === authEpoch) gate(error); return; }
+    /* The link itself is refused (revoked, expired, issuer or contractor no longer active, project archived): no retry and no
+       new identity; the gate shows the server's reason and the page re-reads to confirm it. Unsent work stays on this device. */
+    if (status === 410 && LINK_410.has(id)) { f.status = 'queued'; gate(error); load(); return; }
     const transient = Boolean(error.network || error.readFailed);
     if (transient && navigator.onLine === false) { f.status = 'queued'; f.waitingForSignal = true; return; }
     if (status === 409 && (id === 'revision_conflict' || id === 'workflow_conflict')) { f.status = 'queued'; load(); return; }
-    const renew = (status === 410 && (id === 'media_erased' || id === 'media_reallocate' || /expired|retired/i.test(error.message||''))) || (status === 409 && id === 'media_key_conflict');
+    const renew = (status === 410 && RENEW_410.has(id)) || (status === 409 && id === 'media_key_conflict');
     if (renew && (f.renewals||0) < 2) { f.renewals = (f.renewals||0) + 1; remint(item.id,draft,f,true); persist(item.id); drainRetirements(item.id); return; }
     const retryable = transient || (status === 503 && (id === 'media_unavailable' || id === 'workspace_busy'));
     if (retryable && (f.attempts||0) < RETRY_DELAYS.length) {
@@ -519,7 +582,7 @@
   /* Sends the frozen request once every photo in it is ready (§4.8). Success is shown only on the server's answer. */
   async function maybeSend(id) {
     const draft = drafts.get(id), item = current?.items.find(i=>i.id===id);
-    if (!early() || !draft || !item || !draft.submitRequested || busy || pinGate) return;
+    if (!early() || !draft || !item || !draft.submitRequested || busy || authGate) return;
     if (!draft.files.length || draft.files.some(f=>!f.ready)) return;
     if (!actionable(item) || isStale(item,draft)) { draft.submitRequested = false; render(); return; }
     await sendFinal(item,draft);
@@ -530,7 +593,7 @@
     if (!draft.request) draft.request = {mutation:meta(),expectedRevision:draft.revision,expectedWorkflowRevision:draft.workflowRevision,attemptId:draft.intent,notes:draft.note,evidenceIds:draft.files.map(f=>f.command.id)};
     draft.requestSent = true; draft.submitRequested = false;
     await persistNow(id); render(); announce('Sending your fix for review');
-    let sent = false;
+    let sent = false; const epoch = authEpoch;
     try {
       const result = await request(`${root}/snags/${id}/workflow/submit`,draft.request);
       if (result.status !== 'awaiting_review') throw new Error('Check the latest snag status before taking further action.');
@@ -539,16 +602,23 @@
       announce(notice);
     } catch (error) {
       draft.error = error.message;
-      /* Lost or server-side failures keep the same body: a repeat is answered from the server's receipt. A refusal means nothing
-         was committed: the request is discarded and the next Submit freezes a new one. */
-      if (!error.network && error.status && error.status < 500) { draft.request = null; draft.requestSent = false; }
-      persist(id);
-      if (error.status === 409) { await load(); }
-      else if (error.identifier === 'pin_required') { pinGate = true; gate(error); }
+      if (error.identifier === 'pin_required') {
+        /* Refused before anything ran (§1.2): the frozen request is kept unchanged and sent again by itself after the PIN — the
+           same operation, so a send that did run before the session lapsed is answered from its receipt, never repeated. */
+        draft.error = ''; draft.requestSent = false; draft.submitRequested = true; persist(id);
+        if (epoch === authEpoch) gate(error);
+      } else {
+        /* Lost or server-side failures, and refusals of the whole link, keep the same body: a repeat is answered from the server's
+           receipt. Any other refusal means nothing was committed: the request is discarded and the next Submit freezes a new one. */
+        if (!error.network && error.status && error.status < 500 && !(error.status === 410 && LINK_410.has(error.identifier))) { draft.request = null; draft.requestSent = false; }
+        persist(id);
+        if (error.status === 409) { await load(); }
+        else if (error.status === 410 && LINK_410.has(error.identifier)) { gate(error); load(); }
+      }
     } finally {
       busy = false; if (drafts.get(id)) drafts.get(id).stage = '';
       if (sent) { render(); document.getElementById('snag-'+id)?.focus({preventScroll:true}); load(); }
-      else render();
+      else { render(); if (!authGate && drafts.get(id)?.submitRequested) maybeSend(id); }
       pumpPhotos();
     }
   }
@@ -599,6 +669,7 @@
     draft.preparing=0;persist(id);render();pump();
   });
   content.addEventListener('submit',async event=>{
+    if(event.target.classList?.contains('pin-form')){event.preventDefault();await submitPIN(event.target);return;}
     const id=event.target.dataset.submit;if(!id)return;event.preventDefault();if(busy)return;
     const item=current.items.find(i=>i.id===id),draft=drafts.get(id);
     if(!actionable(item)||draft.revision!==item.revision||draft.workflowRevision!==item.workflowRevision)return;

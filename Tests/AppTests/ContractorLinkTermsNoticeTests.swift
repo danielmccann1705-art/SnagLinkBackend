@@ -64,6 +64,30 @@ final class ContractorLinkTermsNoticeTests: XCTestCase {
         XCTAssertFalse(script.lowercased().contains("uploading continues"))
     }
 
+    /// U2 (FABLE-U1-U2-DESIGN §1.3): the page's markup is written by render() and nowhere else. The PIN gate is page state that
+    /// render() paints, not a separate paint a list repaint can overwrite (H117/H202 S-1: the form existed for zero event-loop
+    /// turns). A 410 renews a photo's identity only for the identifiers that mean "this upload"; the message is never read for it
+    /// (H203 S-2: a revoked link's "expired or was revoked" re-minted every photo). A PIN refusal of the final send keeps the frozen
+    /// request and sends it again by itself after the PIN. The jsdom simulation (work/lane-a/diag/wp4-client-sim3.mjs) drives it.
+    func testThePagePaintsInOnePlaceAndKeysRefusalsOnIdentifiers() async throws {
+        let script = String(decoding: try await served("contractor.js"), as: UTF8.self)
+        let render = try XCTUnwrap(script.range(of: "  function render() {"))
+        let next = try XCTUnwrap(script.range(of: "\n  function ", range: render.upperBound..<script.endIndex))
+        let body = String(script[render.lowerBound..<next.lowerBound])
+        XCTAssertEqual(script.components(separatedBy: "content.innerHTML").count - 1, 2, "the gate and the list: two writes of the page")
+        XCTAssertEqual(body.components(separatedBy: "content.innerHTML").count - 1, 2, "both inside render()")
+        XCTAssertFalse(script.contains("pinGate"))
+        XCTAssertTrue(script.contains("const RENEW_410 = new Set(['upload_retired','upload_expired','media_erased','media_reallocate']);"))
+        XCTAssertTrue(script.contains("const LINK_410 = new Set(['link_unavailable','link_issuer_inactive','contractor_inactive','project_archived']);"))
+        XCTAssertTrue(script.contains("const renew = (status === 410 && RENEW_410.has(id)) || (status === 409 && id === 'media_key_conflict');"))
+        XCTAssertFalse(script.contains("expired|retired"), "a refusal's message never decides a renewal")
+        XCTAssertTrue(script.contains("draft.error = ''; draft.requestSent = false; draft.submitRequested = true; persist(id);"))
+        // The gate tells the contractor what is kept and what happens next, without claiming anything finishes in the background.
+        XCTAssertTrue(script.contains("Your notes and photos are kept on this page"))
+        XCTAssertTrue(script.contains("The rest upload after you enter it."))
+        XCTAssertTrue(script.contains("<input id=\"link-pin\" name=\"pin\" type=\"password\" inputmode=\"numeric\""))
+    }
+
     /// The page names its script by content, so the new bytes reach a contractor's
     /// browser at once instead of an hour-cached older copy.
     func testTheScriptAddressChangesWithItsBytes() async throws {
