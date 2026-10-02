@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync, readdirSync} from 'node:fs';
 import {productionContainerEnvironment, productionAPIOrigin as api, productionPortalOrigin as portal,
   productionAppleWebClientID as appleWeb} from '../src/production-config.mjs';
 import {containerEnvironment} from '../src/config.mjs';
@@ -321,3 +321,17 @@ test('the production template leaves early uploads off (absent) until their own 
   assert.equal(template.vars.CONTRACTOR_EARLY_UPLOAD_WORKSPACES, undefined);
 });
 
+// U1/U2 observability (FABLE-U1-U2-DESIGN §4.3, DECISIONS Q2): the production template carries exactly the sanitised block -
+// container lines on, the platform's URL-bearing invocation log off, tracing written off, no sampling - and the Worker's own
+// code writes no log line, so with invocation logs off only the container's lines flow.
+test('the production template logs the container and never a request URL', () => {
+  const source = readFileSync(new URL('../wrangler.production.jsonc', import.meta.url), 'utf8');
+  const template = JSON.parse(source.replace(/^\s*\/\/.*$/gm, ''));
+  assert.deepEqual(template.observability, {enabled: true, logs: {enabled: true, invocation_logs: false, head_sampling_rate: 1}, traces: {enabled: false}});
+  assert.deepEqual(template.containers[0].observability, {logs: {enabled: true}});
+});
+test('the Worker source logs nothing of its own (no console.*)', () => {
+  for (const name of readdirSync(new URL('../src/', import.meta.url))) {
+    assert.equal(/\bconsole\./.test(readFileSync(new URL('../src/' + name, import.meta.url), 'utf8')), false, name);
+  }
+});

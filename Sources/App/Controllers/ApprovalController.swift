@@ -193,7 +193,7 @@ struct ApprovalController: RouteCollection {
                     client: client
                 )
             } catch {
-                logger.error("Failed to send approval decision email: \(error)")
+                logger.error("Failed to send approval decision email: \(LogSafe.kind(error))")
             }
         }
     }

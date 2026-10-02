@@ -30,7 +30,7 @@ struct ThumbnailService {
         do {
             try imageData.write(to: URL(fileURLWithPath: inputPath))
         } catch {
-            logger.warning("ThumbnailService: Failed to write temp file: \(error)")
+            logger.warning("ThumbnailService: Failed to write temp file: \(LogSafe.kind(error))")
             return nil
         }
 
@@ -58,7 +58,7 @@ struct ThumbnailService {
             try process.run()
             process.waitUntilExit()
         } catch {
-            logger.warning("ThumbnailService: ImageMagick failed to launch: \(error)")
+            logger.warning("ThumbnailService: ImageMagick failed to launch: \(LogSafe.kind(error))")
             return nil
         }
 

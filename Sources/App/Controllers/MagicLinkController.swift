@@ -287,7 +287,7 @@ struct MagicLinkController: RouteCollection {
                         client: req.client
                     )
                 } catch {
-                    req.logger.error("Failed to send magic link email: \(error)")
+                    req.logger.error("Failed to send magic link email: \(LogSafe.kind(error))")
                 }
             }
         }
@@ -538,7 +538,7 @@ struct MagicLinkController: RouteCollection {
         do {
             report = try decoder.decode(SyncedReportJSON.self, from: jsonData)
         } catch {
-            req.logger.error("Failed to parse synced report JSON: \(error)")
+            req.logger.error("Failed to parse synced report JSON: \(LogSafe.kind(error))")
             throw Abort(.internalServerError, reason: "Failed to parse report data")
         }
 
@@ -689,7 +689,7 @@ struct MagicLinkController: RouteCollection {
         do {
             report = try decoder.decode(SyncedReportJSON.self, from: jsonData)
         } catch {
-            req.logger.error("Failed to parse synced report JSON for PDF: \(error)")
+            req.logger.error("Failed to parse synced report JSON for PDF: \(LogSafe.kind(error))")
             throw Abort(.internalServerError, reason: "Failed to parse report data")
         }
 

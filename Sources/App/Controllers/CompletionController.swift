@@ -141,7 +141,7 @@ struct CompletionController: RouteCollection {
                 }
             }
         } catch {
-            req.logger.warning("Failed to resolve snag title from report: \(error)")
+            req.logger.warning("Failed to resolve snag title from report: \(LogSafe.kind(error))")
         }
 
         do {
@@ -159,7 +159,7 @@ struct CompletionController: RouteCollection {
                 )
             }
         } catch {
-            req.logger.error("Failed to send completion notification email: \(error)")
+            req.logger.error("Failed to send completion notification email: \(LogSafe.kind(error))")
         }
 
         // Push notification
@@ -177,7 +177,7 @@ struct CompletionController: RouteCollection {
             )
             req.logger.info("Push notification sent successfully")
         } catch {
-            req.logger.error("APNs send failed: \(error)")
+            req.logger.error("APNs send failed: \(LogSafe.kind(error))")
         }
 
         return .submitted(id: completion.id!)

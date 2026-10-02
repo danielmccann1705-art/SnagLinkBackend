@@ -71,7 +71,7 @@ enum Entrypoint {
         do {
             try await app.execute()
         } catch {
-            app.logger.error("Server execution failed: \(error)")
+            app.logger.error("Server execution failed: \(LogSafe.kind(error))")
             await AccountDeletionFenceProvider.shutdown(app: app)
             await PrivateContentStoreProvider.shutdown(app: app)
             try? await StorageService.shutdown()

@@ -56,7 +56,7 @@ struct APNsService {
         client: Client,
         logger: Logger
     ) async throws -> Bool {
-        logger.info("APNs: Preparing notification for device \(deviceToken.prefix(8))...")
+        logger.info("APNs: Preparing notification")
 
         guard let bundleId = bundleId else {
             logger.warning("APNs: APNS_BUNDLE_ID not configured, skipping push")
@@ -93,7 +93,7 @@ struct APNsService {
         logger.info("APNs: Response status: \(response.status)")
 
         if response.status == .ok {
-            logger.info("APNs: Push sent successfully to \(deviceToken.prefix(8))...")
+            logger.info("APNs: Push sent successfully")
             return true
         }
 
@@ -103,7 +103,7 @@ struct APNsService {
             let reason = errorResponse.reason ?? ""
             logger.info("APNs: Response reason: \(reason)")
             if reason == "BadDeviceToken" || reason == "Unregistered" {
-                logger.warning("APNs: Stale device token \(deviceToken.prefix(8))...: \(reason)")
+                logger.warning("APNs: Stale device token: \(reason)")
                 return false
             }
             logger.error("APNs: Push failed with reason: \(reason) (HTTP \(response.status.code))")
@@ -164,7 +164,7 @@ struct APNsService {
                     staleTokenIds.append(tokenId)
                 }
             } catch {
-                logger.error("APNs: Failed to send push to device \(token.deviceToken.prefix(8))...: \(error)")
+                logger.error("APNs: Failed to send push: \(LogSafe.kind(error))")
             }
         }
 

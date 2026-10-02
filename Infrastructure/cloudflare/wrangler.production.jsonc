@@ -5,7 +5,11 @@
   "compatibility_date": "2026-09-09",
   "workers_dev": false,
   "preview_urls": false,
-  "observability": {"enabled": false},
+  // Sanitised logs (FABLE-U1-U2-DESIGN §4.3, DECISIONS Q2; Dan approves the production change with the U1 package): the
+  // container's own lines (route patterns, statuses, closed `kind:` words) reach the store; the platform's invocation log,
+  // which records each request's URL - and Snaglist's URLs carry capability tokens - is off; tracing is written off so a
+  // future compatibility date cannot turn it on with `enabled`. No sampling: the faults worth finding are rare.
+  "observability": {"enabled": true, "logs": {"enabled": true, "invocation_logs": false, "head_sampling_rate": 1}, "traces": {"enabled": false}},
   // Deliberately no route. Attach api.snaglist.dev only after the concrete
   // production candidate and environment inventory are approved.
   "vars": {
@@ -51,7 +55,7 @@
     "instance_type": "basic",
     "max_instances": 1,
     "constraints": {"regions": ["WEUR"]},
-    "observability": {"logs": {"enabled": false}}
+    "observability": {"logs": {"enabled": true}}
   }],
   "durable_objects": {"bindings": [{"name": "BACKEND", "class_name": "SnaglistProductionBackend"}]},
   "migrations": [{"tag": "v1", "new_sqlite_classes": ["SnaglistProductionBackend"]}]

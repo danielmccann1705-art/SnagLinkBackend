@@ -136,7 +136,7 @@ struct AuthController: RouteCollection {
         } catch {
             // Don't surface delivery internals to the caller; log and still return 204 so the
             // endpoint can't be used to probe which addresses bounce.
-            req.logger.error("Magic sign-in email send failed (email_hash=\(Self.emailHash(email))): \(error)")
+            req.logger.error("Magic sign-in email send failed (email_hash=\(Self.emailHash(email))): \(LogSafe.kind(error))")
         }
 
         return Response(status: .noContent)

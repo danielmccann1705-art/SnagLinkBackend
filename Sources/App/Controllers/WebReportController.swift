@@ -149,7 +149,7 @@ struct WebReportController: RouteCollection {
         do {
             report = try decoder.decode(SyncedReportJSON.self, from: jsonData)
         } catch {
-            req.logger.error("Failed to parse synced report JSON: \(error)")
+            req.logger.error("Failed to parse synced report JSON: \(LogSafe.kind(error))")
             return htmlResponse(WebReportRenderer.renderError(type: .notSynced))
         }
 

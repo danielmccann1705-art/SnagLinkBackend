@@ -66,18 +66,19 @@ export const candidateDatabase = 'snaglist_platform_test_0910222943_fc44';
 // What remains is bounded and deliberate. `PrivateRequestLoggingMiddleware` logs the
 // registered route pattern — parameter names, never their values — with a method and
 // a status. B2.1's `kind:` words and the boot refusals are closed vocabularies that
-// name a variable and never its contents. `APNsService` still logs an eight-character
-// device-token prefix in four places; staging cannot reach it, because this adapter
-// refuses `APNS_PRIVATE_KEY` outright, but production would, and it is the same class
-// of partial credential as the two magic-link lines above. Twelve sites interpolate a
-// caught `\(error)` — email, APNs, JSON decoding, thumbnailing and boot — which is not
-// a known leak but is an unbounded surface, since a library's error description is
-// not ours to predict. Neither is a reason to leave this switch on longer than the
-// gate needs: set it back to off — by removing the variable — once that gate has run.
+// name a variable and never its contents. Two wider surfaces were closed in U2
+// (FABLE-U1-U2-DESIGN §4): `APNsService` no longer logs an eight-character device-token
+// prefix, and the twelve sites that interpolated a caught `\(error)` — email, APNs, JSON
+// decoding, thumbnailing and boot — log its kind instead (`LogSafe.kind`), because a
+// library's error description is not ours to predict (`LogHygieneTests` holds both).
+// None of this is a reason to leave the switch on longer than the gate needs: set it
+// back to off — by removing the variable — once that gate has run.
 //
-// Production and the recovery Worker are not this switch's business. They keep
-// logging off unconditionally in their own configurations, which this file does not
-// generate and must not be made to.
+// Production and the recovery Worker are not this switch's business, and this file does
+// not generate their configurations and must not be made to. The recovery Worker keeps
+// logging off. Production's template carries its own fixed, sanitised block - the same
+// narrowing as `on` here, invocation logs off (wrangler.production.jsonc, held by
+// test/production.test.mjs; FABLE-U1-U2-DESIGN §4.3) - and moves only with Dan's approval.
 export const loggingVariable = 'SNAGLIST_CANDIDATE_LOGGING';
 
 // Off unless the variable is exactly 'on'. A value that is neither 'on' nor 'off' is

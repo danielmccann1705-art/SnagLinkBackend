@@ -75,10 +75,7 @@ struct PrivateRequestLoggingMiddleware: AsyncMiddleware {
 enum DiagnosticFailureRecord {
     static func cause(of error: (any Error)?) -> String {
         guard let error else { return "response" }
-        if let psql = error as? PSQLError { return "PSQLError(" + (psql.serverInfo?[.sqlState] ?? "\(psql.code)") + ")" }
-        if error is CancellationError { return "CancellationError" }
-        if let abort = error as? AbortError { return "Abort(\(abort.status.code))" }
-        return String(reflecting: type(of: error))
+        return LogSafe.kind(error)
     }
     static func record(request: Request, route: String, status: Int, error: (any Error)?, durationMs: Int) {
         let identifier = status < 500 ? "recovered" : (error as? Abort)?.identifier ?? ((error as? PSQLError)?.serverInfo?[.sqlState] == "55P03" ? "workspace_busy" : "request_failed")
