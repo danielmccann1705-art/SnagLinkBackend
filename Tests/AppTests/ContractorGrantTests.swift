@@ -956,20 +956,37 @@ final class ContractorGrantTests: XCTestCase {
         XCTAssertEqual(attempts, 1)
     }
 
-    /// WP4: the early-upload switch is on only where RUNTIME_DIAGNOSTICS is enabled (staging; production refuses it),
-    /// and each draft names the completion intention it was allocated for (Fable §8.5).
-    func testTheEarlyUploadSwitchIsStagingOnlyAndDraftsNameTheirIntent() async throws {
-        unsetenv(RuntimeDiagnostics.variable)
-        let (_, _, snag, _, token, _) = try await fixture()
+    /// U2 (FABLE-U1-U2-DESIGN §2): the early-upload switch is the Worker's forwarded header alone - `enabled`, or a canary list
+    /// naming this project's workspace - and no longer RUNTIME_DIAGNOSTICS; anything else is off. Each draft names the completion
+    /// intention it was allocated for (Fable §8.5).
+    func testTheEarlyUploadSwitchIsTheWorkerHeaderAloneAndDraftsNameTheirIntent() async throws {
+        let (_, project, snag, _, token, _) = try await fixture()
         let intent = UUID()
         _ = try await contractorAfter(token, snag, intent: intent)
-        let off = try await call(.GET, "api/v2/contractor/\(token)", nil, contractorHeader: false)
-        let offPage = try off.content.decode(ContractorPage.self)
-        XCTAssertFalse(offPage.earlyUpload, "off unless RUNTIME_DIAGNOSTICS is enabled")
-        XCTAssertEqual(offPage.items.first?.drafts.first?.intentId, intent)
-        setenv(RuntimeDiagnostics.variable, "enabled", 1); defer { unsetenv(RuntimeDiagnostics.variable) }
-        let on = try await call(.GET, "api/v2/contractor/\(token)", nil, contractorHeader: false)
-        XCTAssertTrue(try on.content.decode(ContractorPage.self).earlyUpload)
+        defer { unsetenv(RuntimeDiagnostics.variable) }
+        let workspace = project.workspaceId.uuidString
+        let cases: [(String?, Bool, Bool, String)] = [
+            (nil, false, false, "absent: off"),
+            (nil, true, false, "RUNTIME_DIAGNOSTICS no longer turns it on"),
+            ("enabled", false, true, "the Worker's switch on"),
+            ("enabled", true, true, "independent of RUNTIME_DIAGNOSTICS"),
+            (UUID().uuidString + ", " + workspace, false, true, "a canary list naming this workspace"),
+            (workspace.lowercased(), false, true, "ids in either case"),
+            (UUID().uuidString, false, false, "a canary list naming another workspace"),
+            ("disabled", false, false, "disabled"), ("ENABLED", false, false, "exact literal"), ("true", false, false, "exact literal"),
+            ("", false, false, "empty"), (workspace + ",not-a-uuid", false, false, "a malformed list"), ("enabled," + workspace, false, false, "a malformed list"),
+        ]
+        for (header, diagnostics, expected, label) in cases {
+            if diagnostics { setenv(RuntimeDiagnostics.variable, "enabled", 1) } else { unsetenv(RuntimeDiagnostics.variable) }
+            var captured: XCTHTTPResponse!
+            try await app.test(.GET, "api/v2/contractor/\(token)", beforeRequest: { req in
+                if let header { req.headers.replaceOrAdd(name: EarlyUploadSwitch.header, value: header) }
+            }, afterResponse: { response async in captured = response })
+            XCTAssertEqual(captured.status, .ok, captured.body.string)
+            let page = try captured.content.decode(ContractorPage.self)
+            XCTAssertEqual(page.earlyUpload, expected, label)
+            XCTAssertEqual(page.items.first?.drafts.first?.intentId, intent, label)
+        }
     }
 
     func testPINProtectsReadWorkflowAllocateUploadAndDownloadAndLocksGuesses() async throws {

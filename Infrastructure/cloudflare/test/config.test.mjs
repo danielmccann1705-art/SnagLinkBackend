@@ -327,3 +327,14 @@ test('the staging Durable Object name is "staging" unless another staging name i
   // The container's environment never carries it: it names the object, not a setting of the app.
   assert.equal(containerEnvironment({...sample(), BACKEND_INSTANCE: 'staging-lhr'}).BACKEND_INSTANCE, undefined);
 });
+
+test('the staging early-upload switch is validated like the others and never reaches the container', () => {
+  for (const value of [undefined, 'disabled', 'enabled']) {
+    const env = value === undefined ? sample() : {...sample(), CONTRACTOR_EARLY_UPLOAD: value};
+    assert.equal(containerEnvironment(env).CONTRACTOR_EARLY_UPLOAD, undefined);
+  }
+  for (const value of ['on', 'Enabled', '', 'true', 'enabled ']) {
+    assert.throws(() => containerEnvironment({...sample(), CONTRACTOR_EARLY_UPLOAD: value}));
+  }
+  assert.throws(() => containerEnvironment({...sample(), CONTRACTOR_EARLY_UPLOAD_WORKSPACES: '11111111-1111-4111-8111-111111111111'}));
+});

@@ -1,8 +1,13 @@
+import {earlyUploadSetting} from './early-upload.mjs';
+
 // This adapter is deliberately staging-only. Production gets a separately reviewed
 // configuration after fresh-database compatibility and end-to-end acceptance.
 /** @returns {Record<string, string>} */
 export function containerEnvironment(env) {
   if (env.STAGING_ENABLED !== 'true') throw new Error('Staging is not enabled');
+  // The early-upload switch is checked here so a bad value refuses the Worker like any other; it is forwarded per request
+  // (early-upload.mjs), never into the container's environment.
+  earlyUploadSetting(env);
   for (const key of ['DATABASE_URL', 'STAGING_DATABASE_HOST', 'JWT_SECRET',
     'R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_PUBLIC_URL']) {
     if (typeof env[key] !== 'string' || !env[key].trim()) throw new Error(`Missing ${key}`);

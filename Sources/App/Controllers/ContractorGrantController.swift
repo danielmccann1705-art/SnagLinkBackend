@@ -57,7 +57,8 @@ struct ContractorGrantController: RouteCollection {
         guard (1...1000).contains(page) else { throw Abort(.badRequest) }
         return try await req.db.transaction { db in
             let (grant, project) = try await LinkGrantService.load(token, req: req, shared: true, on: db)
-            return try await LinkGrantService.page(grant, project: project, page: page, on: db)
+            // U2: the early-upload product switch is the Worker's forwarded decision alone (EarlyUploadSwitch).
+            return try await LinkGrantService.page(grant, project: project, page: page, earlyUpload: EarlyUploadSwitch.enabled(req, workspaceID: project.workspaceId), on: db)
         }
     }
     @Sendable func verifyPIN(req: Request) async throws -> Response {

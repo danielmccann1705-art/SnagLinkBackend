@@ -1,6 +1,7 @@
 import { Container } from '@cloudflare/containers';
 import { backendInstance, containerEnvironment } from './config.mjs';
 import { backendRequest, privateResponse } from './proxy.mjs';
+import { earlyUploadSetting } from './early-upload.mjs';
 import { legacyCandidateResponse } from './candidate-compatibility.mjs';
 import { apiSecurityResponse } from './security-headers.mjs';
 
@@ -37,7 +38,7 @@ async function respond(request: Request, env: BackendEnv): Promise<Response> {
   if (compatibility) return privateResponse(compatibility);
   // One stable instance, never one instance per link or per customer.
   const backend = env.BACKEND.getByName(instance);
-  return privateResponse(await backend.fetch(backendRequest(request)));
+  return privateResponse(await backend.fetch(backendRequest(request, earlyUploadSetting(env))));
 }
 
 export default {

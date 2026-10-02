@@ -6,6 +6,7 @@ import {productionContainerEnvironment, productionAPIOrigin as api, productionPo
 import {containerEnvironment} from '../src/config.mjs';
 import {productionResponse, productionMaintenance} from '../src/production-backend.mjs';
 import {productionPortalResponse, portalResponse} from '../src/portal-proxy.mjs';
+import {earlyUploadSetting, earlyUploadHeader} from '../src/early-upload.mjs';
 
 // Synthetic credentials only. These fixtures have no associated provider account.
 const key = char => Buffer.alloc(32, char).toString('base64');
@@ -277,3 +278,46 @@ test('production takes an optional database pool size and never the staging diag
     assert.throws(() => productionContainerEnvironment(configured({RUNTIME_DIAGNOSTICS: value})), /staging-only/);
   }
 });
+
+// U2 (FABLE-U1-U2-DESIGN §2): the early-upload product switch. Absent is disabled; the two states are exact literals; a canary
+// list narrows only an enabled switch; anything else refuses the Worker ("awaiting configuration") like the other switches.
+const ws = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
+test('the early-upload switch is disabled when absent, exact when set, narrowed only when enabled, and refused otherwise', () => {
+  assert.equal(earlyUploadSetting(configured()), null);
+  assert.equal(earlyUploadSetting(configured({CONTRACTOR_EARLY_UPLOAD: 'disabled'})), null);
+  assert.equal(earlyUploadSetting(configured({CONTRACTOR_EARLY_UPLOAD: 'enabled'})), 'enabled');
+  assert.equal(earlyUploadSetting(configured({CONTRACTOR_EARLY_UPLOAD: 'enabled', CONTRACTOR_EARLY_UPLOAD_WORKSPACES: ws.join(', ')})), ws.join(','));
+  for (const override of [{CONTRACTOR_EARLY_UPLOAD: 'on'}, {CONTRACTOR_EARLY_UPLOAD: 'true'}, {CONTRACTOR_EARLY_UPLOAD: ''},
+    {CONTRACTOR_EARLY_UPLOAD: 'Enabled'}, {CONTRACTOR_EARLY_UPLOAD_WORKSPACES: ws[0]},
+    {CONTRACTOR_EARLY_UPLOAD: 'disabled', CONTRACTOR_EARLY_UPLOAD_WORKSPACES: ws[0]},
+    {CONTRACTOR_EARLY_UPLOAD: 'enabled', CONTRACTOR_EARLY_UPLOAD_WORKSPACES: ''},
+    {CONTRACTOR_EARLY_UPLOAD: 'enabled', CONTRACTOR_EARLY_UPLOAD_WORKSPACES: 'not-a-uuid'},
+    {CONTRACTOR_EARLY_UPLOAD: 'enabled', CONTRACTOR_EARLY_UPLOAD_WORKSPACES: ws[0] + ',' + ws[0].toUpperCase()}]) {
+    assert.throws(() => earlyUploadSetting(configured(override)), JSON.stringify(override));
+    assert.throws(() => productionContainerEnvironment(configured(override)), JSON.stringify(override));
+  }
+  assert.equal(productionContainerEnvironment(configured({CONTRACTOR_EARLY_UPLOAD: 'enabled'})).CONTRACTOR_EARLY_UPLOAD, undefined,
+    'forwarded per request, never into the container environment');
+});
+
+test('production forwards the early-upload header only from its own variable and strips one a caller sent', async () => {
+  const seen = [];
+  const backend = {getByName(name) { assert.equal(name, 'production');
+    return {async fetch(req) { seen.push(req.headers.get(earlyUploadHeader)); return new Response('{}', {headers: {'Content-Type': 'application/json'}}); }}; }};
+  const spoofed = () => new Request(api + '/api/v2/contractor/c2_synthetic?page=1', {headers: {[earlyUploadHeader]: 'enabled'}});
+  await productionResponse(spoofed(), {...configured(), BACKEND: backend});
+  await productionResponse(spoofed(), {...configured({CONTRACTOR_EARLY_UPLOAD: 'disabled'}), BACKEND: backend});
+  await productionResponse(spoofed(), {...configured({CONTRACTOR_EARLY_UPLOAD: 'enabled'}), BACKEND: backend});
+  await productionResponse(spoofed(), {...configured({CONTRACTOR_EARLY_UPLOAD: 'enabled', CONTRACTOR_EARLY_UPLOAD_WORKSPACES: ws[1]}), BACKEND: backend});
+  assert.deepEqual(seen, [null, null, 'enabled', ws[1]]);
+  const refused = await productionResponse(spoofed(), {...configured({CONTRACTOR_EARLY_UPLOAD: 'yes'}), BACKEND: backend});
+  assert.equal(refused.status, 503); assert.equal(seen.length, 4, 'a bad value never reaches the container');
+});
+
+test('the production template leaves early uploads off (absent) until their own activation', () => {
+  const source = readFileSync(new URL('../wrangler.production.jsonc', import.meta.url), 'utf8');
+  const template = JSON.parse(source.replace(/^\s*\/\/.*$/gm, ''));
+  assert.equal(template.vars.CONTRACTOR_EARLY_UPLOAD, undefined);
+  assert.equal(template.vars.CONTRACTOR_EARLY_UPLOAD_WORKSPACES, undefined);
+});
+

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {candidateConfigs,candidateLogging,candidateLogProbe,candidateLogStream,candidateOrigin,
-  logProbeVariable,loggingVariable,logStreamVariable,managerOrigin} from '../scripts/candidate-config.mjs';
+  logProbeVariable,loggingVariable,logStreamVariable,managerOrigin,earlyUploadVariable} from '../scripts/candidate-config.mjs';
 import {containerEnvironment} from '../src/config.mjs';
 
 // `environment` is supplied everywhere here so an ambient logging variable cannot
@@ -96,8 +96,10 @@ test('candidate accepts only its pinned synthetic DB, origins and independent bu
 // Every name src/config.mjs mentions must land in exactly one of the four buckets
 // below, so a new one cannot pass unnoticed as "something else".
 // The backend Worker also reads its browser security headers mode (F15).
+// And the early-upload product switch it forwards per request (U2, src/early-upload.mjs).
 const adapterSource=readFileSync(new URL('../src/config.mjs',import.meta.url),'utf8')+
-  readFileSync(new URL('../src/security-headers.mjs',import.meta.url),'utf8');
+  readFileSync(new URL('../src/security-headers.mjs',import.meta.url),'utf8')+
+  readFileSync(new URL('../src/early-upload.mjs',import.meta.url),'utf8');
 const adapterReads=new Set([
   ...adapterSource.matchAll(/\benv\.([A-Z][A-Z0-9_]*)/g),
   // Names reached through env[key] appear only as string literals in the arrays the
@@ -136,7 +138,9 @@ const notCarried=new Map([
   // Lane 2 (28 Sep). Which Durable Object (and so which container placement) the staging Worker
   // addresses is decided in the reviewed deploy configuration, like the pool size; a configuration
   // generated without it addresses the original "staging" object, which is the previous behaviour.
-  ['BACKEND_INSTANCE','the staging Durable Object name is set in the reviewed deploy config; absent keeps "staging"']
+  ['BACKEND_INSTANCE','the staging Durable Object name is set in the reviewed deploy config; absent keeps "staging"'],
+  // U2: a canary narrowing of the early-upload switch is a per-activation decision, never generated.
+  ['CONTRACTOR_EARLY_UPLOAD_WORKSPACES','a canary list is decided per activation; the generator never carries it']
 ]);
 
 test('the generated variable map is exactly the non-secret configuration the adapter reads',()=>{
@@ -307,4 +311,20 @@ test('a probe marker cannot carry a secret into a log line',()=>{
     'c25hZ2xpc3Qtc3ludGhldGlj','Bearer-abc123','sid=0123456789abcdef','A'.repeat(42)+'=']) {
     assert.throws(()=>candidateLogProbe({[logProbeVariable]:marker}));
   }
+});
+
+// U2 (FABLE-U1-U2-DESIGN §2): the early-upload product switch. The candidate is where early uploads are measured, so it is
+// generated enabled unless a generation asks otherwise; both states are written down; anything else is refused. The adapter
+// validates it and forwards it per request; it never reaches the container's environment.
+test('the early-upload switch is generated in both states, enabled for the candidate unless asked, and refuses anything else',()=>{
+  assert.equal(configs().backend.vars.CONTRACTOR_EARLY_UPLOAD,'enabled');
+  assert.equal(configs({[earlyUploadVariable]:'enabled'}).backend.vars.CONTRACTOR_EARLY_UPLOAD,'enabled');
+  assert.equal(configs({[earlyUploadVariable]:'disabled'}).backend.vars.CONTRACTOR_EARLY_UPLOAD,'disabled');
+  for (const value of ['on','off','true','Enabled','enabled ']) assert.throws(()=>configs({[earlyUploadVariable]:value}),value);
+  const on=configs().backend, off=configs({[earlyUploadVariable]:'disabled'}).backend;
+  assert.deepEqual({...on,vars:null},{...off,vars:null});
+  assert.deepEqual({...on.vars,CONTRACTOR_EARLY_UPLOAD:null},{...off.vars,CONTRACTOR_EARLY_UPLOAD:null});
+  assert.equal(containerEnvironment(enabled()).CONTRACTOR_EARLY_UPLOAD,undefined);
+  assert.equal(containerEnvironment({...enabled(),CONTRACTOR_EARLY_UPLOAD:'disabled'}).CONTRACTOR_EARLY_UPLOAD,undefined);
+  assert.throws(()=>containerEnvironment({...enabled(),CONTRACTOR_EARLY_UPLOAD:'on'}));
 });

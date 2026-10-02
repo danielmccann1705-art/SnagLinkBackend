@@ -142,6 +142,21 @@ export function candidateLogProbe(environment = process.env) {
   return setting;
 }
 
+export const earlyUploadVariable = 'SNAGLIST_CANDIDATE_EARLY_UPLOAD';
+
+// U2 (FABLE-U1-U2-DESIGN §2): the early-upload product switch, CONTRACTOR_EARLY_UPLOAD (src/early-upload.mjs). The staging
+// candidate is where it is measured, so it is generated `enabled` unless a generation asks for `disabled`; both states are
+// written down rather than left to a default. Anything else is refused, like the switches above. Production does not use
+// this generator; there the switch is absent (disabled) until its own activation.
+export function candidateEarlyUpload(environment = process.env) {
+  const setting = environment[earlyUploadVariable];
+  if (setting === undefined || setting === '') return 'enabled';
+  if (setting !== 'enabled' && setting !== 'disabled') {
+    throw new Error(`${earlyUploadVariable} accepts only 'enabled' or 'disabled'; it is enabled when unset`);
+  }
+  return setting;
+}
+
 export const securityHeadersVariable = 'SNAGLIST_BROWSER_SECURITY_HEADERS';
 
 // Browser security headers (F15, src/security-headers.mjs) for both staging Workers.
@@ -175,6 +190,7 @@ export function candidateConfigs({imageDigest, assetsDirectory, environment = pr
   const logStream = candidateLogStream(environment);
   const logProbe = candidateLogProbe(environment);
   const securityHeaders = candidateSecurityHeaders(environment);
+  const earlyUpload = candidateEarlyUpload(environment);
   return {
     backend: {
       $schema:join(infrastructure,'node_modules/wrangler/config-schema.json'),
@@ -227,6 +243,8 @@ export function candidateConfigs({imageDigest, assetsDirectory, environment = pr
         LOG_STREAM:logStream,
         // Browser security headers mode, read by src/security-headers.mjs (F15).
         BROWSER_SECURITY_HEADERS:securityHeaders,
+        // The early-upload product switch (U2, src/early-upload.mjs), forwarded per request; see candidateEarlyUpload.
+        CONTRACTOR_EARLY_UPLOAD:earlyUpload,
         // Present only for a deliberate one-run diagnostic. Absent is the normal
         // state, and a configuration generated without it is one with the probe off.
         ...(logProbe ? {LOG_STREAM_PROBE:logProbe} : {})},
@@ -264,6 +282,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const logStream = candidateLogStream();
   const logProbe = candidateLogProbe();
   console.log('Prepared disabled candidate configurations. No deployment or resource change performed.');
+  console.log(`Early uploads (CONTRACTOR_EARLY_UPLOAD): ${candidateEarlyUpload()} (${earlyUploadVariable}${process.env[earlyUploadVariable] ? '=' + process.env[earlyUploadVariable] : ' unset'}).`);
   console.log(`Browser security headers: ${candidateSecurityHeaders()} (${securityHeadersVariable}${process.env[securityHeadersVariable] ? '=' + process.env[securityHeadersVariable] : ' unset'}).`);
   console.log(`Container log stream: ${logStream} (${logStreamVariable}${logStream === 'stdout' ? ' unset' : '=' + logStream}).`);
   console.log(logProbe

@@ -1,5 +1,6 @@
 import {productionContainerEnvironment, productionAPIOrigin, productionPortalOrigin} from './production-config.mjs';
 import {backendRequest, privateResponse} from './proxy.mjs';
+import {earlyUploadSetting} from './early-upload.mjs';
 import {apiSecurityResponse} from './security-headers.mjs';
 
 export async function productionResponse(request, env) {
@@ -30,7 +31,7 @@ async function productionRoute(request, env) {
       {status: 503, headers: {'Content-Type': 'application/json'}}));
   }
   try {
-    return privateResponse(await env.BACKEND.getByName('production').fetch(backendRequest(request)));
+    return privateResponse(await env.BACKEND.getByName('production').fetch(backendRequest(request, earlyUploadSetting(env))));
   } catch {
     return privateResponse(new Response('Snaglist could not complete the request. Please retry.', {status: 503}));
   }

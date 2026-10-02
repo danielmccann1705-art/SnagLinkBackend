@@ -38,3 +38,13 @@ test('redirects and secure session cookies survive without caching private links
   assert.equal(response.headers.get('Cache-Control'),'no-store');
   assert.equal(response.headers.get('Referrer-Policy'),'no-referrer');
 });
+
+// U2: the early-upload switch reaches the container only as the Worker's own decision.
+test('the early-upload header is set only from the Worker\'s decision and never from the caller', () => {
+  const spoofed = () => new Request('https://stage.example/api/v2/contractor/c2_synthetic?page=1', {headers:{'X-Snaglist-Early-Upload':'enabled'}});
+  assert.equal(backendRequest(spoofed()).headers.get('X-Snaglist-Early-Upload'), null);
+  assert.equal(backendRequest(spoofed(), null).headers.get('X-Snaglist-Early-Upload'), null);
+  assert.equal(backendRequest(spoofed(), 'enabled').headers.get('X-Snaglist-Early-Upload'), 'enabled');
+  const ws = '11111111-1111-4111-8111-111111111111';
+  assert.equal(backendRequest(spoofed(), ws).headers.get('X-Snaglist-Early-Upload'), ws);
+});

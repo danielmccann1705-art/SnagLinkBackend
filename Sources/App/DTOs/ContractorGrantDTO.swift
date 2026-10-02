@@ -47,9 +47,9 @@ struct ContractorPage: Content {
     let projectName: String; let projectAddress: String?; let contractorName: String?
     let mode: String; let expiresAt: Date; let issuedAt: Date; let items: [ContractorItem]
     let total: Int; let page: Int; let hasMore: Bool
-    /// WP4 (FABLE-DESIGN-A-AMENDMENT §4): the staging-only switch for uploading photos as they are added. True only where
-    /// `RUNTIME_DIAGNOSTICS=enabled` (the staging adapter maps it; the production adapter refuses it), so no real user's
-    /// page turns it on. An older page ignores the field; a page without it uploads at Submit as before.
+    /// WP4 (FABLE-DESIGN-A-AMENDMENT §4): photos upload as they are added. U2: true only when the Worker forwards its
+    /// `CONTRACTOR_EARLY_UPLOAD` decision for this project's workspace (`EarlyUploadSwitch`); absent — every deployment that
+    /// has not activated it — is false. An older page ignores the field; a page without it uploads at Submit as before.
     let earlyUpload: Bool
 }
 struct ContractorWorkflowResult: Content {

@@ -239,7 +239,7 @@ enum LinkGrantService {
 }
 
 extension LinkGrantService {
-    static func page(_ grant: SQLRow, project: Project, page: Int, limit: Int = 25, on db: Database) async throws -> ContractorPage {
+    static func page(_ grant: SQLRow, project: Project, page: Int, limit: Int = 25, earlyUpload: Bool = false, on db: Database) async throws -> ContractorPage {
         let grantID = try grant.decode(column: "id", as: UUID.self), sql = try VerifiedIdentityService.sql(db)
         let current = try await response(grant, on: db)
         let ids = Array(current.activeSnagIds.dropFirst((page - 1) * limit).prefix(limit))
@@ -293,7 +293,7 @@ extension LinkGrantService {
         let contractor: String?
         if let id = current.contractorId { contractor = try await Contractor.find(id, on: db)?.companyName } else { contractor = nil }
         return .init(projectName: project.name, projectAddress: project.address, contractorName: contractor, mode: current.mode, expiresAt: current.expiresAt, issuedAt: current.activatedAt ?? current.createdAt, items: result, total: current.activeSnagIds.count, page: page, hasMore: page * limit < current.activeSnagIds.count,
-                     earlyUpload: Environment.get(RuntimeDiagnostics.variable) == "enabled")
+                     earlyUpload: earlyUpload)
     }
     static func visibleMedia(_ id: UUID, snagID: UUID, grant: SQLRow, project: Project, on db: Database) async throws -> SQLRow {
         _ = try await item(snagID, grant: grant, project: project, write: false, on: db)

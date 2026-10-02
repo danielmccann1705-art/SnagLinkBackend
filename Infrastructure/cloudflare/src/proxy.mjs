@@ -1,5 +1,12 @@
-export function backendRequest(request) {
+import {earlyUploadHeader} from './early-upload.mjs';
+
+// `earlyUpload` is the Worker's own early-upload decision (early-upload.mjs): the header is always removed from what the
+// caller sent and set only from it, so no request can turn the switch on for itself.
+/** @param {Request} request @param {string | null} [earlyUpload] @returns {Request} */
+export function backendRequest(request, earlyUpload = null) {
   const headers = new Headers(request.headers);
+  headers.delete(earlyUploadHeader);
+  if (earlyUpload) headers.set(earlyUploadHeader, earlyUpload);
   // Vapor reads X-Forwarded-For first. Replace caller-supplied proxy headers
   // with the address Cloudflare supplies to this Worker.
   const clientIP = headers.get('CF-Connecting-IP');

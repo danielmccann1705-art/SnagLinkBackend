@@ -1,3 +1,5 @@
+import {earlyUploadSetting} from './early-upload.mjs';
+
 // Separate from the pinned synthetic staging adapter. This is a candidate only:
 // the checked-in deployment is disabled and contains no database or provider keys.
 export const productionAPIOrigin = 'https://api.snaglist.dev';
@@ -130,6 +132,9 @@ export function productionContainerEnvironment(env) {
   if (env.RUNTIME_DIAGNOSTICS !== undefined) {
     throw new Error('Runtime diagnostics are staging-only');
   }
+  // U2: the early-upload product switch (early-upload.mjs), absent = disabled. Checked here so a bad value refuses the Worker;
+  // forwarded per request by productionRoute, never into the container's environment.
+  earlyUploadSetting(env);
   const pushKeys = ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY', 'APNS_BUNDLE_ID', 'APNS_ENVIRONMENT'];
   if (pushKeys.some(key => env[key] !== undefined)) {
     for (const key of pushKeys) required(key);
