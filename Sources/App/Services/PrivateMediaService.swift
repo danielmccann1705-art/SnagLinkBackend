@@ -55,13 +55,16 @@ enum PrivateMediaService {
     static func submittable(_ snag: Snag) throws {
         guard ["open", "in_progress", "changes_requested"].contains(snag.status) else { throw Abort(.conflict, reason: "Review the pending submission or reopen this snag before adding completion evidence") }
     }
+    /// The two 410s carry identifiers (U2): a Contractor page renews a photo's identity on `upload_retired` /
+    /// `upload_expired` (and `media_erased` / `media_reallocate`) and never by reading the message, which a revoked
+    /// link's refusal ("expired or was revoked") would otherwise match. The reasons are unchanged for older pages.
     static func requireUploader(_ row: SQLRow, actorID: UUID?, grantID: UUID? = nil) throws {
         guard (actorID == nil) != (grantID == nil),
               try row.decode(column: "creator_id", as: UUID?.self) == actorID,
               try row.decode(column: "creator_grant_id", as: UUID?.self) == grantID else { throw Abort(.notFound, reason: "Upload unavailable") }
-        guard try row.decode(column: "state", as: String.self) != "retired" else { throw Abort(.gone, reason: "This upload was retired") }
+        guard try row.decode(column: "state", as: String.self) != "retired" else { throw Abort(.gone, reason: "This upload was retired", identifier: "upload_retired") }
         if try row.decode(column: "attached_at", as: Date?.self) == nil,
-           try row.decode(column: "expires_at", as: Date.self) <= Date() { throw Abort(.gone, reason: "This unattached upload expired. Allocate a new photo") }
+           try row.decode(column: "expires_at", as: Date.self) <= Date() { throw Abort(.gone, reason: "This unattached upload expired. Allocate a new photo", identifier: "upload_expired") }
     }
     static func requireVisible(_ row: SQLRow, actorID: UUID) throws {
         guard try row.decode(column: "state", as: String.self) == "ready" else { throw Abort(.notFound, reason: "Photo is not ready") }

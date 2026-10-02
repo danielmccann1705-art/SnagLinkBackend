@@ -120,7 +120,7 @@ enum LinkGrantService {
         guard let found = try await ServerTiming.measure(req, "lock", { try await sql.raw(lookup).first() }) else { throw Abort(.notFound, reason: "Contractor link unavailable") }
         let grantID = try found.decode(column: "id", as: UUID.self), workspaceID = try found.decode(column: "workspace_id", as: UUID.self)
         let row = try await self.row(grantID, projectID: found.decode(column: "project_id", as: UUID.self), on: db)
-        guard try row.decode(column: "state", as: String.self) == "active", try row.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "This Contractor link expired or was revoked. Ask the project manager for a new link") }
+        guard try row.decode(column: "state", as: String.self) == "active", try row.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "This Contractor link expired or was revoked. Ask the project manager for a new link", identifier: "link_unavailable") }
         let projectID = try row.decode(column: "project_id", as: UUID.self), creatorID = try row.decode(column: "creator_id", as: UUID.self)
         let contractorID = try row.decode(column: "contractor_id", as: UUID?.self)
         let pinRequired = try verifySession && row.decode(column: "pin_hash", as: String?.self) != nil
@@ -150,7 +150,7 @@ enum LinkGrantService {
         }
         try PlatformMutationService.requireManaged(project)
         if contractorID != nil {
-            guard let archived = try facts.decode(column: "link_contractor_archived", as: Bool?.self), !archived else { throw Abort(.gone, reason: "This contractor assignment is no longer active") }
+            guard let archived = try facts.decode(column: "link_contractor_archived", as: Bool?.self), !archived else { throw Abort(.gone, reason: "This contractor assignment is no longer active", identifier: "contractor_inactive") }
         }
         if pinRequired {
             guard sessionHash != nil, try facts.decode(column: "link_session_live", as: Bool.self) else { throw Abort(.forbidden, reason: "Enter the PIN provided by the project manager", identifier: "pin_required") }
@@ -180,7 +180,7 @@ enum LinkGrantService {
               let found = try await VerifiedIdentityService.sql(db).raw("SELECT id, project_id, workspace_id FROM link_grants WHERE token_hash = \(bind: SHA256Hasher.hash(token: token))").first() else { throw Abort(.notFound, reason: "Contractor link unavailable") }
         try await WorkspaceAccessService.lock(found.decode(column: "workspace_id", as: UUID.self), on: db)
         let row = try await self.row(found.decode(column: "id", as: UUID.self), projectID: found.decode(column: "project_id", as: UUID.self), on: db)
-        guard try row.decode(column: "state", as: String.self) == "active", try row.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "This Contractor link expired or was revoked. Ask the project manager for a new link") }
+        guard try row.decode(column: "state", as: String.self) == "active", try row.decode(column: "expires_at", as: Date.self) > Date() else { throw Abort(.gone, reason: "This Contractor link expired or was revoked. Ask the project manager for a new link", identifier: "link_unavailable") }
         return try await afterGrantRow(row, req: req, verifySession: verifySession, on: db)
     }
     /// The original checks after the grant row (lock held): issuer access, managed project, contractor, PIN session.
@@ -197,7 +197,7 @@ enum LinkGrantService {
         }
         try PlatformMutationService.requireManaged(project)
         if let contractorID = try row.decode(column: "contractor_id", as: UUID?.self) {
-            guard let contractor = try await Contractor.find(contractorID, on: db), !contractor.isArchived else { throw Abort(.gone, reason: "This contractor assignment is no longer active") }
+            guard let contractor = try await Contractor.find(contractorID, on: db), !contractor.isArchived else { throw Abort(.gone, reason: "This contractor assignment is no longer active", identifier: "contractor_inactive") }
         }
         if verifySession, try row.decode(column: "pin_hash", as: String?.self) != nil {
             let id = try row.decode(column: "id", as: UUID.self)

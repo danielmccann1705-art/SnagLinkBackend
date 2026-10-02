@@ -187,7 +187,7 @@ final class ContractorGrantTests: XCTestCase {
             if let identifier { XCTAssertEqual(outcome.identifier, identifier, label) }
         }
         try await scenario("valid link", expect: nil) { _, _, _, _, _ in }
-        try await scenario("expired link", expect: 410) { _, grant, _, _, _ in try await sql.raw("UPDATE link_grants SET expires_at = now() - interval '1 minute' WHERE id = \(bind: grant)").run() }
+        try await scenario("expired link", expect: 410, identifier: "link_unavailable") { _, grant, _, _, _ in try await sql.raw("UPDATE link_grants SET expires_at = now() - interval '1 minute' WHERE id = \(bind: grant)").run() }
         try await scenario("issuer is not a member of the workspace", expect: 410, identifier: "link_issuer_inactive") { _, grant, _, _, _ in
             let other = try await self.user(); try await sql.raw("UPDATE link_grants SET creator_id = \(bind: other.requireID()) WHERE id = \(bind: grant)").run()
         }
@@ -196,7 +196,7 @@ final class ContractorGrantTests: XCTestCase {
         }
         try await scenario("project archived", expect: 410, identifier: "project_archived") { _, _, _, project, _ in try await sql.raw("UPDATE projects SET archived_at = now() WHERE id = \(bind: project)").run() }
         try await scenario("project not platform-managed", expect: 409, identifier: "project_import_required") { _, _, _, project, _ in try await sql.raw("UPDATE projects SET platform_managed = false WHERE id = \(bind: project)").run() }
-        try await scenario("contractor archived", expect: 410) { _, grant, _, _, _ in try await sql.raw("UPDATE contractors SET is_archived = true WHERE id = (SELECT contractor_id FROM link_grants WHERE id = \(bind: grant))").run() }
+        try await scenario("contractor archived", expect: 410, identifier: "contractor_inactive") { _, grant, _, _, _ in try await sql.raw("UPDATE contractors SET is_archived = true WHERE id = (SELECT contractor_id FROM link_grants WHERE id = \(bind: grant))").run() }
         try await scenario("snag revoked from the link", expect: 404) { _, grant, snag, _, _ in try await sql.raw("UPDATE link_items SET revoked_at = now() WHERE grant_id = \(bind: grant) AND snag_id = \(bind: snag)").run() }
         try await scenario("snag reassigned", expect: 404) { _, _, snag, _, _ in try await sql.raw("UPDATE snags SET contractor_id = NULL WHERE id = \(bind: snag)").run() }
         try await scenario("snag archived", expect: 404) { _, _, snag, _, _ in try await sql.raw("UPDATE snags SET archived_at = now() WHERE id = \(bind: snag)").run() }
@@ -205,6 +205,7 @@ final class ContractorGrantTests: XCTestCase {
             let (owner, _, snag, _, token, _) = try await fixture()
             let revoked = try await call(.POST, "api/v1/magic-links/\(token)/revoke", owner); XCTAssertEqual(revoked.status, .ok)
             let outcome = await compare("revoked through the route", token: token, snag: snag.snag.id); XCTAssertEqual(outcome.status, 410)
+            XCTAssertEqual(outcome.identifier, "link_unavailable", "U2: the page keys on the identifier, never on the reason")
         }
         // Unknown token and a snag that is not on the link.
         do {
@@ -660,6 +661,7 @@ final class ContractorGrantTests: XCTestCase {
 
         let reupload = try await call(.PUT, path + "/\(ready)/content", nil, bytes: Self.png)
         XCTAssertEqual(reupload.status, .gone, reupload.body.string); XCTAssertTrue(reupload.body.string.contains("retired"), reupload.body.string)
+        XCTAssertTrue(reupload.body.string.contains("\"upload_retired\""), reupload.body.string)
         let workflow = "api/v2/contractor/\(token)/snags/\(snag.snag.id)/workflow/submit"
         let withRetired = try await call(.POST, workflow, nil, body: action(snag, extra: ["attemptId": attempt.uuidString, "evidenceIds": [kept.uuidString, ready.uuidString]]))
         XCTAssertEqual(withRetired.status, .gone, withRetired.body.string)
@@ -820,6 +822,138 @@ final class ContractorGrantTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(skipped.uploadFencesAtCeiling ?? 0, 1, "the pass reports it too, and no longer tries it")
         let stillUnfenced = await memoryStore.isFenced(second)
         XCTAssertFalse(stillUnfenced)
+    }
+
+    // MARK: - U2 (FABLE-U1-U2-DESIGN §1): refusals the page tells apart by identifier; PIN expiry mid-queue
+
+    private func identifier(_ response: XCTHTTPResponse) -> String? {
+        (try? JSONSerialization.jsonObject(with: Data(response.body.string.utf8)) as? [String: Any])?["identifier"] as? String
+    }
+
+    /// U2 (§1.3, H203 S-2): the 410s a Contractor page has to tell apart carry identifiers, so the page keys on them and never
+    /// on the message. A revoked link's reason says "expired or was revoked", which the old page's renewal test (`/expired|retired/`
+    /// on the message) matched, so it re-minted every refused photo. The reasons themselves are unchanged for older pages.
+    func testGoneRefusalsCarryTheIdentifiersThePageKeysOn() async throws {
+        let (owner, _, snag, _, token, _) = try await fixture()
+        let sql = try VerifiedIdentityService.sql(app.db)
+        let path = "api/v2/contractor/\(token)/snags/\(snag.snag.id)/media"
+        // An unattached upload past its 24 hours: upload_expired.
+        let expired = try await contractorAllocated(token, snag, intent: UUID())
+        try await sql.raw("UPDATE media_assets SET expires_at = now() - interval '1 minute' WHERE id = \(bind: expired)").run()
+        let late = try await call(.PUT, path + "/\(expired)/content", nil, bytes: Self.png)
+        XCTAssertEqual(late.status, .gone, late.body.string); XCTAssertEqual(identifier(late), "upload_expired")
+        XCTAssertTrue(late.body.string.contains("This unattached upload expired. Allocate a new photo"), late.body.string)
+        // A retired upload: upload_retired.
+        let retired = try await contractorAllocated(token, snag, intent: UUID())
+        let retire = try await call(.DELETE, path + "/\(retired)", nil); XCTAssertEqual(retire.status, .ok, retire.body.string)
+        let again = try await call(.PUT, path + "/\(retired)/content", nil, bytes: Self.png)
+        XCTAssertEqual(again.status, .gone, again.body.string); XCTAssertEqual(identifier(again), "upload_retired")
+        XCTAssertTrue(again.body.string.contains("This upload was retired"), again.body.string)
+        // The manager revokes the link mid-queue: the page, an allocate, a PUT and a retire all answer link_unavailable.
+        let pending = try await contractorAllocated(token, snag, intent: UUID())
+        let revoked = try await call(.POST, "api/v1/magic-links/\(token)/revoke", owner); XCTAssertEqual(revoked.status, .ok, revoked.body.string)
+        let pageAnswer = try await call(.GET, "api/v2/contractor/\(token)", nil, contractorHeader: false)
+        let allocateAnswer = try await call(.POST, path, nil, body: command(snag, purpose: "completion", intent: UUID()))
+        let putAnswer = try await call(.PUT, path + "/\(pending)/content", nil, bytes: Self.png)
+        let retireAnswer = try await call(.DELETE, path + "/\(pending)", nil)
+        let answers = [("page", pageAnswer), ("allocate", allocateAnswer), ("put", putAnswer), ("retire", retireAnswer)]
+        for (label, response) in answers {
+            XCTAssertEqual(response.status, .gone, label + ": " + response.body.string)
+            XCTAssertEqual(identifier(response), "link_unavailable", label)
+            XCTAssertTrue(response.body.string.contains("This Contractor link expired or was revoked"), label)
+        }
+        // The link's contractor archived: contractor_inactive.
+        let (_, _, snag2, activation2, token2, _) = try await fixture()
+        try await sql.raw("UPDATE contractors SET is_archived = true WHERE id = (SELECT contractor_id FROM link_grants WHERE id = \(bind: activation2.grant.id))").run()
+        let archived = try await call(.POST, "api/v2/contractor/\(token2)/snags/\(snag2.snag.id)/media", nil, body: command(snag2, purpose: "completion", intent: UUID()))
+        XCTAssertEqual(archived.status, .gone, archived.body.string); XCTAssertEqual(identifier(archived), "contractor_inactive")
+    }
+
+    /// U2 (§1.2, §1.4; H117/H202 S-1): a PIN session that expires mid-queue stops every route with 403 `pin_required` before
+    /// anything is recorded, and after the PIN is entered again the page's same commands resume on the same identities: an
+    /// allocation made before the expiry answers again from its receipt, one refused by the expiry runs for the first time, a
+    /// PUT stores the bytes, and the submission goes through once. Server unchanged; this pins the behaviour the page relies on.
+    func testAfterThePINSessionExpiresEveryRouteAsksForItAndTheSameCommandsResume() async throws {
+        let (_, _, snag, activation, token, _) = try await fixture(pin: "582914")
+        let sql = try VerifiedIdentityService.sql(app.db), grant = activation.grant.id
+        func count(_ query: SQLQueryString) async throws -> Int { try await sql.raw(query).first()!.decode(column: "n", as: Int.self) }
+        let root = "api/v2/contractor/\(token)", media = root + "/snags/\(snag.snag.id)/media", attempt = UUID()
+        let cookie = try await verify(token, pin: "582914")
+        let first = try await contractorAfter(token, snag, intent: attempt, cookie: cookie)
+        let held = command(snag, purpose: "completion", intent: attempt)
+        let allocated = try await call(.POST, media, nil, body: held, cookie: cookie)
+        XCTAssertEqual(allocated.status, .ok, allocated.body.string)
+        let heldID = try allocated.content.decode(ContractorGrantController.PhotoResult.self).id
+        let refused = command(snag, purpose: "completion", intent: attempt)
+        let refusedID = try XCTUnwrap(UUID(uuidString: try XCTUnwrap(refused["id"] as? String)))
+        let submit = action(snag, extra: ["attemptId": attempt.uuidString, "evidenceIds": [first.uuidString, heldID.uuidString], "notes": "Resealed after lunch"])
+        let receiptsBefore = try await count("SELECT count(*) AS n FROM link_mutation_receipts WHERE grant_id = \(bind: grant)")
+
+        try await sql.raw("UPDATE link_sessions SET expires_at = now() - interval '1 second' WHERE grant_id = \(bind: grant)").run()
+        let pageAnswer = try await call(.GET, root, nil, cookie: cookie, contractorHeader: false)
+        let allocateAnswer = try await call(.POST, media, nil, body: refused, cookie: cookie)
+        let reallocateAnswer = try await call(.POST, media, nil, body: held, cookie: cookie)
+        let putAnswer = try await call(.PUT, media + "/\(heldID)/content", nil, bytes: Self.png, cookie: cookie)
+        let retireAnswer = try await call(.DELETE, media + "/\(first)", nil, cookie: cookie)
+        let submitAnswer = try await call(.POST, root + "/snags/\(snag.snag.id)/workflow/submit", nil, body: submit, cookie: cookie)
+        let answers = [("page", pageAnswer), ("allocate", allocateAnswer), ("allocate made before the expiry", reallocateAnswer),
+                       ("put", putAnswer), ("retire", retireAnswer), ("submit", submitAnswer)]
+        for (label, response) in answers {
+            XCTAssertEqual(response.status, .forbidden, label + ": " + response.body.string)
+            XCTAssertEqual(identifier(response), "pin_required", label)
+        }
+        let refusedRows = try await count("SELECT count(*) AS n FROM media_assets WHERE id = \(bind: refusedID)")
+        let receiptsAfter = try await count("SELECT count(*) AS n FROM link_mutation_receipts WHERE grant_id = \(bind: grant)")
+        let attemptsDuring = try await count("SELECT count(*) AS n FROM completion_attempts WHERE snag_id = \(bind: snag.snag.id)")
+        XCTAssertEqual(refusedRows, 0, "a refused allocation leaves no row"); XCTAssertEqual(receiptsAfter, receiptsBefore, "and no receipt")
+        XCTAssertEqual(attemptsDuring, 0)
+        let heldRow = try await sql.raw("SELECT state, original_key IS NULL AS unbound FROM media_assets WHERE id = \(bind: heldID)").first()!
+        XCTAssertEqual(try heldRow.decode(column: "state", as: String.self), "allocated")
+        XCTAssertTrue(try heldRow.decode(column: "unbound", as: Bool.self), "no storage address bound: the refusal came before any write intent")
+        let (firstState, firstRetired) = try await mediaState(first)
+        XCTAssertEqual(firstState, "ready"); XCTAssertFalse(firstRetired, "the refused retire changed nothing")
+
+        let renewed = try await verify(token, pin: "582914")
+        let replayed = try await call(.POST, media, nil, body: held, cookie: renewed)
+        XCTAssertEqual(replayed.status, .ok, replayed.body.string)
+        XCTAssertEqual(try replayed.content.decode(ContractorGrantController.PhotoResult.self).id, heldID, "the allocation made before the expiry answers again")
+        let fresh = try await call(.POST, media, nil, body: refused, cookie: renewed)
+        XCTAssertEqual(fresh.status, .ok, fresh.body.string)
+        XCTAssertEqual(try fresh.content.decode(ContractorGrantController.PhotoResult.self).id, refusedID, "the refused allocation runs for the first time, same id")
+        let stored = try await call(.PUT, media + "/\(heldID)/content", nil, bytes: Self.png, cookie: renewed)
+        XCTAssertEqual(stored.status, .ok, stored.body.string)
+        let page = try await call(.GET, root, nil, cookie: renewed, contractorHeader: false)
+        XCTAssertEqual(page.status, .ok, page.body.string)
+        let drafts = try XCTUnwrap(try page.content.decode(ContractorPage.self).items.first { $0.id == snag.snag.id }).drafts
+        XCTAssertEqual(Set(drafts.map(\.id)), [first, heldID, refusedID], "the same identities and no new ones")
+        let sent = try await call(.POST, root + "/snags/\(snag.snag.id)/workflow/submit", nil, body: submit, cookie: renewed)
+        XCTAssertEqual(sent.status, .ok, sent.body.string)
+        let attempts = try await count("SELECT count(*) AS n FROM completion_attempts WHERE snag_id = \(bind: snag.snag.id)")
+        XCTAssertEqual(attempts, 1)
+    }
+
+    /// U2 (§1.2 item 2): a submission the server executed before the session expired, whose answer the page never heard, is
+    /// answered from its receipt when the page re-sends the identical body after the PIN — never a second submission.
+    func testASubmissionMadeBeforeTheSessionExpiredIsAnsweredFromItsReceiptAfterThePIN() async throws {
+        let (_, _, snag, activation, token, _) = try await fixture(pin: "582914")
+        let sql = try VerifiedIdentityService.sql(app.db)
+        let cookie = try await verify(token, pin: "582914")
+        let attempt = UUID(), photo = try await contractorAfter(token, snag, intent: attempt, cookie: cookie)
+        let path = "api/v2/contractor/\(token)/snags/\(snag.snag.id)/workflow/submit"
+        let body = action(snag, extra: ["attemptId": attempt.uuidString, "evidenceIds": [photo.uuidString], "notes": "Resealed and tested"])
+        let first = try await call(.POST, path, nil, body: body, cookie: cookie)
+        XCTAssertEqual(first.status, .ok, first.body.string)
+        try await sql.raw("UPDATE link_sessions SET expires_at = now() - interval '1 second' WHERE grant_id = \(bind: activation.grant.id)").run()
+        let refused = try await call(.POST, path, nil, body: body, cookie: cookie)
+        XCTAssertEqual(refused.status, .forbidden, refused.body.string); XCTAssertEqual(identifier(refused), "pin_required")
+        let renewed = try await verify(token, pin: "582914")
+        let replayed = try await call(.POST, path, nil, body: body, cookie: renewed)
+        XCTAssertEqual(replayed.status, .ok, replayed.body.string)
+        let firstObject = try JSONSerialization.jsonObject(with: Data(first.body.string.utf8)) as? NSDictionary
+        let replayedObject = try JSONSerialization.jsonObject(with: Data(replayed.body.string.utf8)) as? NSDictionary
+        XCTAssertNotNil(firstObject); XCTAssertEqual(replayedObject, firstObject, "the receipt's answer")
+        let attempts = try await sql.raw("SELECT count(*) AS n FROM completion_attempts WHERE snag_id = \(bind: snag.snag.id)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(attempts, 1)
     }
 
     /// WP4: the early-upload switch is on only where RUNTIME_DIAGNOSTICS is enabled (staging; production refuses it),
