@@ -86,6 +86,14 @@ final class ContractorLinkTermsNoticeTests: XCTestCase {
         XCTAssertTrue(script.contains("Your notes and photos are kept on this page"))
         XCTAssertTrue(script.contains("The rest upload after you enter it."))
         XCTAssertTrue(script.contains("<input id=\"link-pin\" name=\"pin\" type=\"password\" inputmode=\"numeric\""))
+        // U2 review: N1 a link refusal at the PIN form raises the unavailable gate; N2 an accepted PIN whose list read fails says so;
+        // N3 one re-read per link-refusal episode; N4 the PIN field is focused when the gate is raised.
+        XCTAssertTrue(script.contains("if (error.status === 404 || error.status === 410) { if (authGate) authGate.verifying = false; gate(error); return; }"))
+        XCTAssertTrue(script.contains("The PIN was accepted but the page could not be read. Try again."))
+        XCTAssertTrue(script.contains("function confirmRefusal(error) {"))
+        XCTAssertEqual(script.components(separatedBy: "confirmRefusal(error);").count - 1, 2, "both link-refusal paths re-read through it")
+        XCTAssertFalse(script.contains("gate(error); load();"), "no unconditional re-read per refused request")
+        XCTAssertTrue(script.contains("content.querySelector('#link-pin')?.focus({preventScroll:true});"))
     }
 
     /// The page names its script by content, so the new bytes reach a contractor's

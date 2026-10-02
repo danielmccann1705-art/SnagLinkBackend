@@ -304,7 +304,15 @@
     if (authGate?.kind === kind) return;
     authGate = {kind,message:error.message||'This link is unavailable.'};
     render();
-    if (kind === 'pin') announce(`Enter your PIN to continue. ${gateProgress()}`.trim());
+    /* Keyboard and screen-reader users land in the PIN field; the live region says what is kept (U2 review N4). */
+    if (kind === 'pin') { content.querySelector('#link-pin')?.focus({preventScroll:true}); announce(`Enter your PIN to continue. ${gateProgress()}`.trim()); }
+  }
+  /* A refusal of the whole link raises the gate and the page re-reads the list once to confirm it - once per episode, however many
+     requests in flight are refused the same way (U2 review N3). A successful re-read lowers the gate again. */
+  function confirmRefusal(error) {
+    const raised = authGate?.kind !== 'unavailable';
+    gate(error);
+    if (raised) load();
   }
   /* The PIN form: on success the page re-reads the list, which lowers the gate and resumes the same uploads and the same frozen
      request (load -> reconcile -> pump -> maybeSend). A wrong PIN or a lockout shows the server's reason; nothing else changes. */
@@ -315,8 +323,17 @@
       await request(root+'/verify-pin',{pin:form.elements.pin.value});
       form.elements.pin.value = ''; authEpoch++;
       await load();
-      if (authGate) { authGate.verifying = false; render(); }
+      /* Still gated after an accepted PIN: the list could not be read (lost signal, or the session was not kept). Say so; the PIN
+         form stays, so entering it again retries (U2 review N2). A refusal of the link itself has already replaced the gate. */
+      if (authGate) {
+        authGate.verifying = false;
+        if (authGate.kind === 'pin') authGate.pinError = 'The PIN was accepted but the page could not be read. Try again.';
+        render();
+      }
     } catch (error) {
+      /* The link itself refused while the PIN was being entered (revoked, expired, no longer available): show that refusal at the
+         gate, with its "Try again", never as a PIN error the contractor would retry in vain (U2 review N1). */
+      if (error.status === 404 || error.status === 410) { if (authGate) authGate.verifying = false; gate(error); return; }
       if (authGate) { authGate.verifying = false; authGate.pinError = error.message; render(); }
     }
   }
@@ -558,7 +575,7 @@
     if (id === 'pin_required') { f.status = 'queued'; if (epoch === authEpoch) gate(error); return; }
     /* The link itself is refused (revoked, expired, issuer or contractor no longer active, project archived): no retry and no
        new identity; the gate shows the server's reason and the page re-reads to confirm it. Unsent work stays on this device. */
-    if (status === 410 && LINK_410.has(id)) { f.status = 'queued'; gate(error); load(); return; }
+    if (status === 410 && LINK_410.has(id)) { f.status = 'queued'; confirmRefusal(error); return; }
     const transient = Boolean(error.network || error.readFailed);
     if (transient && navigator.onLine === false) { f.status = 'queued'; f.waitingForSignal = true; return; }
     if (status === 409 && (id === 'revision_conflict' || id === 'workflow_conflict')) { f.status = 'queued'; load(); return; }
@@ -613,7 +630,7 @@
         if (!error.network && error.status && error.status < 500 && !(error.status === 410 && LINK_410.has(error.identifier))) { draft.request = null; draft.requestSent = false; }
         persist(id);
         if (error.status === 409) { await load(); }
-        else if (error.status === 410 && LINK_410.has(error.identifier)) { gate(error); load(); }
+        else if (error.status === 410 && LINK_410.has(error.identifier)) { confirmRefusal(error); }
       }
     } finally {
       busy = false; if (drafts.get(id)) drafts.get(id).stage = '';

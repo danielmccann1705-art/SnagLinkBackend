@@ -329,6 +329,8 @@ test('the production template logs the container and never a request URL', () =>
   const template = JSON.parse(source.replace(/^\s*\/\/.*$/gm, ''));
   assert.deepEqual(template.observability, {enabled: true, logs: {enabled: true, invocation_logs: false, head_sampling_rate: 1}, traces: {enabled: false}});
   assert.deepEqual(template.containers[0].observability, {logs: {enabled: true}});
+  // N7: the template is not what is deployed; the reviewed package file is, and the template says so next to the block.
+  assert.match(source, /The deployed configuration is the reviewed package file, never this template/);
 });
 test('the Worker source logs nothing of its own (no console.*)', () => {
   for (const name of readdirSync(new URL('../src/', import.meta.url))) {

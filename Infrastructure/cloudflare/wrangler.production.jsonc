@@ -9,6 +9,7 @@
   // container's own lines (route patterns, statuses, closed `kind:` words) reach the store; the platform's invocation log,
   // which records each request's URL - and Snaglist's URLs carry capability tokens - is off; tracing is written off so a
   // future compatibility date cannot turn it on with `enabled`. No sampling: the faults worth finding are rare.
+  // The deployed configuration is the reviewed package file, never this template (U2 review N7).
   "observability": {"enabled": true, "logs": {"enabled": true, "invocation_logs": false, "head_sampling_rate": 1}, "traces": {"enabled": false}},
   // Deliberately no route. Attach api.snaglist.dev only after the concrete
   // production candidate and environment inventory are approved.
