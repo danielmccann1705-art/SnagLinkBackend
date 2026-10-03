@@ -46,6 +46,16 @@ final class WorkspaceLockBoundsTests: XCTestCase {
     private func hold(_ db: any Database, seconds: Double, _ body: @escaping @Sendable (any Database) async throws -> Void) -> Task<Void, any Error> {
         Task { try await db.transaction { tx in try await body(tx); try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) } }
     }
+    /// True once `signal` yields; false if it finishes without yielding or `seconds` pass first.
+    private func armed(_ signal: AsyncStream<Void>, within seconds: Double = 10) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { for await _ in signal { return true }; return false }
+            group.addTask { try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+    }
     private func seconds(_ body: () async throws -> Void) async throws -> Double {
         let started = Date(); try await body(); return Date().timeIntervalSince(started)
     }
@@ -62,10 +72,21 @@ final class WorkspaceLockBoundsTests: XCTestCase {
         let projectID = envelope.project.id
         try await VerifiedIdentityService.sql(app.db).raw("INSERT INTO project_access (project_id, workspace_id, user_id, role) VALUES (\(bind: projectID), \(bind: companyID), \(bind: memberID), 'member')").run()
         let (first, second) = twoConnections()
-        // A member's read is open: the removal waits for it.
-        let reader = hold(first, seconds: 1.5) { tx in _ = try await ProjectAccessService.requireRead(projectID: projectID, actorID: memberID, on: tx) }
-        try await Task.sleep(nanoseconds: 300_000_000)
+        // Read before the hold (Fable ruling 6, 3 Oct 2026; A217/A219): `app.db` can land on the reader's event loop, whose one pooled
+        // connection the hold occupies - the read then waits for the hold to end and the removal is measured after it.
         let revision = try await VerifiedIdentityService.sql(app.db).raw("SELECT revision FROM workspace_memberships WHERE workspace_id = \(bind: companyID) AND user_id = \(bind: memberID)").first()!.decode(column: "revision", as: Int64.self)
+        // A member's read is open: the removal waits for it. The removal starts once the reader says it holds its lock (bounded),
+        // not after a fixed sleep a slow scheduler could outlast.
+        let (holding, held) = AsyncStream<Void>.makeStream()
+        let reader = hold(first, seconds: 1.5) { tx in
+            defer { held.finish() }
+            _ = try await ProjectAccessService.requireRead(projectID: projectID, actorID: memberID, on: tx)
+            held.yield()
+        }
+        guard await armed(holding) else {
+            try await reader.value
+            return XCTFail("the reader did not hold its lock within 10 s")
+        }
         let removalWaited = try await seconds {
             try await second.transaction { tx in try await WorkspaceAccessService.changeMember(workspaceID: companyID, targetID: memberID, newRole: nil, expectedRevision: revision, actorID: ownerID, on: tx) }
         }
