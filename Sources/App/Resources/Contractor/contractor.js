@@ -38,7 +38,8 @@
      rather than asking for the PIN a second time. */
   let authGate = null, authEpoch = 0;
   /* Refusals are told apart by the server's identifier, never by its message (U2, H203 S-2: a revoked link's message says
-     "expired or was revoked"). An upload the server expired, retired or erased is renewed under a new identity; a refusal of the
+     "expired or was revoked"). An upload the server expired, retired or erased is renewed under a new identity, whether the
+     refusal comes on its upload or on the final send (R-11: the page re-reads the list and sends again by itself); a refusal of the
      whole link stops the page at the gate with the server's reason and keeps the notes and photos on this device. */
   const RENEW_410 = new Set(['upload_retired','upload_expired','media_erased','media_reallocate']);
   const LINK_410 = new Set(['link_unavailable','link_issuer_inactive','contractor_inactive','project_archived']);
@@ -624,10 +625,20 @@
            same operation, so a send that did run before the session lapsed is answered from its receipt, never repeated. */
         draft.error = ''; draft.requestSent = false; draft.submitRequested = true; persist(id);
         if (epoch === authEpoch) gate(error);
+      } else if (error.status === 410 && RENEW_410.has(error.identifier) && (draft.submitRenewals||0) < 2) {
+        /* R-11 (U2-D1): an evidence upload the server has expired, retired or erased; nothing was committed (the check precedes the
+           attempt). The server's list decides again: a photo listed ready, unexpired, same digest stays; any other gets a new identity
+           (old retired) and is uploaded again; the fix is then sent by itself - no second Submit, no refresh. At most twice. */
+        draft.submitRenewals = (draft.submitRenewals||0) + 1;
+        draft.error = ''; draft.request = null; draft.requestSent = false; draft.submitRequested = true;
+        for (const f of draft.files) f.verified = false;
+        persist(id); await load();
       } else {
         /* Lost or server-side failures, and refusals of the whole link, keep the same body: a repeat is answered from the server's
            receipt. Any other refusal means nothing was committed: the request is discarded and the next Submit freezes a new one. */
         if (!error.network && error.status && error.status < 500 && !(error.status === 410 && LINK_410.has(error.identifier))) { draft.request = null; draft.requestSent = false; }
+        /* Renewed twice and refused again: the contractor's own words, not the server's (nothing was sent; no claim of completion). */
+        if (error.status === 410 && RENEW_410.has(error.identifier)) draft.error = 'These photos could not be sent. Remove them, add them again, then press Submit.';
         persist(id);
         if (error.status === 409) { await load(); }
         else if (error.status === 410 && LINK_410.has(error.identifier)) { confirmRefusal(error); }
@@ -643,7 +654,7 @@
     if (f.retryTimer) { clearTimeout(f.retryTimer); f.retryTimer = null; }
     if (f.xhr) { try { f.xhr.abort(); } catch {} }
     if (f.command) { draft.tombstones.add(low(f.command.id)); queueRetire(item.id,f.command.id); }
-    f.status = 'removed'; release([f]); draft.files.splice(draft.files.indexOf(f),1);
+    f.status = 'removed'; release([f]); draft.files.splice(draft.files.indexOf(f),1); draft.submitRenewals = 0;
     if (draft.request && !draft.requestSent) { draft.request = null; draft.submitRequested = false; }
     await persistNow(item.id); render(); announce('Photo removed');
     drainRetirements(item.id);
@@ -679,7 +690,7 @@
     const draft=drafts.get(id),chosen=[...event.target.files];draft.error='';draft.preparing=chosen.length;render();
     for(const original of chosen){
       if(draft.files.length>=20){draft.error='Choose up to 20 photos.';break;}
-      try{const file=await prepare(original);draft.files.push({file,preview:preview(file),key:uuid(),status:'queued'});if(early()){persist(id);render();pump();}}
+      try{const file=await prepare(original);draft.files.push({file,preview:preview(file),key:uuid(),status:'queued'});draft.submitRenewals=0;if(early()){persist(id);render();pump();}}
       catch(error){draft.error=error.message;}
       draft.preparing=Math.max(0,draft.preparing-1);
     }

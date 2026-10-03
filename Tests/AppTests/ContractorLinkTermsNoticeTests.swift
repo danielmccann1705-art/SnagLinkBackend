@@ -68,7 +68,7 @@ final class ContractorLinkTermsNoticeTests: XCTestCase {
     /// render() paints, not a separate paint a list repaint can overwrite (H117/H202 S-1: the form existed for zero event-loop
     /// turns). A 410 renews a photo's identity only for the identifiers that mean "this upload"; the message is never read for it
     /// (H203 S-2: a revoked link's "expired or was revoked" re-minted every photo). A PIN refusal of the final send keeps the frozen
-    /// request and sends it again by itself after the PIN. The jsdom simulation (work/lane-a/diag/wp4-client-sim3.mjs) drives it.
+    /// request and sends it again by itself after the PIN. The jsdom simulation (work/lane-a/diag/wp4-client-sim4.mjs) drives it.
     func testThePagePaintsInOnePlaceAndKeysRefusalsOnIdentifiers() async throws {
         let script = String(decoding: try await served("contractor.js"), as: UTF8.self)
         let render = try XCTUnwrap(script.range(of: "  function render() {"))
@@ -94,6 +94,14 @@ final class ContractorLinkTermsNoticeTests: XCTestCase {
         XCTAssertEqual(script.components(separatedBy: "confirmRefusal(error);").count - 1, 2, "both link-refusal paths re-read through it")
         XCTAssertFalse(script.contains("gate(error); load();"), "no unconditional re-read per refused request")
         XCTAssertTrue(script.contains("content.querySelector('#link-pin')?.focus({preventScroll:true});"))
+        // U2-D1 (R-11, Fable rulings 3 Oct 2026 §4): an evidence upload the server expired, retired or erased by the final send is
+        // renewed by the page itself through the server's list (verified photos decided again), at most twice; then the
+        // contractor's own words, never the server's reason. Driven by work/lane-a/diag/wp4-client-sim4.mjs P12-R11...P12d-R11.
+        XCTAssertTrue(script.contains("} else if (error.status === 410 && RENEW_410.has(error.identifier) && (draft.submitRenewals||0) < 2) {"))
+        XCTAssertTrue(script.contains("for (const f of draft.files) f.verified = false;"))
+        XCTAssertTrue(script.contains("These photos could not be sent. Remove them, add them again, then press Submit."))
+        XCTAssertEqual(script.components(separatedBy: "draft.submitRenewals = 0;").count + script.components(separatedBy: "draft.submitRenewals=0;").count - 2, 2,
+                       "the renewal count starts again when a photo is added or removed")
     }
 
     /// The page names its script by content, so the new bytes reach a contractor's
