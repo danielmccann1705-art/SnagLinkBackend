@@ -38,6 +38,9 @@ struct CleanupService {
         /// Retention maintenance packet M1 (`RetentionMaintenanceService`). Optional
         /// for the same reason; older images ignore it.
         var retention: RetentionMaintenanceService.Counts? = nil
+        /// 2.0.2 advert measurement (`AdMeasurementMaintenance`): retention sweep, token expiry and the
+        /// Apple exchange. Optional for the same reason.
+        var adMeasurement: AdMeasurementMaintenance.Counts? = nil
         /// The container's own numbers at the end of the pass (wave 3): CPU limit and use,
         /// memory, the database pool and round trips. Numbers only; optional for the same
         /// reason as the fields above, and never able to fail the pass.
@@ -193,6 +196,11 @@ struct CleanupService {
         let fenceStore: (any ObjectErasureFenceStorage)? = (try? PrivateObjectAllocationPolicy.configuration(app: app))
             .flatMap { try? AccountDeletionFenceProvider.store(for: $0.target, app: app) }
         removed.retention = try await RetentionMaintenanceService.run(on: db, fenceStore: fenceStore, logger: app.logger)
+
+        // 2.0.2 advert measurement: retention sweep (D6), token expiry, then the Apple exchange while
+        // `adMeasurementEnabled` is on. Isolated like the sweeps above: it never throws, and names a
+        // failed step in its counts.
+        removed.adMeasurement = await AdMeasurementMaintenance.run(app: app, on: db)
 
         // Last, after every piece of work above, so reading health can never stop
         // that work. A pass that cannot read it records `failed`, which is itself

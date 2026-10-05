@@ -151,6 +151,9 @@ enum AccountDeletionService {
             for table in ["browser_sessions", "device_tokens", "magic_link_sends", "analytics_events", "user_identities", "app_session_revocations"] {
                 try await sql.raw("DELETE FROM \(unsafeRaw: table) WHERE user_id=\(bind: userID)").run()
             }
+            // 2.0.2 advert-measurement records made while this account was signed in (keyed by its
+            // uppercase UUID, the RevenueCat app user ID); see `AdAttributionStore.eraseAccount`.
+            try await AdAttributionStore.eraseAccount(userID, on: db)
             try await sql.raw("DELETE FROM identity_challenges WHERE target_user_id=\(bind: userID)").run()
             // Keep company invitation decisions and references, erase the deleted
             // recipient's address and make every outstanding capability unusable.

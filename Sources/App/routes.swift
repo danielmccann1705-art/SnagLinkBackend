@@ -85,6 +85,10 @@ func routes(_ app: Application) throws {
         Config:
         - GET /api/v1/config/feature-flags - Remote feature flags (auth optional)
 
+        Ad measurement (2.0.2, unauthenticated; see AdMeasurementController):
+        - POST /api/v1/ad-measurement/apple - Apple Ads attribution token, once per installation (503 while adMeasurementEnabled is off)
+        - DELETE /api/v1/ad-measurement/apple/:reference - Withdraw: erase that installation's record (200, or 404 when gone)
+
         Devices:
         - POST /api/v1/devices/register - Register device for push notifications (auth required)
         - DELETE /api/v1/devices/unregister - Unregister device token (auth required)
@@ -208,6 +212,8 @@ func routes(_ app: Application) throws {
     try app.register(collection: AnalyticsController())
     try app.register(collection: ApprovalController())
     try app.register(collection: ConfigController())
+    // 2.0.2 Apple ads measurement (self-contained module: Sources/App/AdMeasurement).
+    try app.register(collection: AdMeasurementController())
 }
 
 // MARK: - Response Models

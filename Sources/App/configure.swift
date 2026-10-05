@@ -170,6 +170,8 @@ public func configure(_ app: Application,
         app.migrations.add(CreateDiagnosticRequestFailures())
         app.migrations.add(AddUploadRetirements())
         app.migrations.add(ReKeyUploadRetirements())
+        // 2.0.2 Apple ads measurement: one new table, nothing else touched (Sources/App/AdMeasurement).
+        app.migrations.add(CreateAdAttributionRecords())
 
         try await app.autoMigrate()
     } else {
