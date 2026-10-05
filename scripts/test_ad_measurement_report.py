@@ -12,6 +12,32 @@ KEY = "sk_synthetic_v2_key_for_tests_only"
 SUBSCRIBER = "$RCAnonymousID:0123456789abcdef0123456789abcdef"
 CUSTOMER = "7D3C9C3E-0000-4000-8000-00000000000A"
 GONE = "$RCAnonymousID:ffffffffffffffffffffffffffffffff"
+GRACE = "$RCAnonymousID:11111111111111111111111111111111"
+LAPSED = "$RCAnonymousID:22222222222222222222222222222222"
+SANDBOX = "$RCAnonymousID:33333333333333333333333333333333"
+TRIAL = "$RCAnonymousID:44444444444444444444444444444444"
+PAGED = "$RCAnonymousID:55555555555555555555555555555555"
+TESTER = "$RCAnonymousID:66666666666666666666666666666666"
+TESTER2 = "7D3C9C3E-0000-4000-8000-00000000000B"
+
+
+def sub(environment, status, gross):
+    return {"object": "subscription", "id": "sub_" + status, "environment": environment, "status": status,
+            "gives_access": status in ("trialing", "active", "in_grace_period"),
+            "total_revenue_in_usd": {"currency": "USD", "gross": gross, "commission": 0, "tax": 0, "proceeds": gross}}
+
+
+# Pages of subscriptions per customer, as API v2 lists them; a customer not named here has none.
+SUBSCRIPTIONS = {
+    SUBSCRIBER: [[sub("production", "active", 9.99)]],
+    GRACE: [[sub("production", "in_grace_period", 9.99)]],
+    LAPSED: [[sub("production", "expired", 4.99)]],
+    SANDBOX: [[sub("sandbox", "active", 9.99), sub("sandbox", "expired", 9.99)]],
+    TRIAL: [[sub("production", "trialing", 0), sub("production", "expired", 0)]],
+    PAGED: [[sub("sandbox", "active", 9.99)], [sub("production", "active", 9.99)]],
+    TESTER: [[sub("sandbox", "active", 9.99), sub("production", "active", 9.99)]],
+    TESTER2: [[sub("production", "active", 9.99)]],
+}
 
 
 class Stub(BaseHTTPRequestHandler):
@@ -22,16 +48,23 @@ class Stub(BaseHTTPRequestHandler):
 
     def do_GET(self):
         Stub.seen.append((self.path, self.headers.get("Authorization")))
-        parts = urllib.parse.urlparse(self.path).path.split("/")
-        # /v2/projects/<project>/customers/<id>[/subscriptions]
+        url = urllib.parse.urlparse(self.path)
+        parts, query = url.path.split("/"), urllib.parse.parse_qs(url.query)
+        # /v2/projects/<project>/customers/<id>[/subscriptions?limit=..[&starting_after=page-N]]
         customer = urllib.parse.unquote(parts[5]) if len(parts) > 5 else ""
         if self.headers.get("Authorization") != "Bearer " + KEY or parts[1:4] != ["v2", "projects", "proj_test"]:
             return self.reply(401, {})
         if customer == GONE:
             return self.reply(404, {"type": "resource_missing"})
         if len(parts) > 6 and parts[6] == "subscriptions":
-            return self.reply(200, {"items": [{"id": "sub"}] if customer == SUBSCRIBER else []})
-        return self.reply(200, {"id": customer})
+            pages = SUBSCRIPTIONS.get(customer, [[]])
+            page = int(query.get("starting_after", ["page-0"])[0].split("-")[1])
+            following = None
+            if page + 1 < len(pages):
+                following = "/v2/projects/proj_test/customers/%s/subscriptions?starting_after=page-%d&limit=100" % (
+                    urllib.parse.quote(customer, safe=""), page + 1)
+            return self.reply(200, {"object": "list", "items": pages[page], "next_page": following, "url": url.path})
+        return self.reply(200, {"object": "customer", "id": customer})
 
     def reply(self, status, body):
         data = json.dumps(body).encode()
@@ -91,12 +124,74 @@ class ReportTests(unittest.TestCase):
         with table.open() as handle:
             rows = list(csv.DictReader(handle))
         self.assertEqual(rows, [
-            {"campaign_id": "111", "adgroup_id": "222", "keyword_id": "", "installs": "1", "subscribers": "0", "unresolved": "1"},
-            {"campaign_id": "111", "adgroup_id": "222", "keyword_id": "333", "installs": "2", "subscribers": "1", "unresolved": "0"},
+            {"campaign_id": "111", "adgroup_id": "222", "keyword_id": "", "installs": "1", "paying_now": "0", "ever_paid": "0",
+             "unresolved": "1"},
+            {"campaign_id": "111", "adgroup_id": "222", "keyword_id": "333", "installs": "2", "paying_now": "1", "ever_paid": "1",
+             "unresolved": "0"},
         ])
         note = next(self.out.glob("ad-measurement-report-*.txt")).read_text()
         self.assertIn("pending 1, failing 1, done 4, expired 1, invalid 1", note)
-        self.assertIn("attributed 3, not attributed 1. Awaiting Apple (pending + failing): 2", note)
+        self.assertIn("attributed 3, placeholder 0, not attributed 1. Awaiting Apple (pending + failing): 2", note)
+
+    def report_rows(self):
+        with next(self.out.glob("ad-measurement-report-*.csv")).open() as handle:
+            return list(csv.DictReader(handle))
+
+    def test_apples_placeholder_record_is_counted_apart_never_as_an_install_or_a_subscriber(self):
+        # M1: Xcode / TestFlight installs get Apple's test record (campaign and ad group 1234567890). The testers here
+        # hold production subscriptions in the stub, so counting them would show up as installs and paying customers.
+        self.rows.write_text("\n".join([
+            "rc_app_user_id,exchange_state,attribution,campaign_id,adgroup_id,keyword_id",
+            "%s,done,t,1234567890,1234567890,12323222" % TESTER,     # the commonly observed form
+            "%s,done,t,1234567890,1234567890,123222" % TESTER2,      # the form in the Sept 2026 document
+            "%s,done,t,1234567890,1234567890," % SUBSCRIBER,         # keyword withheld: still the placeholder
+            "%s,done,t,1234567890,555,333" % SUBSCRIBER,             # campaign alone matching: a real record
+            ""]))
+        code, stdout, stderr = self.run_report()
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.report_rows(), [
+            {"campaign_id": "1234567890", "adgroup_id": "555", "keyword_id": "333", "installs": "1", "paying_now": "1",
+             "ever_paid": "1", "unresolved": "0"},
+        ])
+        note = next(self.out.glob("ad-measurement-report-*.txt")).read_text()
+        self.assertIn("done 4,", note)
+        self.assertIn("attributed 1, placeholder 3, not attributed 0.", note)
+        self.assertIn("never an install or a subscriber", note)
+        self.assertIn("3 placeholder", stdout)
+        asked = [path for path, _ in Stub.seen]
+        self.assertEqual(len(asked), 2, "customer + subscriptions for the one real record only")
+        for tester in (TESTER, TESTER2):
+            self.assertFalse(any(urllib.parse.quote(tester, safe="") in path for path in asked), "RevenueCat asked about a tester")
+
+    def test_paying_now_and_ever_paid_count_production_subscriptions_only(self):
+        # M2: sandbox subscriptions (TestFlight, Xcode, StoreKit testing) and a free trial alone are neither; an expired
+        # production subscription with revenue is ever_paid only; every page of subscriptions is read.
+        self.rows.write_text("\n".join(
+            ["rc_app_user_id,exchange_state,attribution,campaign_id,adgroup_id,keyword_id"]
+            + ["%s,done,t,7,8,9" % customer for customer in (SUBSCRIBER, GRACE, LAPSED, SANDBOX, TRIAL, PAGED, CUSTOMER, GONE)]
+            + [""]))
+        code, stdout, stderr = self.run_report()
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(self.report_rows(), [
+            {"campaign_id": "7", "adgroup_id": "8", "keyword_id": "9", "installs": "8", "paying_now": "3", "ever_paid": "4",
+             "unresolved": "1"},
+        ])
+        asked = [path for path, _ in Stub.seen]
+        self.assertTrue(all("limit=100" in path for path in asked if "/subscriptions" in path))
+        paged = urllib.parse.quote(PAGED, safe="")
+        self.assertEqual(sum(1 for path in asked if paged in path and "/subscriptions" in path), 2, "both pages read")
+        self.assertTrue(any(paged in path and "starting_after=page-1" in path for path in asked))
+        note = next(self.out.glob("ad-measurement-report-*.txt")).read_text()
+        self.assertIn("Sandbox subscriptions (TestFlight, Xcode, StoreKit testing) count in neither", note)
+
+    def test_rows_without_the_query_columns_are_refused_before_any_request(self):
+        self.rows.write_text("rc_app_user_id,exchange_state,attribution,campaign_id,keyword_id\n%s,done,t,1,2\n" % SUBSCRIBER)
+        code, _, stderr = self.run_report()
+        self.assertEqual(code, 2)
+        self.assertIn("adgroup_id", stderr)
+        self.assertIn("ROWS_QUERY", stderr)
+        self.assertEqual(Stub.seen, [])
+        self.assertFalse(any(self.out.glob("*.csv")))
 
     def test_only_api_v2_reads_and_nothing_personal_in_the_output_or_the_console(self):
         code, stdout, stderr = self.run_report()
