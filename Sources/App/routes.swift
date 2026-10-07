@@ -214,6 +214,9 @@ func routes(_ app: Application) throws {
     try app.register(collection: ConfigController())
     // 2.0.2 Apple ads measurement (self-contained module: Sources/App/AdMeasurement).
     try app.register(collection: AdMeasurementController())
+    try app.register(collection: MeasurementPrivacyController())
+    try app.register(collection: MeasurementRelayController())
+    try app.register(collection: RevenueCatMeasurementController())
 }
 
 // MARK: - Response Models

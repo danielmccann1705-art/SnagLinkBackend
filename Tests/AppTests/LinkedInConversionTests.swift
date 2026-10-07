@@ -70,6 +70,7 @@ final class LinkedInConversionTests: XCTestCase {
             "id": "synthetic-source-event", "app_id": "synthetic-rc-app", "app_user_id": appUserID ?? account.uuidString,
             "type": type, "environment": environment, "store": "APP_STORE", "period_type": period,
             "is_family_share": family, "product_id": "com.snaglist.pro.monthly", "entitlement_ids": ["Snaglist Pro"],
+            "event_timestamp_ms": 1_791_369_000_000,
             "purchased_at_ms": 1_791_369_000_000, "price_in_purchased_currency": price, "currency": "GBP",
             "transaction_id": transaction, "subscriber_attributes": ["email": "must-not-be-forwarded@example.test"]
         ]])
@@ -118,7 +119,8 @@ final class LinkedInConversionTests: XCTestCase {
             ("app_id", "another-app"), ("store", "PLAY_STORE"), ("environment", "production"),
             ("product_id", "unrecognised.product"), ("entitlement_ids", ["different entitlement"]),
             ("app_user_id", "not-a-uuid"), ("transaction_id", ""), ("is_family_share", 0),
-            ("currency", "NOT_CURRENCY"), ("purchased_at_ms", true), ("purchased_at_ms", -1),
+            ("currency", "NOT_CURRENCY"), ("event_timestamp_ms", true), ("event_timestamp_ms", -1),
+            ("purchased_at_ms", true), ("purchased_at_ms", -1),
             ("purchased_at_ms", 1.1), ("price_in_purchased_currency", 1_000_000)
         ]
         for (key, value) in mutations {

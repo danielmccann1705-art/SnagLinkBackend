@@ -1,0 +1,42 @@
+import Vapor
+
+struct MeasurementRelayController: RouteCollection {
+    func boot(routes: RoutesBuilder) throws {
+        let measurement = routes.grouped("api", "v2", "measurement").grouped(PlatformAuthMiddleware())
+        measurement.put("devices", "att", use: observeATT)
+        measurement.post("devices", use: bindDevice)
+        measurement.post("events", use: acceptEvent)
+        measurement.on(.POST, "apple", body: .collect(maxSize: "4kb"), use: acceptApple)
+    }
+
+    @Sendable func observeATT(req: Request) async throws -> MeasurementPermissionsEnvelope {
+        try await MeasurementRelayService.observeATT(accountID: req.requireAuthenticatedUserId(),
+            input: try decode(MeasurementATTObservation.self, req), on: req.db)
+    }
+
+    @Sendable func bindDevice(req: Request) async throws -> Response {
+        try await MeasurementRelayService.bindDevice(accountID: req.requireAuthenticatedUserId(),
+            input: try decode(MeasurementDeviceBinding.self, req), app: req.application, on: req.db)
+        return Response(status: .noContent)
+    }
+
+    @Sendable func acceptEvent(req: Request) async throws -> Response {
+        try await MeasurementRelayService.acceptProductEvent(accountID: req.requireAuthenticatedUserId(),
+            input: try decode(MeasurementProductEventUpload.self, req), on: req.db)
+        return Response(status: .accepted)
+    }
+
+    @Sendable func acceptApple(req: Request) async throws -> Response {
+        let reference = try await MeasurementRelayService.acceptApple(accountID: req.requireAuthenticatedUserId(),
+            input: try decode(MeasurementAppleUpload.self, req), app: req.application, on: req.db)
+        let response = Response(status: .created)
+        try response.content.encode(AdMeasurementReceipt(reference: reference))
+        response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        return response
+    }
+
+    private func decode<T: Content>(_ type: T.Type, _ req: Request) throws -> T {
+        do { return try req.content.decode(type) }
+        catch { throw Abort(.badRequest, reason: "Use a valid measurement request", identifier: "measurement_request_invalid") }
+    }
+}

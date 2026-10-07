@@ -15,6 +15,9 @@ struct FeatureFlagService {
     static let registry: [(key: String, envVar: String, hardDefault: Bool)] = [
         ("useNewDesign", "FEATURE_USE_NEW_DESIGN", false),
         ("adMeasurementEnabled", "FEATURE_AD_MEASUREMENT_ENABLED", false),
+        ("productAnalyticsEnabled", "FEATURE_PRODUCT_ANALYTICS_ENABLED", false),
+        ("crossCompanyAdsEnabled", "FEATURE_CROSS_COMPANY_ADS_ENABLED", false),
+        ("linkedInConversionsEnabled", "FEATURE_LINKEDIN_CONVERSIONS_ENABLED", false),
     ]
 
     /// `lookup` is the process environment; a test passes its own instead of setting a variable the

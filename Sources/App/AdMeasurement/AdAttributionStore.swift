@@ -107,6 +107,25 @@ enum AdAttributionStore {
         throw Abort(.internalServerError, reason: "No reference could be issued", identifier: "ad_measurement_reference_unavailable")
     }
 
+    /// Reserves an authenticated, canonical request before the Apple call. The token is
+    /// intentionally absent: a crash can leave only a token-free processing marker.
+    static func insertCanonicalProcessing(accountID: UUID, installationID: UUID, consentRevision: UUID,
+                                          appVersion: String, now: Date, on db: Database) async throws -> String {
+        let sql = try VerifiedIdentityService.sql(db)
+        for _ in 0..<3 {
+            let reference = newReference()
+            if try await sql.raw("""
+                INSERT INTO ad_attribution_records
+                    (id,reference,rc_app_user_id,app_version,token,exchange_state,exchange_attempts,created_at,
+                     canonical_account_id,canonical_consent_revision,canonical_installation_id)
+                VALUES (\(bind:UUID()),\(bind:reference),\(bind:accountID.uuidString),\(bind:appVersion),NULL,'processing',0,\(bind:now),
+                        \(bind:accountID),\(bind:consentRevision),\(bind:installationID))
+                ON CONFLICT DO NOTHING RETURNING reference
+                """).first() != nil { return reference }
+        }
+        throw Abort(.conflict, reason: "Apple measurement is already processing", identifier: "ad_measurement_processing")
+    }
+
     /// Withdrawal: erases the row whatever its state, including an unexchanged token. `true` when a row existed.
     /// An exchange in flight for it finds nothing to update and its result is discarded.
     static func delete(reference: String, on db: Database) async throws -> Bool {
@@ -210,6 +229,30 @@ enum AdAttributionStore {
                 """
         }
         return try await sql.raw(query).first() != nil
+    }
+
+    /// Writes a synchronous authenticated exchange only to its token-free processing row.
+    static func record(_ outcome: AppleAttributionExchangeService.Outcome, attempts: Int, reference: String,
+                       now: Date, on db: Database) async throws -> Bool {
+        let query: SQLQueryString
+        switch outcome {
+        case .attributed(let fields):
+            query = """
+                UPDATE ad_attribution_records SET exchange_state='done',exchange_attempts=\(bind:attempts),exchanged_at=\(bind:now),
+                    attribution=\(bind:fields.attribution),campaign_id=\(bind:fields.campaignId),adgroup_id=\(bind:fields.adGroupId),
+                    keyword_id=\(bind:fields.keywordId),ad_id=\(bind:fields.adId),claim_type=\(bind:fields.claimType),
+                    conversion_type=\(bind:fields.conversionType),country_or_region=\(bind:fields.countryOrRegion)
+                WHERE reference=\(bind:reference) AND exchange_state='processing' AND token IS NULL RETURNING id
+                """
+        case .invalid:
+            query = """
+                UPDATE ad_attribution_records SET exchange_state='invalid',exchange_attempts=\(bind:attempts)
+                WHERE reference=\(bind:reference) AND exchange_state='processing' AND token IS NULL RETURNING id
+                """
+        case .notYetAvailable, .failing:
+            return false
+        }
+        return try await VerifiedIdentityService.sql(db).raw(query).first() != nil
     }
 
     private static func total(_ sql: SQLDatabase, _ query: SQLQueryString) async throws -> Int {

@@ -45,15 +45,30 @@ enum LinkedInConversion {
     struct Fact: Sendable {
         fileprivate let accountID: UUID
         fileprivate let occurredAt: Date
+        fileprivate let effectiveAt: Date
         fileprivate let environment: Environment
         fileprivate let key: String
         fileprivate let value: Value?
 
+        var durableKey: String { key }
+        var canonicalAccountID: UUID { accountID }
+        var timestamp: Date { occurredAt }
+        var purchaseTimestamp: Date { effectiveAt }
+        var sourceEnvironment: Environment { environment }
+        var conversionValue: Value? { value }
+
         /// Call only after a NEW account has been committed. A login, identity link or legacy
         /// import is not a sign-up. The caller must establish email verification separately.
         static func accountCreated(accountID: UUID, occurredAt: Date, environment: Environment) -> Fact {
-            .init(accountID: accountID, occurredAt: occurredAt, environment: environment,
+            .init(accountID: accountID, occurredAt: occurredAt, effectiveAt: occurredAt, environment: environment,
                   key: "linkedin:v1:signup:\(environment.rawValue):\(accountID.uuidString.lowercased())", value: nil)
+        }
+
+        static func subscriptionPayment(accountID: UUID, occurredAt: Date, purchasedAt: Date,
+                                        environment: Environment,
+                                        durableKeyHash: String, currency: String, amount: String) -> Fact {
+            .init(accountID: accountID, occurredAt: occurredAt, effectiveAt: purchasedAt, environment: environment,
+                  key: "linkedin:v1:durable:\(durableKeyHash)", value: .init(currencyCode: currency, amount: amount))
         }
     }
 
@@ -69,7 +84,7 @@ enum LinkedInConversion {
     private static func valid(_ permission: Permission, fact: Fact, now: Date) -> Bool {
         permission.accountID == fact.accountID && permission.allowed && permission.attAuthorised &&
         permission.checkedAt <= now && now.timeIntervalSince(permission.checkedAt) < freshness &&
-        permission.expiresAt > now && permission.grantedAt <= fact.occurredAt &&
+        permission.expiresAt > now && permission.grantedAt <= fact.occurredAt && permission.grantedAt <= fact.effectiveAt &&
         fact.occurredAt <= now && now.timeIntervalSince(fact.occurredAt) < maximumEventAge
     }
 
@@ -127,14 +142,29 @@ enum LinkedInConversion {
               let userID = event["app_user_id"] as? String, let accountID = UUID(uuidString: userID),
               let transaction = event["transaction_id"] as? String, !transaction.isEmpty, transaction.utf8.count <= 256,
               transaction.unicodeScalars.allSatisfy({ $0.value >= 33 && $0.value <= 126 }),
-              let timestamp = event["purchased_at_ms"] as? NSNumber, CFGetTypeID(timestamp) != CFBooleanGetTypeID(),
-              timestamp.doubleValue.isFinite, timestamp.doubleValue > 0, timestamp.doubleValue < 32_503_680_000_000,
-              timestamp.doubleValue.rounded(.down) == timestamp.doubleValue,
+              let eventTimestamp = event["event_timestamp_ms"] as? NSNumber,
+              CFGetTypeID(eventTimestamp) != CFBooleanGetTypeID(), eventTimestamp.doubleValue.isFinite,
+              eventTimestamp.doubleValue > 0, eventTimestamp.doubleValue < 32_503_680_000_000,
+              eventTimestamp.doubleValue.rounded(.down) == eventTimestamp.doubleValue,
+              let purchasedTimestamp = event["purchased_at_ms"] as? NSNumber,
+              CFGetTypeID(purchasedTimestamp) != CFBooleanGetTypeID(), purchasedTimestamp.doubleValue.isFinite,
+              purchasedTimestamp.doubleValue > 0, purchasedTimestamp.doubleValue < 32_503_680_000_000,
+              purchasedTimestamp.doubleValue.rounded(.down) == purchasedTimestamp.doubleValue,
               let price = event["price_in_purchased_currency"] as? NSNumber, CFGetTypeID(price) != CFBooleanGetTypeID(),
               price.doubleValue.isFinite, let amount = Decimal(string: price.stringValue, locale: Locale(identifier: "en_US_POSIX")),
               amount > 0, amount < 1_000_000,
               let currency = event["currency"] as? String, Locale.commonISOCurrencyCodes.contains(currency) else { return nil }
-        return .init(accountID: accountID, occurredAt: Date(timeIntervalSince1970: timestamp.doubleValue / 1000),
+        // RevenueCat documents that App Store renewal billing periods can start up to
+        // 24 hours after it collected the payment. The immutable event timestamp is
+        // therefore the occurrence/consent time; the period start is validated but is
+        // not retained because this relay does not maintain entitlement state.
+        let maximumFuturePeriodStart: TimeInterval = type == "RENEWAL" ? 86_400 : 300
+        guard purchasedTimestamp.doubleValue <= eventTimestamp.doubleValue + maximumFuturePeriodStart * 1_000 else {
+            return nil
+        }
+        return .init(accountID: accountID,
+            occurredAt: Date(timeIntervalSince1970: eventTimestamp.doubleValue / 1000),
+            effectiveAt: Date(timeIntervalSince1970: purchasedTimestamp.doubleValue / 1000),
             environment: environment,
             // Account ID intentionally excluded: transferring/restoring a purchase must not make
             // the same Apple transaction a new payment. A renewal has a new transaction ID.

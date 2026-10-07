@@ -141,6 +141,9 @@ enum AccountDeletionService {
                     INSERT INTO account_deletion_apple_credentials(id,job_id,state) VALUES(gen_random_uuid(),\(bind: jobID),'unavailable')
                     """).run()
             }
+            // Revoke measurement identities and commit provider-erasure manifests
+            // before verified identities disappear. Provider IO never occurs here.
+            try await MeasurementPrivacyService.eraseAccount(userID, accountDeletionJobID: jobID, now: now, on: db)
             // Move encrypted credentials durably, never copy a plaintext provider token.
             try await AppleCredentialService.discard(userID: userID, on: db)
             try await sql.raw("UPDATE users SET lifecycle_state='deleted',auth_version=auth_version+1,email=NULL,name=NULL,apple_user_id=NULL,subscription_tier='free',subscription_verified_until=NULL,updated_at=\(bind: now) WHERE id=\(bind: userID)").run()

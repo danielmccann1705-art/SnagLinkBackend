@@ -78,6 +78,16 @@ enum DeletionReasonKind: String, Sendable, Equatable, CaseIterable {
     /// pass lost the lease before reaching it). The next pass runs it.
     case revenueCatPending = "revenuecat_pending"
 
+    // MARK: - Optional measurement providers
+
+    /// Revoked analytics/advertising subjects have durable downstream erasure work
+    /// still pending. New collection remains stopped while this work retries.
+    case measurementErasurePending = "measurement_erasure_pending"
+
+    /// A provider erasure needs operator action or its configured transport is
+    /// unavailable. The provider's own response is never retained here.
+    case measurementErasureUnavailable = "measurement_erasure_unavailable"
+
     // MARK: - Objects: the manifest has not finished
 
     /// Objects remain in the manifest and nothing above explains why. The ordinary

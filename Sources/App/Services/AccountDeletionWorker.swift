@@ -302,14 +302,17 @@ enum AccountDeletionWorker {
                 state=CASE WHEN database_cleanup_state='completed' AND object_cleanup_state='completed'
                         AND apple_revocation_state IN ('not_applicable','revoked','already_revoked')
                         AND revenuecat_state IN ('not_requested','deleted','not_found','skipped_environment')
+                        AND measurement_erasure_state IN ('not_requested','completed')
                         AND NOT EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND state<>'completed') THEN 'completed'
                     WHEN (database_cleanup_state<>'completed' AND NOT EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND mode='explicit' AND state IN ('pending','erasing'))) OR object_cleanup_state='blocked'
                         OR EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND state='blocked')
                         OR apple_revocation_state IN ('misconfigured','unavailable')
-                        OR revenuecat_state='misconfigured' THEN 'blocked' ELSE 'ready' END,
+                        OR revenuecat_state='misconfigured'
+                        OR measurement_erasure_state IN ('manual_required','failing') THEN 'blocked' ELSE 'ready' END,
                 completed_at=CASE WHEN database_cleanup_state='completed' AND object_cleanup_state='completed'
                         AND apple_revocation_state IN ('not_applicable','revoked','already_revoked')
                         AND revenuecat_state IN ('not_requested','deleted','not_found','skipped_environment')
+                        AND measurement_erasure_state IN ('not_requested','completed')
                         AND NOT EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND state<>'completed') THEN NOW() ELSE NULL END,
                 last_error_kind=CASE WHEN EXISTS(SELECT 1 FROM account_deletion_unresolved_objects WHERE job_id=\(bind: lease.id)) THEN \(DeletionReasonKind.unresolvedLegacyObjectOwnership.sql)
                     WHEN EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
@@ -328,8 +331,10 @@ enum AccountDeletionWorker {
                     WHEN \(AccountDeletionGraphService.targetAmbiguous(jobID: lease.id)) THEN \(DeletionReasonKind.objectTargetAmbiguous.sql)
                     WHEN revenuecat_state='misconfigured' THEN \(DeletionReasonKind.revenueCatConfiguration.sql)
                     WHEN revenuecat_state='failing' THEN \(DeletionReasonKind.revenueCatUnavailable.sql)
+                    WHEN measurement_erasure_state IN ('manual_required','failing') THEN \(DeletionReasonKind.measurementErasureUnavailable.sql)
                     WHEN object_cleanup_state<>'completed' THEN \(DeletionReasonKind.objectCleanupPending.sql)
-                    WHEN revenuecat_state='pending' THEN \(DeletionReasonKind.revenueCatPending.sql) ELSE NULL END,
+                    WHEN revenuecat_state='pending' THEN \(DeletionReasonKind.revenueCatPending.sql)
+                    WHEN measurement_erasure_state='pending' THEN \(DeletionReasonKind.measurementErasurePending.sql) ELSE NULL END,
                 available_at=clock_timestamp()+make_interval(secs => \(bind: delay)),lease_token=NULL,lease_expires_at=NULL
             WHERE id=\(bind: lease.id) AND lease_token=\(bind: lease.token) AND state='leased' AND lease_expires_at>clock_timestamp() RETURNING state
             """).first()

@@ -172,6 +172,19 @@ public func configure(_ app: Application,
         app.migrations.add(ReKeyUploadRetirements())
         // 2.0.2 Apple ads measurement: one new table, nothing else touched (Sources/App/AdMeasurement).
         app.migrations.add(CreateAdAttributionRecords())
+        // Replacement 2.0.1 measurement privacy boundary: consent, per-purpose subjects,
+        // per-installation ATT assertions and durable provider erasure manifests.
+        app.migrations.add(CreateMeasurementPrivacyState())
+        // Authenticated device observations, product-event outbox and canonical Apple binding.
+        app.migrations.add(CreateMeasurementRelayState())
+        // Authenticated RevenueCat lifecycle facts and provider transport metadata.
+        app.migrations.add(AddMeasurementLifecycleTransport())
+        // RevenueCat event generation and subscription period start are distinct.
+        app.migrations.add(SeparateRevenueCatEventTimes())
+        // Provider-event ledger and bounded latest-period refund reconciliation.
+        app.migrations.add(CreateRevenueCatLifecycleLedger())
+        app.migrations.add(HardenRevenueCatLifecycleConflicts())
+        app.migrations.add(AllowRevenueCatEventDispatch())
 
         try await app.autoMigrate()
     } else {

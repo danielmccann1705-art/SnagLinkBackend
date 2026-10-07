@@ -41,6 +41,8 @@ struct CleanupService {
         /// 2.0.2 advert measurement (`AdMeasurementMaintenance`): retention sweep, token expiry and the
         /// Apple exchange. Optional for the same reason.
         var adMeasurement: AdMeasurementMaintenance.Counts? = nil
+        var measurementDispatch: MeasurementDispatchService.Counts? = nil
+        var measurementErasure: MeasurementErasureService.Counts? = nil
         /// The container's own numbers at the end of the pass (wave 3): CPU limit and use,
         /// memory, the database pool and round trips. Numbers only; optional for the same
         /// reason as the fields above, and never able to fail the pass.
@@ -149,6 +151,10 @@ struct CleanupService {
         var removed = Removed()
 
         removed.appleWebCredentials = try await AppleWebCredentialEscrowService.run(app: app, on: db)
+        // Settle privacy-provider work before the deletion worker evaluates its gate.
+        // Both workers are bounded and return counts only; no identifier enters cleanup logs.
+        removed.measurementDispatch = await MeasurementDispatchService.run(app: app, on: db)
+        removed.measurementErasure = await MeasurementErasureService.run(app: app, on: db)
         removed.accountDeletionJobs = try await AccountDeletionWorker.run(app: app, on: db, transactionMode: .maintenanceConnection,
                                                                           budget: budget)
         try await SnagDeletionService.cleanupFiles(app: app, on: db)
