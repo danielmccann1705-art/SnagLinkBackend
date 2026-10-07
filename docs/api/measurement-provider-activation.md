@@ -142,14 +142,16 @@ would make pending provider erasure manifests unreadable.
 The existing cleanup schedule leases and dispatches the durable outbox, then processes
 provider erasure, then evaluates account-deletion gates. A current permission revision,
 active per-purpose subject, current feature flag, and fresh installation-bound ATT
-observation are rechecked under the account lock before every cross-company send.
-That account lock remains held during the single provider request (up to 20 seconds)
-so withdrawal or deletion cannot race past an already authorised send. A slow
-provider can therefore delay a permission mutation or account deletion for that
-account by the request timeout. The on-device StoreKit flow is unchanged, but any
-same-account server operation that needs to write the locked user row can wait,
-including an entitlement refresh if that path updates the row. Treat this as an
-activation and performance gate rather than claiming the worker is nonblocking.
+observation are rechecked under the per-purpose barrier before every cross-company
+send. The leased job row and purpose barrier remain held during the single provider
+request (up to 20 seconds), so withdrawal or deletion cannot race past an already
+authorised send. A slow provider can therefore delay that account's permission
+mutation or deletion by the request timeout. It does not lock the ordinary user row,
+so provider dispatch does not itself block unrelated same-account profile or
+entitlement writes through that row; those operations may still wait on their own
+database locks. The on-device StoreKit flow remains unchanged. Treat provider latency
+as an activation and performance gate for privacy mutations even though the dispatch
+does not hold the user row.
 Ambiguous transport outcomes become `uncertain` and are not blindly replayed. Rate
 limits use bounded retry state. Configuration or request failures require manual
 review. No provider call is made by tests without an injected synthetic transport.

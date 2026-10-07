@@ -108,6 +108,37 @@ final class MeasurementPrivacyTests: XCTestCase {
         try await enable("crossCompanyAdsEnabled")
     }
 
+    private func queueProductAnalyticsDispatch() async throws -> UUID {
+        app.storage[MeasurementDispatchService.ConfigurationKey.self] = .init(
+            postHogProjectKey: "phc_synthetic", postHogEnvironment: .sandbox,
+            singularURL: nil, singularAPIKey: nil, linkedInAccessToken: nil,
+            linkedInSignupRule: nil, linkedInSubscriptionRule: nil, linkedInEnvironment: nil)
+        try await enable("productAnalyticsEnabled")
+        let grant = try await put("productAnalytics", decision: "granted")
+        let revision = try uuid(try permission("productAnalytics", in: grant)["revision"])
+        let event = try await request(.POST, "api/v2/measurement/events", token: jwt, object: [
+            "eventId": UUID().uuidString, "occurredAt": date(Date().addingTimeInterval(1)),
+            "consentRevision": revision.uuidString, "installationId": UUID().uuidString,
+            "event": ["schemaVersion": 1, "name": "first_project_created", "properties": [:]]
+        ])
+        XCTAssertEqual(event.status, .accepted, event.body.string)
+        return try await sql.raw("""
+            SELECT subject_id FROM measurement_permission_current
+            WHERE account_id=\(bind:userID) AND purpose='productAnalytics'
+            """).first()!.decode(column: "subject_id", as: UUID.self)
+    }
+
+    private func createMeasurementDeletionJob() async throws -> UUID {
+        let id = UUID(), receipt = SHA256Hasher.hash(token: "measurement-deletion-\(id.uuidString)")
+        try await sql.raw("""
+            INSERT INTO account_deletion_jobs(id,user_id,receipt_hash,requested_at,state,available_at,
+                database_cleanup_state,object_cleanup_state,apple_revocation_state)
+            VALUES(\(bind:id),\(bind:userID),\(bind:receipt),NOW(),'ready',NOW(),
+                   'pending','completed','not_applicable')
+            """).run()
+        return id
+    }
+
     private func grantPurchaseOrigin(_ installation: UUID = UUID()) async throws -> (UUID, UUID) {
         let response = try await put("crossCompanyAds", decision: "granted", installationID: installation,
                                      attStatus: "authorized", attAssertedAt: Date())
@@ -1013,6 +1044,83 @@ final class MeasurementPrivacyTests: XCTestCase {
         try await sql.raw("DELETE FROM measurement_revenuecat_events WHERE id=\(bind:chargeID)").run()
     }
 
+    func testProviderWaitDoesNotLockUserRowAndDeletionWaitsThenPreservesExposureManifest() async throws {
+        let subject = try await queueProductAnalyticsDispatch()
+        let deletionJob = try await createMeasurementDeletionJob()
+        let transport = SuspendedMeasurementHTTPTransport()
+        app.storage[MeasurementDispatchService.TransportKey.self] = transport.transport
+        let dispatch = Task { await MeasurementDispatchService.run(app: self.app, on: self.app.db) }
+        await transport.waitUntilStarted()
+
+        try await app.db.transaction { tx in
+            let txSQL = try VerifiedIdentityService.sql(tx)
+            try await txSQL.raw("SET LOCAL lock_timeout='250ms'").run()
+            try await txSQL.raw("UPDATE users SET name='Available during provider wait' WHERE id=\(bind:self.userID)").run()
+        }
+
+        let probe = MeasurementTaskProbe()
+        let deletion = Task {
+            await probe.markStarted()
+            try await self.app.db.transaction { tx in
+                let txSQL = try VerifiedIdentityService.sql(tx)
+                _ = try await txSQL.raw("SELECT id FROM users WHERE id=\(bind:self.userID) FOR UPDATE").first()
+                try await MeasurementPrivacyService.eraseAccount(
+                    self.userID, accountDeletionJobID: deletionJob, now: Date(), on: tx)
+            }
+            await probe.markFinished()
+        }
+        await probe.waitUntilStarted()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let deletionFinishedEarly = await probe.isFinished()
+        XCTAssertFalse(deletionFinishedEarly, "deletion must wait for the in-flight purpose barrier")
+
+        await transport.release()
+        _ = await dispatch.value
+        try await deletion.value
+        let calls = await transport.callCount()
+        XCTAssertEqual(calls, 1)
+        let erasure = try await sql.raw("""
+            SELECT state,account_deletion_job_id FROM measurement_erasure_jobs
+            WHERE subject_id=\(bind:subject) AND destination='posthog'
+            """).first()
+        let row = try XCTUnwrap(erasure)
+        XCTAssertEqual(try row.decode(column: "state", as: String.self), "pending")
+        XCTAssertEqual(try row.decode(column: "account_deletion_job_id", as: UUID?.self), deletionJob)
+        let remainingDispatch = try await sql.raw("SELECT id FROM measurement_dispatch_jobs WHERE account_id=\(bind:userID)").first()
+        XCTAssertNil(remainingDispatch)
+
+        try await sql.raw("DELETE FROM measurement_erasure_jobs WHERE account_deletion_job_id=\(bind:deletionJob)").run()
+        try await sql.raw("DELETE FROM account_deletion_jobs WHERE id=\(bind:deletionJob)").run()
+    }
+
+    func testDeletionThatOwnsPurposeBarrierSuppressesClaimedWorkBeforeTransport() async throws {
+        _ = try await queueProductAnalyticsDispatch()
+        let deletionJob = try await createMeasurementDeletionJob()
+        let recorder = MeasurementHTTPRecorder()
+        app.storage[MeasurementDispatchService.TransportKey.self] = recorder.transport
+        let erased = MeasurementTaskProbe()
+        let deletion = Task {
+            try await self.app.db.transaction { tx in
+                let txSQL = try VerifiedIdentityService.sql(tx)
+                _ = try await txSQL.raw("SELECT id FROM users WHERE id=\(bind:self.userID) FOR UPDATE").first()
+                try await MeasurementPrivacyService.eraseAccount(
+                    self.userID, accountDeletionJobID: deletionJob, now: Date(), on: tx)
+                await erased.markStarted()
+                try await Task.sleep(nanoseconds: 250_000_000)
+            }
+            await erased.markFinished()
+        }
+        await erased.waitUntilStarted()
+        let counts = await MeasurementDispatchService.run(app: app, on: app.db)
+        try await deletion.value
+        let calls = await recorder.calls()
+        XCTAssertEqual(counts.delivered, 0)
+        XCTAssertEqual(calls.count, 0)
+
+        try await sql.raw("DELETE FROM measurement_erasure_jobs WHERE account_deletion_job_id=\(bind:deletionJob)").run()
+        try await sql.raw("DELETE FROM account_deletion_jobs WHERE id=\(bind:deletionJob)").run()
+    }
+
     func testSandboxRevenueCatFactCannotDispatchIntoProductionPostHog() async throws {
         app.storage[RevenueCatMeasurementService.ConfigurationKey.self] = .init(
             authorization: "Bearer synthetic-webhook-secret", appID: "synthetic-rc-app")
@@ -1473,6 +1581,48 @@ private actor MeasurementHTTPRecorder {
         { uri, headers, body in await self.record(uri, headers, body) }
     }
     func calls() -> [Call] { values }
+}
+
+private actor SuspendedMeasurementHTTPTransport {
+    private var calls = 0
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func send(_ uri: URI, _ headers: HTTPHeaders, _ body: Data) async -> MeasurementDispatchService.Reply {
+        calls += 1
+        started = true
+        startWaiters.forEach { $0.resume() }; startWaiters.removeAll()
+        if !released { await withCheckedContinuation { releaseWaiters.append($0) } }
+        return .init(status: 201, retryAfter: nil)
+    }
+
+    nonisolated var transport: MeasurementDispatchService.Transport {
+        { uri, headers, body in await self.send(uri, headers, body) }
+    }
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+    func release() {
+        released = true
+        releaseWaiters.forEach { $0.resume() }; releaseWaiters.removeAll()
+    }
+    func callCount() -> Int { calls }
+}
+
+private actor MeasurementTaskProbe {
+    private var started = false
+    private var finished = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func markStarted() { started = true; waiters.forEach { $0.resume() }; waiters.removeAll() }
+    func markFinished() { finished = true }
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func isFinished() -> Bool { finished }
 }
 
 private actor MeasurementErasureRecorder {

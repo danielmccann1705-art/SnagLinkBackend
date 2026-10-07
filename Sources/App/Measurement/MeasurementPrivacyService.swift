@@ -165,6 +165,13 @@ enum MeasurementPrivacyService {
     /// Provider failure cannot fail this step: only durable local revocation and queued work occur here.
     static func eraseAccount(_ accountID: UUID, accountDeletionJobID: UUID, now: Date, on db: Database) async throws {
         let sql = try VerifiedIdentityService.sql(db)
+        // The caller already owns the user row. Take purpose barriers in this
+        // fixed order before exposure capture or outbox removal, matching dispatch
+        // and permission mutation without holding the user row in provider I/O.
+        for purpose in [MeasurementPurpose.productAnalytics, .crossCompanyAds] {
+            try await VerifiedIdentityService.lock(
+                "measurement-permission:\(accountID.uuidString):\(purpose.rawValue)", on: db)
+        }
         var queued = false
         for purpose in [MeasurementPurpose.productAnalytics, .crossCompanyAds] {
             queued = try await revokeSubjects(accountID: accountID, purpose: purpose,

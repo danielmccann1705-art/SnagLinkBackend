@@ -88,31 +88,36 @@ enum MeasurementDispatchService {
         }
     }
 
-    /// The account row and purpose advisory lock remain held through the single
-    /// provider attempt. Withdrawal/deletion therefore either wins first and
-    /// suppresses this job, or waits until this attempt has a durable outcome.
+    /// The job row and purpose advisory lock remain held through the single
+    /// provider attempt. Withdrawal/deletion take the same purpose lock, so they
+    /// either win first and suppress this job, or wait until the attempt has a
+    /// durable outcome. Ordinary writes to the user's row remain independent.
     private static func perform(_ lease: Lease, app: Application, on db: Database) async throws -> Outcome {
         try await db.transaction { tx in
             let sql = try VerifiedIdentityService.sql(tx)
-            let queryNow = Date()
+            // Route first without a row lock so we can take the account/purpose
+            // advisory before the leased job row. Permission mutation and account
+            // deletion use the same advisory key and order.
+            guard let route = try await sql.raw("""
+                SELECT destination,account_id FROM measurement_dispatch_jobs
+                WHERE id=\(bind:lease.id) AND lease_token=\(bind:lease.token) AND state='leased'
+                """).first() else { return .suppressed }
+            let destination = try route.decode(column: "destination", as: String.self)
+            let purpose: MeasurementPurpose = destination == "posthog" ? .productAnalytics : .crossCompanyAds
+            let accountID = try route.decode(column: "account_id", as: UUID.self)
+            try await VerifiedIdentityService.lock("measurement-permission:\(accountID.uuidString):\(purpose.rawValue)", on: tx)
+
+            let gateNow = Date()
             guard let row = try await sql.raw("""
                 SELECT j.destination,j.source_kind,j.source_id,j.account_id,j.subject_id,j.consent_revision,j.installation_id,
                        j.payload::text AS payload_text,s.opaque_subject,u.lifecycle_state
                 FROM measurement_dispatch_jobs j JOIN measurement_subjects s ON s.id=j.subject_id
                 JOIN users u ON u.id=j.account_id
                 WHERE j.id=\(bind:lease.id) AND j.lease_token=\(bind:lease.token) AND j.state='leased'
-                  AND j.lease_expires_at>\(bind:queryNow) FOR UPDATE OF j,u
+                  AND j.destination=\(bind:destination) AND j.account_id=\(bind:accountID)
+                  AND j.lease_expires_at>\(bind:gateNow) FOR UPDATE OF j
                 """).first() else { return .suppressed }
-            let destination = try row.decode(column: "destination", as: String.self)
-            let purpose: MeasurementPurpose = destination == "posthog" ? .productAnalytics : .crossCompanyAds
-            let accountID = try row.decode(column: "account_id", as: UUID.self)
             guard try row.decode(column: "lifecycle_state", as: String.self) == "active" else { return .suppressed }
-            try await VerifiedIdentityService.lock("measurement-permission:\(accountID.uuidString):\(purpose.rawValue)", on: tx)
-            let gateNow = Date()
-            guard try await sql.raw("""
-                SELECT 1 FROM measurement_dispatch_jobs WHERE id=\(bind:lease.id) AND lease_token=\(bind:lease.token)
-                  AND state='leased' AND lease_expires_at>\(bind:gateNow)
-                """).first() != nil else { return .uncertain }
             let subjectID = try row.decode(column: "subject_id", as: UUID.self)
             let revision = try row.decode(column: "consent_revision", as: UUID.self)
             guard try await sql.raw("""
