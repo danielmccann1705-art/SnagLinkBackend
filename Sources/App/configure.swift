@@ -185,6 +185,8 @@ public func configure(_ app: Application,
         app.migrations.add(CreateRevenueCatLifecycleLedger())
         app.migrations.add(HardenRevenueCatLifecycleConflicts())
         app.migrations.add(AllowRevenueCatEventDispatch())
+        // Optional purchase-callback witness and immutable acquisition installation.
+        app.migrations.add(CreateMeasurementPurchaseOrigins())
 
         try await app.autoMigrate()
     } else {

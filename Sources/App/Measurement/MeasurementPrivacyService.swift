@@ -178,6 +178,7 @@ enum MeasurementPrivacyService {
             SELECT 1 FROM measurement_erasure_jobs WHERE account_id=\(bind:accountID) AND state<>'completed' LIMIT 1
             """).first() != nil
         try await sql.raw("DELETE FROM measurement_att_assertions WHERE account_id=\(bind:accountID)").run()
+        try await PurchaseOriginService.eraseAccount(accountID, now: now, on: sql)
         let permissions = try await sql.raw("SELECT purpose,revision FROM measurement_permission_current WHERE account_id=\(bind:accountID) FOR UPDATE").all()
         for row in permissions {
             let purpose = try row.decode(column: "purpose", as: String.self)
@@ -255,6 +256,10 @@ enum MeasurementPrivacyService {
             WHERE account_id=\(bind:accountID) AND purpose=\(bind:purpose.rawValue) AND state='active'
             RETURNING id
             """).all()
+        let subjectIDs = try subjects.map { try $0.decode(column: "id", as: UUID.self) }
+        if purpose == .crossCompanyAds {
+            try await PurchaseOriginService.revoke(subjectIDs: subjectIDs, now: now, on: sql)
+        }
         let destinations: [String]
         switch purpose {
         case .productAnalytics: destinations = ["posthog"]
@@ -290,8 +295,7 @@ enum MeasurementPrivacyService {
                 WHERE account_id=\(bind:accountID) AND destination IN ('singular','linkedin') AND state='delivered'
                 """).run()
         }
-        for row in subjects {
-            let subjectID = try row.decode(column: "id", as: UUID.self)
+        for subjectID in subjectIDs {
             if purpose == .crossCompanyAds {
                 try await sql.raw("UPDATE measurement_device_bindings SET revoked_at=\(bind:now) WHERE subject_id=\(bind:subjectID) AND revoked_at IS NULL").run()
             }

@@ -58,6 +58,38 @@ cannot make the earlier creation a sign-up, and existing login/authentication pa
 must not backfill it. A future sign-up conversion needs the separately designed,
 short-lived one-use pre-auth consent capability.
 
+## Purchase-origin witness (preparatory)
+
+The authenticated purchase-origin routes preserve optional installation evidence
+around StoreKit without taking part in purchase fulfilment:
+
+- `POST /api/v2/measurement/purchase-intents` accepts exactly
+  `installationId`, `consentRevision`, and `productId`, and returns
+  `intentId`, a one-use `capability`, and `expiresAt` with `Cache-Control: no-store`.
+- `POST /api/v2/measurement/purchase-intents/:intentId/witness` accepts exactly
+  `capability`, `transactionId`, `productId`, `purchaseDate`, and
+  `source: "purchaseCallback"`, then returns HTTP 202 for accepted evidence.
+
+Preparation requires the current cross-company permission revision, fresh authorized
+ATT for that exact installation, an active subject, and the exact monthly or annual
+product. The capability expires after 15 minutes. The client supplies no price,
+currency, receipt, account, environment, or advertising subject. A callback is only
+a candidate until the authenticated RevenueCat fact matches the exact account, app,
+App Store, product, environment, transaction, and authoritative purchase time.
+Provider-first and witness-first arrival are both supported for seven days; replay is
+idempotent only for the same normalized witness. Conflicts are quarantined and never
+borrow permission or ATT from another installation. Withdrawal or account deletion
+revokes and scrubs the association while retaining only keyed deduplication tombstones.
+
+Set `MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY` to a dedicated base64-encoded 32-byte key
+and `MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT` to exactly `sandbox` or `production`.
+Do not rotate the HMAC key without a tombstone migration. The feature remains
+unavailable unless `crossCompanyAdsEnabled` is also enabled. A prepared intent or
+matched acquisition does not enqueue an ad conversion: provider adapters, current
+revision/ATT checks at dispatch, native runtime acceptance, and live feed validation
+remain separate activation gates. The callback association is authenticated app
+evidence, not cryptographic proof of the physical Apple device.
+
 ## PostHog EU relay
 
 Set `POSTHOG_PROJECT_API_KEY` to the project's public ingestion key and set

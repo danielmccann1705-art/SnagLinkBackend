@@ -50,6 +50,7 @@ enum RevenueCatMeasurementService {
             if let replay = try await sql.raw("SELECT normalized_hash,charge_key_hash FROM measurement_revenuecat_lifecycle_events WHERE provider_event_key_hash=\(bind:fact.providerEventKeyHash)").first() {
                 if try replay.decode(column: "normalized_hash", as: String.self) != fact.normalizedHash {
                     let chargeKey = try replay.decode(column: "charge_key_hash", as: String.self)
+                    try await VerifiedIdentityService.lock("measurement-revenuecat-charge:\(chargeKey)", on: tx)
                     try await sql.raw("""
                         UPDATE measurement_revenuecat_lifecycle_events
                         SET resolution='unresolved',conflict_hash=\(bind:fact.normalizedHash),conflicted_at=\(bind:now)
@@ -80,7 +81,7 @@ enum RevenueCatMeasurementService {
             var chargeDispatchEligible = true
             if fact.isPositiveCharge, let currency = fact.currency, let amount = fact.monetaryDelta {
                 try await VerifiedIdentityService.lock("measurement-revenuecat-charge:\(fact.chargeKeyHash)", on: tx)
-                if let replay = try await sql.raw("SELECT fact_hash FROM measurement_revenuecat_events WHERE durable_key_hash=\(bind:fact.chargeKeyHash)").first() {
+                if let replay = try await sql.raw("SELECT id,fact_hash FROM measurement_revenuecat_events WHERE durable_key_hash=\(bind:fact.chargeKeyHash)").first() {
                     if try replay.decode(column: "fact_hash", as: String.self) != fact.chargeFactHash {
                         try await sql.raw("""
                             UPDATE measurement_revenuecat_lifecycle_events
@@ -91,6 +92,7 @@ enum RevenueCatMeasurementService {
                         try await quarantine(chargeKeyHash: fact.chargeKeyHash, on: sql)
                         return
                     }
+                    chargeID = try replay.decode(column: "id", as: UUID.self)
                 } else {
                     let sourceID = UUID()
                     try await sql.raw("""
@@ -106,6 +108,10 @@ enum RevenueCatMeasurementService {
                 }
                 chargeDispatchEligible = try await refreshAdjustment(chargeKeyHash: fact.chargeKeyHash,
                     accountID: fact.accountID, now: now, on: sql) != "unresolved"
+                if let chargeID, chargeDispatchEligible {
+                    try await PurchaseOriginService.acceptRevenueCatCharge(
+                        fact, chargeID: chargeID, app: app, now: now, on: tx)
+                }
             } else if fact.effect == .refund || fact.effect == .refundReversal {
                 try await VerifiedIdentityService.lock("measurement-revenuecat-charge:\(fact.chargeKeyHash)", on: tx)
                 let state = try await reconcileAdjustment(fact, eventID: lifecycleID, now: now, on: sql)
@@ -326,6 +332,11 @@ enum RevenueCatMeasurementService {
     }
 
     private static func quarantine(chargeKeyHash: String, on sql: SQLDatabase) async throws {
+        try await sql.raw("""
+            UPDATE measurement_purchase_acquisitions SET state='conflict',conflicted_at=COALESCE(conflicted_at,NOW())
+            WHERE state='active' AND initial_charge_id IN (
+                SELECT id FROM measurement_revenuecat_events WHERE durable_key_hash=\(bind:chargeKeyHash))
+            """).run()
         try await sql.raw("""
             UPDATE measurement_revenuecat_lifecycle_events SET resolution='unresolved'
             WHERE charge_key_hash=\(bind:chargeKeyHash)

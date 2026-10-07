@@ -38,6 +38,10 @@ struct RevenueCatLifecycleFact: Sendable {
     let currency: String?
     let monetaryDelta: String?
     let productID: String
+    /// Provider references are held only for the duration of the authenticated
+    /// request so purchase-origin HMACs can be computed. Callers never persist them.
+    let transactionID: String
+    let originalTransactionID: String
 
     var isResolved: Bool { effect != .unresolved }
     var isPositiveCharge: Bool { effect == .charge }
@@ -149,7 +153,8 @@ enum RevenueCatLifecycleNormalizer {
                      accountID: accountID, environment: environment, kind: kind, effect: effect,
                      chargeKeyHash: chargeKey, subscriptionChainKeyHash: chainKey,
                      eventGeneratedAt: eventAt, purchasedAt: purchasedAt, expirationAt: expirationAt,
-                     reason: reason, currency: currency, monetaryDelta: monetaryDelta, productID: product)
+                     reason: reason, currency: currency, monetaryDelta: monetaryDelta, productID: product,
+                     transactionID: transaction, originalTransactionID: originalTransaction)
     }
 
     private static func kind(_ value: String) -> RevenueCatLifecycleFact.Kind? {

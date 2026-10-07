@@ -28,6 +28,9 @@ final class MeasurementPrivacyTests: XCTestCase {
 
     override func tearDown() async throws {
         if let app {
+            try? await sql.raw("DELETE FROM measurement_purchase_intents WHERE account_id=\(bind: userID)").run()
+            try? await sql.raw("UPDATE measurement_revenuecat_events SET origin_acquisition_id=NULL WHERE account_id=\(bind: userID)").run()
+            try? await sql.raw("DELETE FROM measurement_purchase_acquisitions WHERE account_id=\(bind: userID)").run()
             try? await sql.raw("DELETE FROM measurement_dispatch_jobs WHERE account_id=\(bind: userID)").run()
             try? await sql.raw("DELETE FROM measurement_revenuecat_adjustments WHERE account_id=\(bind: userID)").run()
             try? await sql.raw("DELETE FROM measurement_revenuecat_lifecycle_events WHERE account_id=\(bind: userID)").run()
@@ -97,11 +100,48 @@ final class MeasurementPrivacyTests: XCTestCase {
         try await FeatureFlag(key: key, enabled: true).save(on: app.db)
     }
 
+    private func configurePurchaseOrigin(_ environment: LinkedInConversion.Environment = .sandbox) async throws {
+        app.storage[PurchaseOriginService.ConfigurationKey.self] = .init(
+            hmacKey: Data(repeating: 0x71, count: 32), environment: environment)
+        app.storage[RevenueCatMeasurementService.ConfigurationKey.self] = .init(
+            authorization: "Bearer synthetic-webhook-secret", appID: "synthetic-rc-app")
+        try await enable("crossCompanyAdsEnabled")
+    }
+
+    private func grantPurchaseOrigin(_ installation: UUID = UUID()) async throws -> (UUID, UUID) {
+        let response = try await put("crossCompanyAds", decision: "granted", installationID: installation,
+                                     attStatus: "authorized", attAssertedAt: Date())
+        XCTAssertEqual(response.status, .ok, response.body.string)
+        return (installation, try uuid(try permission("crossCompanyAds", in: response)["revision"]))
+    }
+
+    private func preparePurchase(_ installation: UUID, _ revision: UUID,
+                                 product: String = "com.snaglist.pro.monthly",
+                                 token: String? = nil) async throws -> (XCTHTTPResponse, UUID?, String?) {
+        let response = try await request(.POST, "api/v2/measurement/purchase-intents", token: token ?? jwt, object: [
+            "installationId": installation.uuidString, "consentRevision": revision.uuidString, "productId": product
+        ])
+        guard response.status == .created else { return (response, nil, nil) }
+        let body = try object(response)
+        return (response, try uuid(body["intentId"]), try XCTUnwrap(body["capability"] as? String))
+    }
+
+    private func witnessPurchase(_ intent: UUID, _ capability: String, transaction: String,
+                                 product: String = "com.snaglist.pro.monthly", purchaseDate: Date,
+                                 source: String = "purchaseCallback", token: String? = nil) async throws -> XCTHTTPResponse {
+        try await request(.POST, "api/v2/measurement/purchase-intents/\(intent.uuidString)/witness",
+                          token: token ?? jwt, object: [
+            "capability": capability, "transactionId": transaction, "productId": product,
+            "purchaseDate": date(purchaseDate), "source": source
+        ])
+    }
+
     private func revenueCatBody(transaction: String = "synthetic-transaction", type: String = "INITIAL_PURCHASE",
                                 eventID: String = UUID().uuidString, eventTimestamp: Date = Date(),
                                 purchasedAt: Date? = nil, price: Any? = 14.99,
                                 currency: String = "GBP",
-                                cancellationReason: String? = nil, expirationReason: String? = nil) throws -> Data {
+                                cancellationReason: String? = nil, expirationReason: String? = nil,
+                                originalTransaction: String? = nil) throws -> Data {
         let purchasedAt = purchasedAt ?? eventTimestamp.addingTimeInterval(1)
         var event: [String: Any] = [
             "id": eventID, "app_id": "synthetic-rc-app", "app_user_id": userID.uuidString,
@@ -111,7 +151,7 @@ final class MeasurementPrivacyTests: XCTestCase {
             "purchased_at_ms": Int64(purchasedAt.timeIntervalSince1970 * 1000),
             "expiration_at_ms": Int64(purchasedAt.addingTimeInterval(30 * 86_400).timeIntervalSince1970 * 1000),
             "price_in_purchased_currency": price ?? NSNull(), "currency": currency, "transaction_id": transaction,
-            "original_transaction_id": "original-\(transaction)",
+            "original_transaction_id": originalTransaction ?? "original-\(transaction)",
             "subscriber_attributes": ["email": "must-never-be-stored@example.test"]
         ]
         if let cancellationReason { event["cancel_reason"] = cancellationReason }
@@ -1097,6 +1137,328 @@ final class MeasurementPrivacyTests: XCTestCase {
         XCTAssertEqual(state, "manual_required")
         let subjectState = try await sql.raw("SELECT state FROM measurement_subjects WHERE id=\(bind:subject)").first()!.decode(column: "state", as: String.self)
         XCTAssertEqual(subjectState, "revoked", "the manifest subject remains until verified provider completion")
+    }
+
+    func testPurchaseWitnessBeforeRevenueCatMatchesOnceWithoutAdDispatch() async throws {
+        try await configurePurchaseOrigin()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        XCTAssertEqual(prepared.0.status, .created)
+        XCTAssertEqual(prepared.0.headers.first(name: .cacheControl), "no-store")
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let purchaseDate = Date().addingTimeInterval(1)
+        let first = try await witnessPurchase(intent, capability, transaction: "origin-witness-first", purchaseDate: purchaseDate)
+        let replay = try await witnessPurchase(intent, capability, transaction: "origin-witness-first", purchaseDate: purchaseDate)
+        XCTAssertEqual(first.status, .accepted, first.body.string)
+        XCTAssertEqual(replay.status, .accepted, replay.body.string)
+        let provider = try await webhook(revenueCatBody(transaction: "origin-witness-first",
+            eventTimestamp: purchaseDate, purchasedAt: purchaseDate))
+        XCTAssertEqual(provider.status, .ok)
+
+        let origin = try await sql.raw("""
+            SELECT i.state,a.account_id,a.installation_id,e.origin_acquisition_id
+            FROM measurement_purchase_intents i
+            JOIN measurement_purchase_acquisitions a ON a.initial_charge_id=i.matched_charge_id
+            JOIN measurement_revenuecat_events e ON e.id=i.matched_charge_id
+            WHERE i.id=\(bind:intent)
+            """).first()
+        let row = try XCTUnwrap(origin)
+        XCTAssertEqual(try row.decode(column: "state", as: String.self), "matched")
+        XCTAssertEqual(try row.decode(column: "account_id", as: UUID?.self), userID)
+        XCTAssertEqual(try row.decode(column: "installation_id", as: UUID?.self), installation)
+        XCTAssertNotNil(try row.decode(column: "origin_acquisition_id", as: UUID?.self))
+        let jobs = try await sql.raw("SELECT count(*) AS n FROM measurement_dispatch_jobs WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(jobs, 0, "an acquisition match is preparatory and cannot enable provider delivery")
+        let durable = try await sql.raw("SELECT row_to_json(i)::text AS body FROM measurement_purchase_intents i WHERE id=\(bind:intent)").first()!.decode(column: "body", as: String.self)
+        XCTAssertFalse(durable.contains(capability)); XCTAssertFalse(durable.contains("origin-witness-first"))
+    }
+
+    func testRevenueCatBeforeWitnessMatchesAndProviderEnvironmentMustAgree() async throws {
+        try await configurePurchaseOrigin()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let purchaseDate = Date().addingTimeInterval(1)
+        let providerFirst = try await webhook(revenueCatBody(transaction: "origin-provider-first",
+            eventTimestamp: purchaseDate, purchasedAt: purchaseDate))
+        let witnessAfter = try await witnessPurchase(intent, capability, transaction: "origin-provider-first",
+                                                     purchaseDate: purchaseDate)
+        let matchedState = try await sql.raw("SELECT state FROM measurement_purchase_intents WHERE id=\(bind:intent)").first()!.decode(column: "state", as: String.self)
+        XCTAssertEqual(providerFirst.status, .ok)
+        XCTAssertEqual(witnessAfter.status, .accepted)
+        XCTAssertEqual(matchedState, "matched")
+
+        app.storage[PurchaseOriginService.ConfigurationKey.self] = .init(
+            hmacKey: Data(repeating: 0x71, count: 32), environment: .production)
+        let other = try await preparePurchase(installation, revision)
+        let otherIntent = try XCTUnwrap(other.1), otherCapability = try XCTUnwrap(other.2)
+        let otherDate = Date().addingTimeInterval(2)
+        let wrongEnvironmentProvider = try await webhook(revenueCatBody(transaction: "origin-wrong-environment",
+            eventTimestamp: otherDate, purchasedAt: otherDate))
+        let wrongEnvironmentWitness = try await witnessPurchase(otherIntent, otherCapability,
+            transaction: "origin-wrong-environment", purchaseDate: otherDate)
+        let pendingState = try await sql.raw("SELECT state FROM measurement_purchase_intents WHERE id=\(bind:otherIntent)").first()!.decode(column: "state", as: String.self)
+        XCTAssertEqual(wrongEnvironmentProvider.status, .ok)
+        XCTAssertEqual(wrongEnvironmentWitness.status, .accepted)
+        XCTAssertEqual(pendingState, "witnessed")
+    }
+
+    func testPurchaseWitnessRejectsChangedReplaySecondInstallationAndAccountSwap() async throws {
+        try await configurePurchaseOrigin()
+        let (installationA, revision) = try await grantPurchaseOrigin()
+        let first = try await preparePurchase(installationA, revision)
+        let firstID = try XCTUnwrap(first.1), firstCapability = try XCTUnwrap(first.2)
+        let purchaseDate = Date().addingTimeInterval(1)
+        let firstWitness = try await witnessPurchase(firstID, firstCapability, transaction: "origin-one-use",
+                                                     purchaseDate: purchaseDate)
+        XCTAssertEqual(firstWitness.status, .accepted)
+
+        let installationB = UUID()
+        let observed = try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
+            "installationId": installationB.uuidString, "consentRevision": revision.uuidString,
+            "attStatus": "authorized", "observedAt": date()
+        ])
+        XCTAssertEqual(observed.status, .ok)
+        let second = try await preparePurchase(installationB, revision)
+        let secondID = try XCTUnwrap(second.1), secondCapability = try XCTUnwrap(second.2)
+        let reused = try await witnessPurchase(secondID, secondCapability, transaction: "origin-one-use",
+                                               purchaseDate: purchaseDate)
+        let changed = try await witnessPurchase(firstID, firstCapability, transaction: "origin-changed",
+                                                purchaseDate: purchaseDate)
+        XCTAssertEqual(reused.status, .conflict)
+        XCTAssertEqual(changed.status, .conflict)
+        let states = try await sql.raw("SELECT state FROM measurement_purchase_intents WHERE id IN (\(bind:firstID),\(bind:secondID))").all()
+        XCTAssertEqual(states.count, 2)
+        XCTAssertTrue(try states.allSatisfy { try $0.decode(column: "state", as: String.self) == "conflict" })
+
+        let other = User(appleUserId: nil, email: "origin-other-\(UUID())@example.test",
+                         name: "Other", authProvider: .magicLink)
+        try await other.save(on: app.db)
+        let otherID = try other.requireID()
+        let otherJWT = try app.jwt.signers.sign(UserJWTPayload(subject: .init(value: otherID.uuidString),
+            expiration: .init(value: Date().addingTimeInterval(3600)), userId: otherID,
+            authVersion: other.authVersion, authenticatedAt: Date()))
+        let accountSwap = try await witnessPurchase(firstID, firstCapability, transaction: "origin-one-use",
+                                                    purchaseDate: purchaseDate, token: otherJWT)
+        XCTAssertEqual(accountSwap.status, .notFound)
+        try await other.delete(on: app.db)
+    }
+
+    func testExpiredAndRestoreWitnessesCannotCreateAnAcquisition() async throws {
+        try await configurePurchaseOrigin()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let expired = try await preparePurchase(installation, revision)
+        let expiredID = try XCTUnwrap(expired.1), expiredCapability = try XCTUnwrap(expired.2)
+        try await sql.raw("UPDATE measurement_purchase_intents SET expires_at=NOW()-INTERVAL '1 second' WHERE id=\(bind:expiredID)").run()
+        let expiredWitness = try await witnessPurchase(expiredID, expiredCapability, transaction: "origin-expired",
+                                                       purchaseDate: Date())
+        XCTAssertEqual(expiredWitness.status, .gone)
+
+        let restored = try await preparePurchase(installation, revision)
+        let restoredID = try XCTUnwrap(restored.1), restoredCapability = try XCTUnwrap(restored.2)
+        let restoredWitness = try await witnessPurchase(restoredID, restoredCapability,
+            transaction: "origin-restored-old", purchaseDate: Date().addingTimeInterval(-601))
+        XCTAssertEqual(restoredWitness.status, .badRequest)
+        let acquisitions = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_acquisitions WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(acquisitions, 0)
+    }
+
+    func testUnavailableOrUnusedPurchaseIntentHasNoOperationalEffect() async throws {
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let unavailable = try await preparePurchase(installation, revision)
+        XCTAssertEqual(unavailable.0.status, .serviceUnavailable)
+        let unavailableCount = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_intents WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(unavailableCount, 0)
+
+        try await configurePurchaseOrigin()
+        let unused = try await preparePurchase(installation, revision)
+        XCTAssertEqual(unused.0.status, .created)
+        let acquisitions = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_acquisitions WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(acquisitions, 0)
+        let lifecycle = try await sql.raw("SELECT lifecycle_state FROM users WHERE id=\(bind:userID)").first()!.decode(column: "lifecycle_state", as: String.self)
+        XCTAssertEqual(lifecycle, "active", "measurement availability cannot change account or purchase fulfilment state")
+    }
+
+    func testProviderTimestampBeforeIntentCannotBeRetroactivelyBound() async throws {
+        try await configurePurchaseOrigin()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let candidateDate = Date().addingTimeInterval(-120)
+        let oldProvider = try await webhook(revenueCatBody(transaction: "origin-pre-intent",
+            eventTimestamp: Date(), purchasedAt: candidateDate))
+        let oldWitness = try await witnessPurchase(intent, capability, transaction: "origin-pre-intent",
+                                                   purchaseDate: candidateDate)
+        let state = try await sql.raw("SELECT state FROM measurement_purchase_intents WHERE id=\(bind:intent)").first()!.decode(column: "state", as: String.self)
+        XCTAssertEqual(oldProvider.status, .ok)
+        XCTAssertEqual(oldWitness.status, .conflict)
+        XCTAssertEqual(state, "conflict")
+        let acquisitions = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_acquisitions WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(acquisitions, 0)
+    }
+
+    func testWithdrawalScrubsMatchedOriginAndLateWitnessCannotReviveIt() async throws {
+        try await configurePurchaseOrigin()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let purchaseDate = Date().addingTimeInterval(1)
+        _ = try await witnessPurchase(intent, capability, transaction: "origin-withdraw", purchaseDate: purchaseDate)
+        _ = try await webhook(revenueCatBody(transaction: "origin-withdraw",
+            eventTimestamp: purchaseDate, purchasedAt: purchaseDate))
+        let acquisitionID = try await sql.raw("""
+            SELECT id FROM measurement_purchase_acquisitions WHERE account_id=\(bind:userID)
+            """).first()!.decode(column: "id", as: UUID.self)
+        let withdrawn = try await put("crossCompanyAds", expected: revision, decision: "withdrawn")
+        XCTAssertEqual(withdrawn.status, .ok, withdrawn.body.string)
+        let lateWitness = try await witnessPurchase(intent, capability, transaction: "origin-withdraw",
+                                                    purchaseDate: purchaseDate)
+        XCTAssertEqual(lateWitness.status, .notFound)
+        let acquisition = try await sql.raw("""
+            SELECT state,account_id,installation_id,subject_id
+            FROM measurement_purchase_acquisitions WHERE id=\(bind:acquisitionID)
+            """).first()
+        let row = try XCTUnwrap(acquisition)
+        XCTAssertEqual(try row.decode(column: "state", as: String.self), "revoked")
+        XCTAssertNil(try row.decode(column: "account_id", as: UUID?.self))
+        XCTAssertNil(try row.decode(column: "installation_id", as: UUID?.self))
+        XCTAssertNil(try row.decode(column: "subject_id", as: UUID?.self))
+        let remainingOrigin = try await sql.raw("SELECT origin_acquisition_id FROM measurement_revenuecat_events WHERE durable_key_hash IS NOT NULL").first()!.decode(column: "origin_acquisition_id", as: UUID?.self)
+        XCTAssertNil(remainingOrigin)
+
+        let renewalDate = purchaseDate.addingTimeInterval(60)
+        let renewal = try await webhook(revenueCatBody(transaction: "origin-withdraw-renewal", type: "RENEWAL",
+            eventTimestamp: renewalDate, purchasedAt: renewalDate,
+            originalTransaction: "original-origin-withdraw"))
+        XCTAssertEqual(renewal.status, .ok, renewal.body.string)
+        let tombstoneState = try await sql.raw("SELECT state FROM measurement_purchase_acquisitions WHERE id=\(bind:acquisitionID)").first()!.decode(column: "state", as: String.self)
+        let renewalOrigin = try await sql.raw("""
+            SELECT origin_acquisition_id FROM measurement_revenuecat_events
+            WHERE account_id=\(bind:userID) AND charge_kind='renewal'
+            """).first()!.decode(column: "origin_acquisition_id", as: UUID?.self)
+        XCTAssertEqual(tombstoneState, "revoked")
+        XCTAssertNil(renewalOrigin, "late renewal is still accepted as a charge but cannot revive revoked origin")
+        try await sql.raw("DELETE FROM measurement_purchase_acquisitions WHERE id=\(bind:acquisitionID)").run()
+    }
+
+    func testATTExpiryAndAccountDeletionPreventLateProviderJoin() async throws {
+        try await configurePurchaseOrigin()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let purchaseDate = Date().addingTimeInterval(1)
+        let witness = try await witnessPurchase(intent, capability, transaction: "origin-late-provider",
+                                                purchaseDate: purchaseDate)
+        XCTAssertEqual(witness.status, .accepted)
+        try await sql.raw("""
+            UPDATE measurement_att_assertions SET received_at=NOW()-INTERVAL '2 days',
+                expires_at=NOW()-INTERVAL '1 day'
+            WHERE account_id=\(bind:userID) AND installation_id=\(bind:installation)
+            """).run()
+        let late = try await webhook(revenueCatBody(transaction: "origin-late-provider",
+            eventTimestamp: purchaseDate, purchasedAt: purchaseDate))
+        XCTAssertEqual(late.status, .ok)
+        let state = try await sql.raw("SELECT state FROM measurement_purchase_intents WHERE id=\(bind:intent)").first()!.decode(column: "state", as: String.self)
+        let beforeDeletion = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_acquisitions WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(state, "witnessed")
+        XCTAssertEqual(beforeDeletion, 0)
+
+        try await PurchaseOriginService.eraseAccount(userID, now: Date(), on: sql)
+        try await sql.raw("UPDATE users SET lifecycle_state='deleted' WHERE id=\(bind:userID)").run()
+        let afterDeletion = try await webhook(revenueCatBody(transaction: "origin-after-delete",
+            eventTimestamp: Date(), purchasedAt: Date(), originalTransaction: "origin-late-provider"))
+        XCTAssertEqual(afterDeletion.status, .ok)
+        let intentCount = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_intents WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        let acquisitionCount = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_acquisitions WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(intentCount, 0)
+        XCTAssertEqual(acquisitionCount, 0)
+    }
+
+    func testRenewalReusesOnlyTheImmutableAcquisitionChain() async throws {
+        try await configurePurchaseOrigin()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let original = "origin-chain-one", initialDate = Date().addingTimeInterval(1)
+        _ = try await witnessPurchase(intent, capability, transaction: "origin-chain-initial", purchaseDate: initialDate)
+        _ = try await webhook(revenueCatBody(transaction: "origin-chain-initial", eventTimestamp: initialDate,
+            purchasedAt: initialDate, originalTransaction: original))
+        let acquisitionID = try await sql.raw("SELECT id FROM measurement_purchase_acquisitions WHERE account_id=\(bind:userID)").first()!.decode(column: "id", as: UUID.self)
+        let renewalDate = initialDate.addingTimeInterval(60)
+        _ = try await webhook(revenueCatBody(transaction: "origin-chain-renewal", type: "RENEWAL",
+            eventTimestamp: renewalDate, purchasedAt: renewalDate, originalTransaction: original))
+        let renewalOrigin = try await sql.raw("""
+            SELECT origin_acquisition_id FROM measurement_revenuecat_events
+            WHERE charge_kind='renewal' AND account_id=\(bind:userID)
+            """).first()!.decode(column: "origin_acquisition_id", as: UUID?.self)
+        XCTAssertEqual(renewalOrigin, acquisitionID)
+        let acquisitionInstallation = try await sql.raw("SELECT installation_id FROM measurement_purchase_acquisitions WHERE id=\(bind:acquisitionID)").first()!.decode(column: "installation_id", as: UUID?.self)
+        XCTAssertEqual(acquisitionInstallation, installation)
+    }
+
+    func testQuarantinedInitialChargeCannotAuthorizeLaterRenewalOrigin() async throws {
+        try await configurePurchaseOrigin()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let suffix = UUID().uuidString, transaction = "origin-quarantine-\(suffix)"
+        let original = "origin-quarantine-chain-\(suffix)", initialDate = Date().addingTimeInterval(1)
+        _ = try await witnessPurchase(intent, capability, transaction: transaction, purchaseDate: initialDate)
+        let providerEventID = UUID().uuidString
+        _ = try await webhook(revenueCatBody(transaction: transaction, eventID: providerEventID,
+            eventTimestamp: initialDate, purchasedAt: initialDate, originalTransaction: original))
+        let conflictingReplay = try await webhook(revenueCatBody(transaction: transaction, type: "RENEWAL",
+            eventID: providerEventID, eventTimestamp: initialDate, purchasedAt: initialDate,
+            originalTransaction: original))
+        XCTAssertEqual(conflictingReplay.status, .ok)
+        let acquisitionState = try await sql.raw("""
+            SELECT state FROM measurement_purchase_acquisitions WHERE account_id=\(bind:userID)
+            """).first()!.decode(column: "state", as: String.self)
+        XCTAssertEqual(acquisitionState, "conflict")
+
+        let renewalDate = initialDate.addingTimeInterval(60)
+        let renewal = try await webhook(revenueCatBody(transaction: "origin-renewal-\(suffix)", type: "RENEWAL",
+            eventTimestamp: renewalDate, purchasedAt: renewalDate, originalTransaction: original))
+        XCTAssertEqual(renewal.status, .ok)
+        let origin = try await sql.raw("""
+            SELECT origin_acquisition_id FROM measurement_revenuecat_events
+            WHERE account_id=\(bind:userID) AND charge_kind='renewal'
+            ORDER BY received_at DESC LIMIT 1
+            """).first()!.decode(column: "origin_acquisition_id", as: UUID?.self)
+        XCTAssertNil(origin)
+    }
+
+    func testProviderFirstConflictCannotBeBoundByALaterWitness() async throws {
+        try await configurePurchaseOrigin()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let suffix = UUID().uuidString, transaction = "origin-provider-conflict-\(suffix)"
+        let original = "origin-provider-conflict-chain-\(suffix)", purchaseDate = Date().addingTimeInterval(1)
+        let providerEventID = UUID().uuidString
+        let initial = try await webhook(revenueCatBody(transaction: transaction, eventID: providerEventID,
+            eventTimestamp: purchaseDate, purchasedAt: purchaseDate, originalTransaction: original))
+        let conflictingReplay = try await webhook(revenueCatBody(transaction: transaction, type: "RENEWAL",
+            eventID: providerEventID, eventTimestamp: purchaseDate, purchasedAt: purchaseDate,
+            originalTransaction: original))
+        let witness = try await witnessPurchase(intent, capability, transaction: transaction,
+                                                purchaseDate: purchaseDate)
+        XCTAssertEqual(initial.status, .ok)
+        XCTAssertEqual(conflictingReplay.status, .ok)
+        XCTAssertEqual(witness.status, .conflict)
+        let intentState = try await sql.raw("SELECT state FROM measurement_purchase_intents WHERE id=\(bind:intent)").first()!.decode(column: "state", as: String.self)
+        let activeAcquisitions = try await sql.raw("""
+            SELECT count(*) AS n FROM measurement_purchase_acquisitions
+            WHERE account_id=\(bind:userID) AND state='active'
+            """).first()!.decode(column: "n", as: Int.self)
+        let origin = try await sql.raw("""
+            SELECT origin_acquisition_id FROM measurement_revenuecat_events
+            WHERE account_id=\(bind:userID) AND durable_key_hash IS NOT NULL
+            ORDER BY received_at DESC LIMIT 1
+            """).first()!.decode(column: "origin_acquisition_id", as: UUID?.self)
+        XCTAssertEqual(intentState, "conflict")
+        XCTAssertEqual(activeAcquisitions, 0)
+        XCTAssertNil(origin)
     }
 }
 

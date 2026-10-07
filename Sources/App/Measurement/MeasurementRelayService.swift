@@ -3,7 +3,7 @@ import Fluent
 import FluentSQL
 import Crypto
 
-private struct MeasurementWireKey: CodingKey, Hashable {
+struct MeasurementWireKey: CodingKey, Hashable {
     let stringValue: String
     let intValue: Int? = nil
     init?(stringValue: String) { self.stringValue = stringValue }
@@ -25,7 +25,7 @@ struct MeasurementATTObservation: Content, Sendable {
         observedAt = try c.decode(Date.self, forKey: .init(stringValue: "observedAt")!)
     }
 
-    fileprivate static func exact(_ c: KeyedDecodingContainer<MeasurementWireKey>, _ names: Set<String>, _ decoder: Decoder) throws {
+    static func exact(_ c: KeyedDecodingContainer<MeasurementWireKey>, _ names: Set<String>, _ decoder: Decoder) throws {
         guard Set(c.allKeys.map(\.stringValue)) == names else {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unexpected measurement fields"))
         }

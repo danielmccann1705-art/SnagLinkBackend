@@ -7,6 +7,9 @@ struct MeasurementRelayController: RouteCollection {
         measurement.post("devices", use: bindDevice)
         measurement.post("events", use: acceptEvent)
         measurement.on(.POST, "apple", body: .collect(maxSize: "4kb"), use: acceptApple)
+        measurement.on(.POST, "purchase-intents", body: .collect(maxSize: "4kb"), use: preparePurchaseIntent)
+        measurement.on(.POST, "purchase-intents", ":intentId", "witness",
+                       body: .collect(maxSize: "4kb"), use: acceptPurchaseWitness)
     }
 
     @Sendable func observeATT(req: Request) async throws -> MeasurementPermissionsEnvelope {
@@ -33,6 +36,37 @@ struct MeasurementRelayController: RouteCollection {
         try response.content.encode(AdMeasurementReceipt(reference: reference))
         response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
         return response
+    }
+
+    @Sendable func preparePurchaseIntent(req: Request) async throws -> Response {
+        let result = try await PurchaseOriginService.prepare(
+            accountID: req.requireAuthenticatedUserId(),
+            input: try decode(MeasurementPurchaseIntentRequest.self, req),
+            app: req.application,
+            on: req.db
+        )
+        let response = Response(status: .created)
+        try response.content.encode(result)
+        response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        return response
+    }
+
+    @Sendable func acceptPurchaseWitness(req: Request) async throws -> Response {
+        guard let text = req.parameters.get("intentId"), let intentID = UUID(uuidString: text) else {
+            throw Abort(.notFound)
+        }
+        let result = try await PurchaseOriginService.complete(
+            accountID: req.requireAuthenticatedUserId(),
+            intentID: intentID,
+            input: try decode(MeasurementPurchaseWitnessRequest.self, req),
+            app: req.application,
+            on: req.db
+        )
+        guard result == .accepted else {
+            throw Abort(.conflict, reason: "Purchase measurement evidence conflicts",
+                        identifier: "measurement_purchase_conflict")
+        }
+        return Response(status: .accepted)
     }
 
     private func decode<T: Content>(_ type: T.Type, _ req: Request) throws -> T {
