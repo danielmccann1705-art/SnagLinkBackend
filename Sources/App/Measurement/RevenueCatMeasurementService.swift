@@ -109,6 +109,8 @@ enum RevenueCatMeasurementService {
                 chargeDispatchEligible = try await refreshAdjustment(chargeKeyHash: fact.chargeKeyHash,
                     accountID: fact.accountID, now: now, on: sql) != "unresolved"
                 if let chargeID, chargeDispatchEligible {
+                    try await ApplePurchaseOriginService.acceptRevenueCatCharge(
+                        fact, chargeID: chargeID, app: app, now: now, on: tx)
                     try await PurchaseOriginService.acceptRevenueCatCharge(
                         fact, chargeID: chargeID, app: app, now: now, on: tx)
                 }
@@ -332,6 +334,14 @@ enum RevenueCatMeasurementService {
     }
 
     private static func quarantine(chargeKeyHash: String, on sql: SQLDatabase) async throws {
+        try await sql.raw("""
+            DELETE FROM measurement_purchase_charge_links WHERE charge_id IN
+              (SELECT id FROM measurement_revenuecat_events WHERE durable_key_hash=\(bind:chargeKeyHash))
+            """).run()
+        try await sql.raw("""
+            UPDATE measurement_revenuecat_events SET origin_acquisition_id=NULL
+            WHERE durable_key_hash=\(bind:chargeKeyHash)
+            """).run()
         try await sql.raw("""
             UPDATE measurement_purchase_acquisitions SET state='conflict',conflicted_at=COALESCE(conflicted_at,NOW())
             WHERE state='active' AND initial_charge_id IN (

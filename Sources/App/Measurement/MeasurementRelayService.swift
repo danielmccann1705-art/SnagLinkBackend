@@ -304,10 +304,18 @@ enum MeasurementRelayService {
                     _ = try await AdAttributionStore.delete(reference: claim.0, on: tx)
                     throw permissionRequired()
                 }
+                let evidence: AdAttributionStore.Evidence
+                if case .attributed(let fields) = result.outcome {
+                    evidence = ApplePurchaseOriginService.evidence(for: fields, app: app)
+                } else { evidence = .unknown }
+                let settledAt = Date()
                 guard try await AdAttributionStore.record(result.outcome, attempts: result.attempts,
-                                                          reference: claim.0, now: Date(), on: tx) else {
+                                                          reference: claim.0, evidence: evidence,
+                                                          now: settledAt, on: tx) else {
                     throw Abort(.conflict, reason: "Apple measurement changed while processing", identifier: "ad_measurement_changed")
                 }
+                try await ApplePurchaseOriginService.reconcileAttribution(
+                    reference: claim.0, app: app, now: settledAt, on: tx)
                 return claim.0
             }
         case .notYetAvailable, .failing:

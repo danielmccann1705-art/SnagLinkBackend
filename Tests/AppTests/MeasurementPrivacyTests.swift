@@ -28,6 +28,7 @@ final class MeasurementPrivacyTests: XCTestCase {
 
     override func tearDown() async throws {
         if let app {
+            try? await sql.raw("DELETE FROM measurement_purchase_charge_links WHERE charge_id IN (SELECT id FROM measurement_revenuecat_events WHERE account_id=\(bind:userID)) OR attribution_record_id IN (SELECT id FROM ad_attribution_records WHERE canonical_account_id=\(bind:userID))").run()
             try? await sql.raw("DELETE FROM measurement_purchase_intents WHERE account_id=\(bind: userID)").run()
             try? await sql.raw("UPDATE measurement_revenuecat_events SET origin_acquisition_id=NULL WHERE account_id=\(bind: userID)").run()
             try? await sql.raw("DELETE FROM measurement_purchase_acquisitions WHERE account_id=\(bind: userID)").run()
@@ -108,6 +109,16 @@ final class MeasurementPrivacyTests: XCTestCase {
         try await enable("crossCompanyAdsEnabled")
     }
 
+    private func configureApplePurchaseOrigin(_ environment: LinkedInConversion.Environment = .sandbox) async throws {
+        app.storage[PurchaseOriginService.ConfigurationKey.self] = .init(
+            hmacKey: Data(repeating: 0x71, count: 32), environment: environment)
+        app.storage[ApplePurchaseOriginService.CampaignConfigurationKey.self] = .init(
+            organizationID: 40_669_820, campaignIDs: [542_370_539])
+        app.storage[RevenueCatMeasurementService.ConfigurationKey.self] = .init(
+            authorization: "Bearer synthetic-webhook-secret", appID: "synthetic-rc-app")
+        try await enable("adMeasurementEnabled")
+    }
+
     private func queueProductAnalyticsDispatch() async throws -> UUID {
         app.storage[MeasurementDispatchService.ConfigurationKey.self] = .init(
             postHogProjectKey: "phc_synthetic", postHogEnvironment: .sandbox,
@@ -167,15 +178,59 @@ final class MeasurementPrivacyTests: XCTestCase {
         ])
     }
 
+    private func grantApple() async throws -> UUID {
+        let response = try await put("appleAds", decision: "granted")
+        XCTAssertEqual(response.status, .ok, response.body.string)
+        return try uuid(try permission("appleAds", in: response)["revision"])
+    }
+
+    @discardableResult
+    private func canonicalApple(_ installation: UUID, _ revision: UUID, evidence: String,
+                                createdAt: Date = Date().addingTimeInterval(-10)) async throws -> UUID {
+        let reference = try await AdAttributionStore.insertCanonicalProcessing(
+            accountID: userID, installationID: installation, consentRevision: revision,
+            appVersion: "2.0.2", now: createdAt, on: app.db)
+        let row = try await sql.raw("SELECT id FROM ad_attribution_records WHERE reference=\(bind:reference)").first()!
+        let id = try row.decode(column: "id", as: UUID.self)
+        try await sql.raw("""
+            UPDATE ad_attribution_records SET exchange_state='done',exchange_attempts=1,exchanged_at=\(bind:createdAt),
+              attribution=\(bind:evidence != "organic"),
+              campaign_id=\(bind:evidence == "verified" ? Int64(542_370_539) : nil),
+              evidence_class=\(bind:evidence),evidence_config_hash=\(bind:evidence == "verified" ? app.storage[ApplePurchaseOriginService.CampaignConfigurationKey.self]?.provenanceHash : nil),
+              evidence_classified_at=\(bind:createdAt) WHERE id=\(bind:id)
+            """).run()
+        return id
+    }
+
+    private func prepareApple(_ installation: UUID, _ revision: UUID) async throws -> (XCTHTTPResponse, UUID?, String?) {
+        let response = try await request(.POST, "api/v2/measurement/apple/purchase-intents", token: jwt, object: [
+            "installationId": installation.uuidString, "consentRevision": revision.uuidString,
+            "productId": "com.snaglist.pro.monthly"
+        ])
+        guard response.status == .created else { return (response, nil, nil) }
+        let body = try object(response)
+        return (response, try uuid(body["intentId"]), try XCTUnwrap(body["capability"] as? String))
+    }
+
+    private func witnessApple(_ intent: UUID, _ capability: String, transaction: String,
+                              purchaseDate: Date) async throws -> XCTHTTPResponse {
+        try await request(.POST, "api/v2/measurement/apple/purchase-intents/\(intent.uuidString)/witness",
+                          token: jwt, object: [
+            "capability": capability, "transactionId": transaction,
+            "productId": "com.snaglist.pro.monthly", "purchaseDate": date(purchaseDate),
+            "source": "purchaseCallback"
+        ])
+    }
+
     private func revenueCatBody(transaction: String = "synthetic-transaction", type: String = "INITIAL_PURCHASE",
                                 eventID: String = UUID().uuidString, eventTimestamp: Date = Date(),
                                 purchasedAt: Date? = nil, price: Any? = 14.99,
                                 currency: String = "GBP",
                                 cancellationReason: String? = nil, expirationReason: String? = nil,
-                                originalTransaction: String? = nil) throws -> Data {
+                                originalTransaction: String? = nil, appUserID: UUID? = nil) throws -> Data {
         let purchasedAt = purchasedAt ?? eventTimestamp.addingTimeInterval(1)
         var event: [String: Any] = [
-            "id": eventID, "app_id": "synthetic-rc-app", "app_user_id": userID.uuidString,
+            "id": eventID, "app_id": "synthetic-rc-app", "app_user_id": (appUserID ?? userID).uuidString,
             "type": type, "environment": "SANDBOX", "store": "APP_STORE", "period_type": "NORMAL",
             "is_family_share": false, "product_id": "com.snaglist.pro.monthly", "entitlement_ids": ["Snaglist Pro"],
             "event_timestamp_ms": Int64(eventTimestamp.timeIntervalSince1970 * 1000),
@@ -1245,6 +1300,263 @@ final class MeasurementPrivacyTests: XCTestCase {
         XCTAssertEqual(state, "manual_required")
         let subjectState = try await sql.raw("SELECT state FROM measurement_subjects WHERE id=\(bind:subject)").first()!.decode(column: "state", as: String.self)
         XCTAssertEqual(subjectState, "revoked", "the manifest subject remains until verified provider completion")
+    }
+
+    func testApplePurchaseIntentPinsTheExactPreexistingInstallationWithoutATTOrCrossConsent() async throws {
+        try await configureApplePurchaseOrigin()
+        let revision = try await grantApple()
+        let installation = UUID(), otherInstallation = UUID()
+        _ = try await canonicalApple(otherInstallation, revision, evidence: "verified")
+        let wrong = try await prepareApple(installation, revision)
+        XCTAssertEqual(wrong.0.status, .forbidden, wrong.0.body.string)
+
+        let attribution = try await canonicalApple(installation, revision, evidence: "verified")
+        let prepared = try await prepareApple(installation, revision)
+        XCTAssertEqual(prepared.0.status, .created, prepared.0.body.string)
+        XCTAssertEqual(prepared.0.headers.first(name: .cacheControl), "no-store")
+        let preparedID = try XCTUnwrap(prepared.1)
+        let row = try await sql.raw("SELECT purpose,subject_id,attribution_record_id FROM measurement_purchase_intents WHERE id=\(bind:preparedID)").first()!
+        XCTAssertEqual(try row.decode(column: "purpose", as: String.self), "appleAds")
+        XCTAssertNil(try row.decode(column: "subject_id", as: UUID?.self))
+        XCTAssertEqual(try row.decode(column: "attribution_record_id", as: UUID.self), attribution)
+        let att = try await sql.raw("SELECT count(*) AS n FROM measurement_att_assertions WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        let cross = try await sql.raw("SELECT count(*) AS n FROM measurement_permission_current WHERE account_id=\(bind:userID) AND purpose='crossCompanyAds'").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(att, 0); XCTAssertEqual(cross, 0)
+    }
+
+    func testAppleVerifiedWitnessAndRevenueCatCreateOnlyAFirstPartyPaidLink() async throws {
+        try await configureApplePurchaseOrigin()
+        let revision = try await grantApple(), installation = UUID()
+        _ = try await canonicalApple(installation, revision, evidence: "verified")
+        let prepared = try await prepareApple(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let purchaseDate = Date().addingTimeInterval(2), transaction = "apple-paid-\(UUID().uuidString)"
+        let witness = try await witnessApple(intent, capability, transaction: transaction, purchaseDate: purchaseDate)
+        let replay = try await witnessApple(intent, capability, transaction: transaction, purchaseDate: purchaseDate)
+        XCTAssertEqual(witness.status, .accepted, witness.body.string)
+        XCTAssertEqual(replay.status, .accepted, replay.body.string)
+        let provider = try await webhook(revenueCatBody(transaction: transaction,
+            eventTimestamp: purchaseDate, purchasedAt: purchaseDate))
+        XCTAssertEqual(provider.status, .ok, provider.body.string)
+
+        let linkRow = try await sql.raw("""
+            SELECT l.outcome,a.purpose,a.installation_id,a.subject_id,r.origin_acquisition_id
+            FROM measurement_purchase_charge_links l
+            JOIN measurement_purchase_acquisitions a ON a.id=l.acquisition_id
+            JOIN measurement_revenuecat_events r ON r.id=l.charge_id
+            WHERE l.purpose='appleAds' AND a.account_id=\(bind:userID)
+            """).first()
+        let link = try XCTUnwrap(linkRow)
+        XCTAssertEqual(try link.decode(column: "outcome", as: String.self), "paid_campaign")
+        XCTAssertEqual(try link.decode(column: "purpose", as: String.self), "appleAds")
+        XCTAssertEqual(try link.decode(column: "installation_id", as: UUID.self), installation)
+        XCTAssertNil(try link.decode(column: "subject_id", as: UUID?.self))
+        XCTAssertNil(try link.decode(column: "origin_acquisition_id", as: UUID?.self),
+                     "the compatibility column remains cross-company only")
+        let dispatch = try await sql.raw("SELECT count(*) AS n FROM measurement_dispatch_jobs WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(dispatch, 0)
+
+        let renewalDate = purchaseDate.addingTimeInterval(60)
+        let renewal = try await webhook(revenueCatBody(transaction: "renewal-\(transaction)", type: "RENEWAL",
+            eventTimestamp: renewalDate, purchasedAt: renewalDate, originalTransaction: "original-\(transaction)"))
+        XCTAssertEqual(renewal.status, .ok, renewal.body.string)
+        let acquisitionID = try await sql.raw("SELECT id FROM measurement_purchase_acquisitions WHERE purpose='appleAds' AND account_id=\(bind:userID)").first()!.decode(column: "id", as: UUID.self)
+        let renewalLinks = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE purpose='appleAds' AND acquisition_id=\(bind:acquisitionID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(renewalLinks, 2)
+        app.storage[ApplePurchaseOriginService.CampaignConfigurationKey.self] = .init(
+            organizationID: 40_669_820, campaignIDs: [999_999_999])
+        let changedConfigDate = renewalDate.addingTimeInterval(60)
+        _ = try await webhook(revenueCatBody(transaction: "changed-config-\(transaction)", type: "RENEWAL",
+            eventTimestamp: changedConfigDate, purchasedAt: changedConfigDate,
+            originalTransaction: "original-\(transaction)"))
+        let afterConfigChange = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE purpose='appleAds' AND acquisition_id=\(bind:acquisitionID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(afterConfigChange, 2)
+    }
+
+    func testAppleIntentCannotCrossRoutesAndRejectsRestoreOrExpiredEvidence() async throws {
+        try await configureApplePurchaseOrigin()
+        let revision = try await grantApple(), installation = UUID()
+        _ = try await canonicalApple(installation, revision, evidence: "verified")
+        let first = try await prepareApple(installation, revision)
+        let intent = try XCTUnwrap(first.1), capability = try XCTUnwrap(first.2)
+        try await enable("crossCompanyAdsEnabled")
+        let crossRoute = try await witnessPurchase(intent, capability, transaction: "wrong-purpose",
+            purchaseDate: Date().addingTimeInterval(1))
+        XCTAssertEqual(crossRoute.status, .notFound)
+        let restore = try await witnessApple(intent, capability, transaction: "restore-before-intent",
+            purchaseDate: Date().addingTimeInterval(-60))
+        XCTAssertEqual(restore.status, .badRequest)
+
+        let second = try await prepareApple(installation, revision)
+        let secondID = try XCTUnwrap(second.1)
+        try await sql.raw("UPDATE measurement_purchase_intents SET expires_at=NOW()-INTERVAL '1 second' WHERE id=\(bind:secondID)").run()
+        let expired = try await witnessApple(secondID, try XCTUnwrap(second.2), transaction: "expired-apple",
+            purchaseDate: Date().addingTimeInterval(1))
+        XCTAssertEqual(expired.status, .gone)
+    }
+
+    func testAppleProviderConflictQuarantinesThePaidLink() async throws {
+        try await configureApplePurchaseOrigin()
+        let revision = try await grantApple(), installation = UUID()
+        _ = try await canonicalApple(installation, revision, evidence: "verified")
+        let prepared = try await prepareApple(installation, revision)
+        let transaction = "apple-conflict-\(UUID().uuidString)", purchaseDate = Date().addingTimeInterval(2)
+        _ = try await witnessApple(try XCTUnwrap(prepared.1), try XCTUnwrap(prepared.2),
+                                   transaction: transaction, purchaseDate: purchaseDate)
+        let providerID = UUID().uuidString
+        _ = try await webhook(revenueCatBody(transaction: transaction, eventID: providerID,
+            eventTimestamp: purchaseDate, purchasedAt: purchaseDate))
+        let conflict = try await webhook(revenueCatBody(transaction: transaction, type: "RENEWAL",
+            eventID: providerID, eventTimestamp: purchaseDate, purchasedAt: purchaseDate))
+        XCTAssertEqual(conflict.status, .ok, conflict.body.string)
+        let links = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE purpose='appleAds'").first()!.decode(column: "n", as: Int.self)
+        let state = try await sql.raw("SELECT state FROM measurement_purchase_acquisitions WHERE purpose='appleAds' AND account_id=\(bind:userID)").first()!.decode(column: "state", as: String.self)
+        XCTAssertEqual(links, 0); XCTAssertEqual(state, "conflict")
+    }
+
+    func testAppleSecondInstallationOnTheSameChainQuarantinesTheExistingAcquisition() async throws {
+        try await configureApplePurchaseOrigin()
+        let revision = try await grantApple(), firstInstallation = UUID(), secondInstallation = UUID()
+        _ = try await canonicalApple(firstInstallation, revision, evidence: "verified")
+        _ = try await canonicalApple(secondInstallation, revision, evidence: "verified")
+        let first = try await prepareApple(firstInstallation, revision)
+        let second = try await prepareApple(secondInstallation, revision)
+        let chain = "apple-shared-chain-\(UUID().uuidString)"
+        let firstDate = Date().addingTimeInterval(2), secondDate = firstDate.addingTimeInterval(1)
+        _ = try await witnessApple(try XCTUnwrap(first.1), try XCTUnwrap(first.2),
+                                   transaction: "first-\(chain)", purchaseDate: firstDate)
+        _ = try await webhook(revenueCatBody(transaction: "first-\(chain)", eventTimestamp: firstDate,
+            purchasedAt: firstDate, originalTransaction: chain))
+        _ = try await witnessApple(try XCTUnwrap(second.1), try XCTUnwrap(second.2),
+                                   transaction: "second-\(chain)", purchaseDate: secondDate)
+        _ = try await webhook(revenueCatBody(transaction: "second-\(chain)", eventTimestamp: secondDate,
+            purchasedAt: secondDate, originalTransaction: chain))
+        let state = try await sql.raw("SELECT state FROM measurement_purchase_acquisitions WHERE purpose='appleAds' AND account_id=\(bind:userID)").first()!.decode(column: "state", as: String.self)
+        let links = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE purpose='appleAds'").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(state, "conflict"); XCTAssertEqual(links, 0)
+
+        let renewalDate = secondDate.addingTimeInterval(60)
+        _ = try await webhook(revenueCatBody(transaction: "renewal-\(chain)", type: "RENEWAL",
+            eventTimestamp: renewalDate, purchasedAt: renewalDate, originalTransaction: chain))
+        let afterRenewal = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE purpose='appleAds'").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(afterRenewal, 0)
+    }
+
+    func testAppleRenewalForAnotherCanonicalAccountQuarantinesTheExistingChain() async throws {
+        try await configureApplePurchaseOrigin()
+        let revision = try await grantApple(), installation = UUID()
+        _ = try await canonicalApple(installation, revision, evidence: "verified")
+        let prepared = try await prepareApple(installation, revision)
+        let chain = "apple-account-conflict-\(UUID().uuidString)"
+        let initialDate = Date().addingTimeInterval(2)
+        _ = try await witnessApple(try XCTUnwrap(prepared.1), try XCTUnwrap(prepared.2),
+                                   transaction: "initial-\(chain)", purchaseDate: initialDate)
+        _ = try await webhook(revenueCatBody(transaction: "initial-\(chain)", eventTimestamp: initialDate,
+            purchasedAt: initialDate, originalTransaction: chain))
+
+        let other = User(appleUserId: nil, email: "apple-origin-other-\(UUID())@example.test",
+                         name: "Other synthetic manager", authProvider: .magicLink)
+        try await other.save(on: app.db)
+        let otherID = try other.requireID()
+        let conflictDate = initialDate.addingTimeInterval(60)
+        _ = try await webhook(revenueCatBody(transaction: "other-account-\(chain)", type: "RENEWAL",
+            eventTimestamp: conflictDate, purchasedAt: conflictDate, originalTransaction: chain,
+            appUserID: otherID))
+
+        let state = try await sql.raw("""
+            SELECT state FROM measurement_purchase_acquisitions
+            WHERE purpose='appleAds' AND account_id=\(bind:userID)
+            """).first()!.decode(column: "state", as: String.self)
+        let linksAfterConflict = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE purpose='appleAds'").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(state, "conflict")
+        XCTAssertEqual(linksAfterConflict, 0)
+
+        let originalDate = conflictDate.addingTimeInterval(60)
+        _ = try await webhook(revenueCatBody(transaction: "original-account-\(chain)", type: "RENEWAL",
+            eventTimestamp: originalDate, purchasedAt: originalDate, originalTransaction: chain))
+        let linksAfterOriginal = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE purpose='appleAds'").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(linksAfterOriginal, 0)
+
+        try await sql.raw("DELETE FROM measurement_revenuecat_lifecycle_events WHERE account_id=\(bind:otherID)").run()
+        try await sql.raw("DELETE FROM measurement_revenuecat_events WHERE account_id=\(bind:otherID)").run()
+        try await other.delete(on: app.db)
+    }
+
+    func testAppleRetentionRevokesThePinnedJoinBeforeDeletingTheCanonicalRecord() async throws {
+        try await configureApplePurchaseOrigin()
+        let revision = try await grantApple(), installation = UUID()
+        let attribution = try await canonicalApple(installation, revision, evidence: "verified")
+        let prepared = try await prepareApple(installation, revision)
+        let transaction = "apple-retention-\(UUID().uuidString)", purchaseDate = Date().addingTimeInterval(2)
+        _ = try await witnessApple(try XCTUnwrap(prepared.1), try XCTUnwrap(prepared.2),
+                                   transaction: transaction, purchaseDate: purchaseDate)
+        _ = try await webhook(revenueCatBody(transaction: transaction,
+            eventTimestamp: purchaseDate, purchasedAt: purchaseDate))
+        try await sql.raw("UPDATE ad_attribution_records SET created_at=\(bind:Date().addingTimeInterval(-AdMeasurementPolicy.retention-60)) WHERE id=\(bind:attribution)").run()
+        let swept = try await AdAttributionStore.sweep(now: Date(), on: app.db)
+        XCTAssertEqual(swept, 1)
+        let record = try await sql.raw("SELECT count(*) AS n FROM ad_attribution_records WHERE id=\(bind:attribution)").first()!.decode(column: "n", as: Int.self)
+        let links = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE attribution_record_id=\(bind:attribution)").first()!.decode(column: "n", as: Int.self)
+        let tombstone = try await sql.raw("SELECT state,account_id,attribution_record_id FROM measurement_purchase_acquisitions WHERE purpose='appleAds'").first()!
+        XCTAssertEqual(record, 0); XCTAssertEqual(links, 0)
+        XCTAssertEqual(try tombstone.decode(column: "state", as: String.self), "revoked")
+        XCTAssertNil(try tombstone.decode(column: "account_id", as: UUID?.self))
+        XCTAssertNil(try tombstone.decode(column: "attribution_record_id", as: UUID?.self))
+    }
+
+    func testAppleProviderFirstOrganicIsResolvedWithoutCampaignAssociation() async throws {
+        try await configureApplePurchaseOrigin()
+        let revision = try await grantApple(), installation = UUID()
+        let attribution = try await canonicalApple(installation, revision, evidence: "organic")
+        let prepared = try await prepareApple(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let purchaseDate = Date().addingTimeInterval(2), transaction = "apple-organic-\(UUID().uuidString)"
+        let provider = try await webhook(revenueCatBody(transaction: transaction,
+            eventTimestamp: purchaseDate, purchasedAt: purchaseDate))
+        XCTAssertEqual(provider.status, .ok, provider.body.string)
+        let witness = try await witnessApple(intent, capability, transaction: transaction, purchaseDate: purchaseDate)
+        XCTAssertEqual(witness.status, .accepted, witness.body.string)
+        let linkRow = try await sql.raw("""
+            SELECT outcome,acquisition_id,attribution_record_id FROM measurement_purchase_charge_links
+            WHERE purpose='appleAds' AND attribution_record_id=\(bind:attribution)
+            """).first()
+        let link = try XCTUnwrap(linkRow)
+        XCTAssertEqual(try link.decode(column: "outcome", as: String.self), "organic")
+        XCTAssertNil(try link.decode(column: "acquisition_id", as: UUID?.self))
+        let acquisitions = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_acquisitions WHERE purpose='appleAds' AND account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(acquisitions, 0)
+        let changed = try await witnessApple(intent, capability, transaction: transaction + "-changed",
+                                             purchaseDate: purchaseDate)
+        XCTAssertEqual(changed.status, .conflict)
+        let remaining = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE purpose='appleAds' AND attribution_record_id=\(bind:attribution)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(remaining, 0)
+    }
+
+    func testAppleWithdrawalRevokesAppleLinksButPreservesCrossCompanyOrigin() async throws {
+        try await configureApplePurchaseOrigin()
+        try await enable("crossCompanyAdsEnabled")
+        let installation = UUID()
+        let appleRevision = try await grantApple()
+        _ = try await canonicalApple(installation, appleRevision, evidence: "verified")
+        let cross = try await grantPurchaseOrigin(installation)
+        let applePrepared = try await prepareApple(installation, appleRevision)
+        let crossPrepared = try await preparePurchase(installation, cross.1)
+        let transaction = "dual-purpose-\(UUID().uuidString)", purchaseDate = Date().addingTimeInterval(2)
+        _ = try await witnessApple(try XCTUnwrap(applePrepared.1), try XCTUnwrap(applePrepared.2),
+                                   transaction: transaction, purchaseDate: purchaseDate)
+        _ = try await witnessPurchase(try XCTUnwrap(crossPrepared.1), try XCTUnwrap(crossPrepared.2),
+                                      transaction: transaction, purchaseDate: purchaseDate)
+        _ = try await webhook(revenueCatBody(transaction: transaction,
+            eventTimestamp: purchaseDate, purchasedAt: purchaseDate))
+        let before = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE charge_id IN (SELECT id FROM measurement_revenuecat_events WHERE account_id=\(bind:userID))").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(before, 2)
+
+        let withdrawn = try await put("appleAds", expected: appleRevision, decision: "withdrawn")
+        XCTAssertEqual(withdrawn.status, .ok, withdrawn.body.string)
+        let appleLinks = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE purpose='appleAds'").first()!.decode(column: "n", as: Int.self)
+        let crossLinks = try await sql.raw("SELECT count(*) AS n FROM measurement_purchase_charge_links WHERE purpose='crossCompanyAds'").first()!.decode(column: "n", as: Int.self)
+        let crossState = try await sql.raw("SELECT state FROM measurement_purchase_acquisitions WHERE purpose='crossCompanyAds' AND account_id=\(bind:userID)").first()!.decode(column: "state", as: String.self)
+        XCTAssertEqual(appleLinks, 0); XCTAssertEqual(crossLinks, 1); XCTAssertEqual(crossState, "active")
     }
 
     func testPurchaseWitnessBeforeRevenueCatMatchesOnceWithoutAdDispatch() async throws {

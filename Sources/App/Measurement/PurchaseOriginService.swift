@@ -95,10 +95,10 @@ enum PurchaseOriginService {
             let subjectID = try row.decode(column: "subject_id", as: UUID.self)
             try await sql.raw("""
                 INSERT INTO measurement_purchase_intents
-                    (id,capability_hash,account_id,installation_id,consent_revision,subject_id,product_id,
+                    (id,capability_hash,account_id,installation_id,consent_revision,subject_id,product_id,purpose,
                      environment,state,issued_at,expires_at)
                 VALUES (\(bind:id),\(bind:capabilityHash(capability)),\(bind:accountID),\(bind:input.installationId),
-                        \(bind:input.consentRevision),\(bind:subjectID),\(bind:input.productId),
+                        \(bind:input.consentRevision),\(bind:subjectID),\(bind:input.productId),'crossCompanyAds',
                         \(bind:config.environment.rawValue),'prepared',\(bind:now),\(bind:expires))
                 """).run()
         }
@@ -119,6 +119,7 @@ enum PurchaseOriginService {
                 throw Abort(.notFound)
             }
             guard try candidate.decode(column: "account_id", as: UUID.self) == accountID else { throw Abort(.notFound) }
+            guard try candidate.decode(column: "purpose", as: String.self) == "crossCompanyAds" else { throw Abort(.notFound) }
             guard ConstantTimeComparison.compare(try candidate.decode(column: "capability_hash", as: String.self),
                                                  capabilityHash(input.capability)) else { throw Abort(.notFound) }
             let environment = try candidate.decode(column: "environment", as: String.self)
@@ -142,6 +143,7 @@ enum PurchaseOriginService {
                 throw Abort(.notFound)
             }
             guard try intent.decode(column: "account_id", as: UUID.self) == accountID else { throw Abort(.notFound) }
+            guard try intent.decode(column: "purpose", as: String.self) == "crossCompanyAds" else { throw Abort(.notFound) }
             guard ConstantTimeComparison.compare(try intent.decode(column: "capability_hash", as: String.self),
                                                  capabilityHash(input.capability)) else { throw Abort(.notFound) }
             guard environment == config.environment.rawValue,
@@ -174,7 +176,8 @@ enum PurchaseOriginService {
             }
             if let other = try await sql.raw("""
                 SELECT id FROM measurement_purchase_intents
-                WHERE transaction_key_hmac=\(bind:transactionHMAC) AND id<>\(bind:intentID) LIMIT 1
+                WHERE purpose='crossCompanyAds' AND transaction_key_hmac=\(bind:transactionHMAC)
+                  AND id<>\(bind:intentID) LIMIT 1
                 """).first() {
                 let otherID = try other.decode(column: "id", as: UUID.self)
                 try await markIntentConflict(intentID, hash: witnessHash, on: sql)
@@ -238,7 +241,7 @@ enum PurchaseOriginService {
         if fact.kind == .renewal {
             guard let acquisition = try await sql.raw("""
                 SELECT * FROM measurement_purchase_acquisitions
-                WHERE chain_key_hmac=\(bind:chainHMAC) FOR UPDATE
+                WHERE purpose='crossCompanyAds' AND chain_key_hmac=\(bind:chainHMAC) FOR UPDATE
                 """).first() else { return }
             let acquisitionID = try acquisition.decode(column: "id", as: UUID.self)
             let acquisitionState = try acquisition.decode(column: "state", as: String.self)
@@ -257,12 +260,17 @@ enum PurchaseOriginService {
                 UPDATE measurement_revenuecat_events SET origin_acquisition_id=\(bind:acquisitionID)
                 WHERE id=\(bind:chargeID)
                 """).run()
+            try await sql.raw("""
+                INSERT INTO measurement_purchase_charge_links(charge_id,purpose,acquisition_id,outcome,linked_at)
+                VALUES (\(bind:chargeID),'crossCompanyAds',\(bind:acquisitionID),'origin',\(bind:now))
+                ON CONFLICT(charge_id,purpose) DO NOTHING
+                """).run()
             return
         }
         guard fact.kind == .initialPurchase,
               let intent = try await sql.raw("""
                 SELECT * FROM measurement_purchase_intents WHERE transaction_key_hmac=\(bind:transactionHMAC)
-                  AND state='witnessed' AND pending_expires_at>\(bind:now) FOR UPDATE
+                  AND purpose='crossCompanyAds' AND state='witnessed' AND pending_expires_at>\(bind:now) FOR UPDATE
                 """).first(),
               let charge = try await sql.raw("SELECT * FROM measurement_revenuecat_events WHERE id=\(bind:chargeID)").first() else { return }
         let account = try intent.decode(column: "account_id", as: UUID.self)
@@ -315,7 +323,8 @@ enum PurchaseOriginService {
             return .conflict
         }
         if let existing = try await sql.raw("""
-            SELECT * FROM measurement_purchase_acquisitions WHERE chain_key_hmac=\(bind:chain) FOR UPDATE
+            SELECT * FROM measurement_purchase_acquisitions
+            WHERE purpose='crossCompanyAds' AND chain_key_hmac=\(bind:chain) FOR UPDATE
             """).first() {
             let acquisitionID = try existing.decode(column: "id", as: UUID.self)
             let existingState = try existing.decode(column: "state", as: String.self)
@@ -345,34 +354,45 @@ enum PurchaseOriginService {
             }
             try await sql.raw("UPDATE measurement_purchase_intents SET state='matched',matched_charge_id=\(bind:chargeID) WHERE id=\(bind:intentID)").run()
             try await sql.raw("UPDATE measurement_revenuecat_events SET origin_acquisition_id=\(bind:acquisitionID) WHERE id=\(bind:chargeID)").run()
+            try await sql.raw("""
+                INSERT INTO measurement_purchase_charge_links(charge_id,purpose,acquisition_id,outcome,linked_at)
+                VALUES (\(bind:chargeID),'crossCompanyAds',\(bind:acquisitionID),'origin',\(bind:now))
+                ON CONFLICT(charge_id,purpose) DO NOTHING
+                """).run()
             return .accepted
         }
         let acquisitionID = UUID()
         try await sql.raw("""
             INSERT INTO measurement_purchase_acquisitions
-                (id,chain_key_hmac,account_id,installation_id,consent_revision,subject_id,product_id,
+                (id,chain_key_hmac,account_id,installation_id,consent_revision,subject_id,product_id,purpose,
                  environment,initial_charge_id,state,bound_at)
             VALUES (\(bind:acquisitionID),\(bind:chain),\(bind:account),\(bind:installation),\(bind:revision),
-                    \(bind:subject),\(bind:product),\(bind:environment),\(bind:chargeID),'active',\(bind:now))
+                    \(bind:subject),\(bind:product),'crossCompanyAds',\(bind:environment),\(bind:chargeID),'active',\(bind:now))
             """).run()
         try await sql.raw("UPDATE measurement_revenuecat_events SET origin_acquisition_id=\(bind:acquisitionID) WHERE id=\(bind:chargeID)").run()
+        try await sql.raw("""
+            INSERT INTO measurement_purchase_charge_links(charge_id,purpose,acquisition_id,outcome,linked_at)
+            VALUES (\(bind:chargeID),'crossCompanyAds',\(bind:acquisitionID),'origin',\(bind:now))
+            ON CONFLICT(charge_id,purpose) DO NOTHING
+            """).run()
         try await sql.raw("UPDATE measurement_purchase_intents SET state='matched',matched_charge_id=\(bind:chargeID) WHERE id=\(bind:intentID)").run()
         return .accepted
     }
 
     static func revoke(subjectIDs: [UUID], now: Date, on sql: SQLDatabase) async throws {
         for subject in subjectIDs {
-            let acquisitions = try await sql.raw("SELECT id FROM measurement_purchase_acquisitions WHERE subject_id=\(bind:subject)").all()
+            let acquisitions = try await sql.raw("SELECT id FROM measurement_purchase_acquisitions WHERE purpose='crossCompanyAds' AND subject_id=\(bind:subject)").all()
             for row in acquisitions {
                 let id = try row.decode(column: "id", as: UUID.self)
+                try await sql.raw("DELETE FROM measurement_purchase_charge_links WHERE purpose='crossCompanyAds' AND acquisition_id=\(bind:id)").run()
                 try await sql.raw("UPDATE measurement_revenuecat_events SET origin_acquisition_id=NULL WHERE origin_acquisition_id=\(bind:id)").run()
             }
             try await sql.raw("""
                 UPDATE measurement_purchase_acquisitions SET state='revoked',account_id=NULL,installation_id=NULL,
                     consent_revision=NULL,subject_id=NULL,product_id=NULL,revoked_at=\(bind:now)
-                WHERE subject_id=\(bind:subject)
+                WHERE purpose='crossCompanyAds' AND subject_id=\(bind:subject)
                 """).run()
-            try await sql.raw("DELETE FROM measurement_purchase_intents WHERE subject_id=\(bind:subject)").run()
+            try await sql.raw("DELETE FROM measurement_purchase_intents WHERE purpose='crossCompanyAds' AND subject_id=\(bind:subject)").run()
         }
     }
 
@@ -380,11 +400,12 @@ enum PurchaseOriginService {
         let acquisitions = try await sql.raw("SELECT id FROM measurement_purchase_acquisitions WHERE account_id=\(bind:accountID)").all()
         for row in acquisitions {
             let id = try row.decode(column: "id", as: UUID.self)
+            try await sql.raw("DELETE FROM measurement_purchase_charge_links WHERE acquisition_id=\(bind:id)").run()
             try await sql.raw("UPDATE measurement_revenuecat_events SET origin_acquisition_id=NULL WHERE origin_acquisition_id=\(bind:id)").run()
         }
         try await sql.raw("""
             UPDATE measurement_purchase_acquisitions SET state='revoked',account_id=NULL,installation_id=NULL,
-                consent_revision=NULL,subject_id=NULL,product_id=NULL,revoked_at=\(bind:now)
+                consent_revision=NULL,subject_id=NULL,product_id=NULL,attribution_record_id=NULL,revoked_at=\(bind:now)
             WHERE account_id=\(bind:accountID)
             """).run()
         try await sql.raw("DELETE FROM measurement_purchase_intents WHERE account_id=\(bind:accountID)").run()
@@ -445,7 +466,7 @@ enum PurchaseOriginService {
             String(Int64((input.purchaseDate.timeIntervalSince1970 * 1_000).rounded())), input.source].joined(separator: "|"))
     }
 
-    private static func hmac(_ kind: String, _ environment: String, _ reference: String, _ key: Data) -> String {
+    static func hmac(_ kind: String, _ environment: String, _ reference: String, _ key: Data) -> String {
         let data = Data("purchase-origin:v1:\(kind):\(environment):APP_STORE:\(reference)".utf8)
         return Data(HMAC<SHA256>.authenticationCode(for: data, using: SymmetricKey(data: key)))
             .map { String(format: "%02x", $0) }.joined()

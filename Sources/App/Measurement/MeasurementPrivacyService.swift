@@ -133,7 +133,10 @@ enum MeasurementPrivacyService {
                 if purpose == .crossCompanyAds {
                     try await sql.raw("DELETE FROM measurement_att_assertions WHERE account_id=\(bind:accountID)").run()
                 }
-                if purpose == .appleAds { _ = try await AdAttributionStore.eraseAccount(accountID, on: transaction) }
+                if purpose == .appleAds {
+                    try await ApplePurchaseOriginService.revoke(accountID: accountID, now: now, on: sql)
+                    _ = try await AdAttributionStore.eraseAccount(accountID, on: transaction)
+                }
                 if revoked { subjectID = nil }
             }
 
@@ -168,7 +171,7 @@ enum MeasurementPrivacyService {
         // The caller already owns the user row. Take purpose barriers in this
         // fixed order before exposure capture or outbox removal, matching dispatch
         // and permission mutation without holding the user row in provider I/O.
-        for purpose in [MeasurementPurpose.productAnalytics, .crossCompanyAds] {
+        for purpose in [MeasurementPurpose.productAnalytics, .crossCompanyAds, .appleAds] {
             try await VerifiedIdentityService.lock(
                 "measurement-permission:\(accountID.uuidString):\(purpose.rawValue)", on: db)
         }
@@ -185,6 +188,7 @@ enum MeasurementPrivacyService {
             SELECT 1 FROM measurement_erasure_jobs WHERE account_id=\(bind:accountID) AND state<>'completed' LIMIT 1
             """).first() != nil
         try await sql.raw("DELETE FROM measurement_att_assertions WHERE account_id=\(bind:accountID)").run()
+        try await ApplePurchaseOriginService.revoke(accountID: accountID, now: now, on: sql)
         try await PurchaseOriginService.eraseAccount(accountID, now: now, on: sql)
         let permissions = try await sql.raw("SELECT purpose,revision FROM measurement_permission_current WHERE account_id=\(bind:accountID) FOR UPDATE").all()
         for row in permissions {

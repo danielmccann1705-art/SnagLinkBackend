@@ -4,16 +4,16 @@ import Vapor
 /// AdServices API: `POST https://api-adservices.apple.com/api/v1/`, `Content-Type: text/plain`, the token as the
 /// body).
 ///
-/// Apple's answer is reduced to the eight Standard fields and nothing else is ever decoded, so nothing else can
-/// reach the row: `orgId`, `clickDate`, `impressionDate`, `supplyPlacement` and any field Apple adds later are
-/// dropped at the decoder. The token and Apple's body are never logged; a log line carries a state and an HTTP
-/// status only.
+/// Apple's answer is reduced to the stored Standard fields plus a transient
+/// organisation identifier used only to verify server-owned campaigns. The
+/// organisation identifier and raw response are never persisted or logged.
 enum AppleAttributionExchangeService {
     static let endpoint = URI(string: "https://api-adservices.apple.com/api/v1/")
 
     /// Apple's Standard record, as stored.
     struct StandardFields: Sendable, Equatable {
         var attribution: Bool?
+        var organizationId: Int64? = nil
         var campaignId: Int64?
         var adGroupId: Int64?
         var keywordId: Int64?
@@ -101,7 +101,8 @@ enum AppleAttributionExchangeService {
         guard let body, body.readableBytes > 0, body.readableBytes <= AdMeasurementPolicy.appleResponseMaxBytes,
               let wire = try? JSONDecoder().decode(StandardWire.self, from: Data(body.readableBytesView)),
               let attribution = wire.attribution else { return nil }
-        return StandardFields(attribution: attribution, campaignId: wire.campaignId, adGroupId: wire.adGroupId,
+        return StandardFields(attribution: attribution, organizationId: wire.orgId,
+                              campaignId: wire.campaignId, adGroupId: wire.adGroupId,
                               keywordId: wire.keywordId, adId: wire.adId,
                               claimType: word(wire.claimType), conversionType: word(wire.conversionType),
                               countryOrRegion: region(wire.countryOrRegion))
@@ -122,11 +123,12 @@ enum AppleAttributionExchangeService {
     /// only.
     private struct StandardWire: Decodable {
         let attribution: Bool?
+        let orgId: Int64?
         let campaignId: Int64?, adGroupId: Int64?, keywordId: Int64?, adId: Int64?
         let claimType: String?, conversionType: String?, countryOrRegion: String?
 
         enum CodingKeys: String, CodingKey {
-            case attribution, campaignId, adGroupId, keywordId, adId, claimType, conversionType, countryOrRegion
+            case attribution, orgId, campaignId, adGroupId, keywordId, adId, claimType, conversionType, countryOrRegion
         }
 
         init(from decoder: Decoder) throws {
@@ -136,7 +138,7 @@ enum AppleAttributionExchangeService {
                 guard let value = (try? c.decodeIfPresent(Int64.self, forKey: key)) ?? nil, value >= 0 else { return nil }
                 return value
             }
-            campaignId = identifier(.campaignId); adGroupId = identifier(.adGroupId)
+            orgId = identifier(.orgId); campaignId = identifier(.campaignId); adGroupId = identifier(.adGroupId)
             keywordId = identifier(.keywordId); adId = identifier(.adId)
             claimType = (try? c.decodeIfPresent(String.self, forKey: .claimType)) ?? nil
             conversionType = (try? c.decodeIfPresent(String.self, forKey: .conversionType)) ?? nil

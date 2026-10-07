@@ -88,11 +88,11 @@ final class AdMeasurementRulesTests: XCTestCase {
         for (index, data) in refused.enumerated() { XCTAssertNil(Store.Upload.validated(data), "case \(index)") }
     }
 
-    /// Apple's answer is reduced to the eight Standard fields; the engagement times, orgId, supplyPlacement and
-    /// anything new are never decoded.
+    /// Apple's answer is reduced to the stored Standard fields. orgId is decoded
+    /// only as transient verification evidence and is never stored.
     func testOnlyTheStandardFieldsAreReadFromApplesAnswer() {
         let fields = Exchange.standardFields(ByteBuffer(string: AppleStub.attributed))
-        XCTAssertEqual(fields, .init(attribution: true, campaignId: 542370539, adGroupId: 542317095, keywordId: 87675432, adId: 542317136,
+        XCTAssertEqual(fields, .init(attribution: true, organizationId: 40669820, campaignId: 542370539, adGroupId: 542317095, keywordId: 87675432, adId: 542317136,
                                      claimType: "Click", conversionType: "Download", countryOrRegion: "US"))
         XCTAssertEqual(Exchange.standardFields(ByteBuffer(string: #"{"attribution":false}"#)), .init(attribution: false))
         // A malformed field is left empty; a missing or non-boolean attribution makes the answer unreadable.
@@ -103,6 +103,27 @@ final class AdMeasurementRulesTests: XCTestCase {
         }
         XCTAssertNil(Exchange.standardFields(nil))
         XCTAssertNil(Exchange.standardFields(ByteBuffer(string: #"{"attribution":true,"pad":""# + String(repeating: "x", count: 17_000) + #""}"#)))
+    }
+
+    func testAppleCampaignEvidenceFailsClosedAndRecognisesOnlyVerifiedOwnedOrOfficialTestRecords() async throws {
+        let app = try await Application.make(.testing)
+        app.storage[ApplePurchaseOriginService.CampaignConfigurationKey.self] = .init(
+            organizationID: 40_669_820, campaignIDs: [542_370_539])
+        let verified = ApplePurchaseOriginService.evidence(for: .init(
+            attribution: true, organizationId: 40_669_820, campaignId: 542_370_539), app: app)
+        XCTAssertEqual(verified.classification, .verified)
+        XCTAssertNotNil(verified.configurationHash)
+        XCTAssertEqual(ApplePurchaseOriginService.evidence(for: .init(
+            attribution: true, organizationId: 40_669_821, campaignId: 542_370_539), app: app).classification, .unknown)
+        XCTAssertEqual(ApplePurchaseOriginService.evidence(for: .init(
+            attribution: false, organizationId: 40_669_820, campaignId: 542_370_539), app: app).classification, .organic)
+        XCTAssertEqual(ApplePurchaseOriginService.evidence(for: .init(
+            attribution: true, organizationId: 1_234_567_890, campaignId: 1_234_567_890,
+            adGroupId: 1_234_567_890, keywordId: 123_222, adId: 542_317_136), app: app).classification, .test)
+        app.storage[ApplePurchaseOriginService.CampaignConfigurationKey.self] = nil
+        XCTAssertEqual(ApplePurchaseOriginService.evidence(for: .init(
+            attribution: true, organizationId: 40_669_820, campaignId: 542_370_539), app: app).classification, .unknown)
+        try await app.asyncShutdown()
     }
 
     /// The request Apple documents, and its 404 rule: three attempts five seconds apart, then the next pass.
@@ -706,7 +727,9 @@ final class AdMeasurementAccountDeletionTests: AdMeasurementDatabaseCase {
 final class AdMeasurementMigrationTests: AdMeasurementDatabaseCase {
     static let columns: Set<String> = ["id", "reference", "rc_app_user_id", "app_version", "token", "exchange_state", "exchange_attempts",
                                        "attribution", "campaign_id", "adgroup_id", "keyword_id", "ad_id", "claim_type", "conversion_type",
-                                       "country_or_region", "created_at", "exchanged_at"]
+                                       "country_or_region", "created_at", "exchanged_at", "canonical_account_id",
+                                       "canonical_installation_id", "canonical_consent_revision", "evidence_class",
+                                       "evidence_config_hash", "evidence_classified_at"]
 
     /// Additive (creates one table and nothing else) and reversible (revert removes it; prepare works again).
     func testTheMigrationIsAdditiveAndReversible() async throws {
@@ -736,7 +759,8 @@ final class AdMeasurementMigrationTests: AdMeasurementDatabaseCase {
         }
     }
 
-    /// The table holds the Standard subset and nothing else, and the database refuses a token kept past the exchange.
+    /// The table holds the approved attribution, canonical-binding, and evidence fields only,
+    /// and the database refuses a token kept past the exchange.
     func testTheTableHoldsTheStandardSubsetOnlyAndRefusesAKeptToken() async throws {
         let columns = Set(try await sql.raw("""
             SELECT column_name FROM information_schema.columns WHERE table_name = 'ad_attribution_records' AND table_schema = current_schema()

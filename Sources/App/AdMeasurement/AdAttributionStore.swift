@@ -6,6 +6,14 @@ import FluentSQL
 /// Nothing in this file logs.
 enum AdAttributionStore {
 
+    struct Evidence: Sendable, Equatable {
+        enum Classification: String, Sendable { case unknown, test, verified, organic }
+        let classification: Classification
+        let configurationHash: String?
+
+        static let unknown = Evidence(classification: .unknown, configurationHash: nil)
+    }
+
     // MARK: - Reference
 
     /// 128 random bits as 26 RFC 4648 base32 characters (upper case, no padding): unguessable, so it can stand as
@@ -129,9 +137,22 @@ enum AdAttributionStore {
     /// Withdrawal: erases the row whatever its state, including an unexchanged token. `true` when a row existed.
     /// An exchange in flight for it finds nothing to update and its result is discarded.
     static func delete(reference: String, on db: Database) async throws -> Bool {
-        try await VerifiedIdentityService.sql(db).raw("""
-            DELETE FROM ad_attribution_records WHERE reference = \(bind: reference) RETURNING id
-            """).first() != nil
+        let route = try await VerifiedIdentityService.sql(db).raw("""
+            SELECT id,canonical_account_id FROM ad_attribution_records WHERE reference=\(bind:reference)
+            """).first()
+        guard let route else { return false }
+        let routedID = try route.decode(column: "id", as: UUID.self)
+        let accountID = try route.decode(column: "canonical_account_id", as: UUID?.self)
+        return try await db.transaction { tx in
+            let sql = try VerifiedIdentityService.sql(tx)
+            if let accountID {
+                _ = try await sql.raw("SELECT id FROM users WHERE id=\(bind:accountID) FOR UPDATE").first()
+                try await VerifiedIdentityService.lock("measurement-permission:\(accountID.uuidString):appleAds", on: tx)
+            }
+            guard try await sql.raw("SELECT 1 FROM ad_attribution_records WHERE id=\(bind:routedID) AND reference=\(bind:reference) FOR UPDATE").first() != nil else { return false }
+            try await ApplePurchaseOriginService.revoke(attributionIDs: [routedID], now: Date(), on: sql)
+            return try await sql.raw("DELETE FROM ad_attribution_records WHERE id=\(bind:routedID) RETURNING id").first() != nil
+        }
     }
 
     /// Account deletion (`AccountDeletionService.request`, inside its transaction): rows made while this account
@@ -140,24 +161,45 @@ enum AdAttributionStore {
     /// support with the reference, or at retention (PRIVACY-DELTA.md §A6).
     @discardableResult
     static func eraseAccount(_ userID: UUID, on db: Database) async throws -> Int {
-        try await total(VerifiedIdentityService.sql(db), """
-            WITH erased AS (DELETE FROM ad_attribution_records WHERE rc_app_user_id = \(bind: userID.uuidString) RETURNING 1)
-            SELECT count(*) AS total FROM erased
-            """)
+        try await db.transaction { tx in
+            let sql = try VerifiedIdentityService.sql(tx)
+            let rows = try await sql.raw("SELECT id FROM ad_attribution_records WHERE rc_app_user_id=\(bind:userID.uuidString) FOR UPDATE").all()
+            let ids = try rows.map { try $0.decode(column: "id", as: UUID.self) }
+            try await ApplePurchaseOriginService.revoke(attributionIDs: ids, now: Date(), on: sql)
+            return try await total(sql, """
+                WITH erased AS (DELETE FROM ad_attribution_records WHERE rc_app_user_id=\(bind:userID.uuidString) RETURNING 1)
+                SELECT count(*) AS total FROM erased
+                """)
+        }
     }
 
     /// Retention (D6, PROPOSED): rows created more than `AdMeasurementPolicy.retention` ago, oldest first, in
     /// batches.
     static func sweep(now: Date, on db: Database, limit: Int = AdMeasurementPolicy.sweepBatch) async throws -> Int {
         let cutoff = now.addingTimeInterval(-AdMeasurementPolicy.retention)
-        return try await total(VerifiedIdentityService.sql(db), """
-            WITH removed AS (
-                DELETE FROM ad_attribution_records WHERE id IN (
-                    SELECT id FROM ad_attribution_records WHERE created_at < \(bind: cutoff)
-                    ORDER BY created_at LIMIT \(bind: max(0, limit)))
-                RETURNING 1)
-            SELECT count(*) AS total FROM removed
-            """)
+        let candidates = try await VerifiedIdentityService.sql(db).raw("""
+            SELECT id,canonical_account_id FROM ad_attribution_records WHERE created_at<\(bind:cutoff)
+            ORDER BY created_at LIMIT \(bind:max(0,limit))
+            """).all()
+        var removed = 0
+        for candidate in candidates {
+            let id = try candidate.decode(column: "id", as: UUID.self)
+            let accountID = try candidate.decode(column: "canonical_account_id", as: UUID?.self)
+            let didRemove = try await db.transaction { tx in
+                let sql = try VerifiedIdentityService.sql(tx)
+                if let accountID {
+                    _ = try await sql.raw("SELECT id FROM users WHERE id=\(bind:accountID) FOR UPDATE").first()
+                    try await VerifiedIdentityService.lock("measurement-permission:\(accountID.uuidString):appleAds", on: tx)
+                }
+                guard try await sql.raw("""
+                    SELECT 1 FROM ad_attribution_records WHERE id=\(bind:id) AND created_at<\(bind:cutoff) FOR UPDATE
+                    """).first() != nil else { return false }
+                try await ApplePurchaseOriginService.revoke(attributionIDs: [id], now: now, on: sql)
+                return try await sql.raw("DELETE FROM ad_attribution_records WHERE id=\(bind:id) RETURNING id").first() != nil
+            }
+            if didRemove { removed += 1 }
+        }
+        return removed
     }
 
     /// Rows whose token's 24-hour validity has run out before an exchange settled: `expired`, token dropped.
@@ -204,7 +246,8 @@ enum AdAttributionStore {
                     attribution = \(bind: fields.attribution), campaign_id = \(bind: fields.campaignId),
                     adgroup_id = \(bind: fields.adGroupId), keyword_id = \(bind: fields.keywordId), ad_id = \(bind: fields.adId),
                     claim_type = \(bind: fields.claimType), conversion_type = \(bind: fields.conversionType),
-                    country_or_region = \(bind: fields.countryOrRegion)
+                    country_or_region = \(bind: fields.countryOrRegion), evidence_class='unknown',
+                    evidence_config_hash=NULL,evidence_classified_at=\(bind:now)
                 WHERE id = \(bind: id) AND exchange_state IN ('pending', 'failing')
                 RETURNING id
                 """
@@ -233,7 +276,7 @@ enum AdAttributionStore {
 
     /// Writes a synchronous authenticated exchange only to its token-free processing row.
     static func record(_ outcome: AppleAttributionExchangeService.Outcome, attempts: Int, reference: String,
-                       now: Date, on db: Database) async throws -> Bool {
+                       evidence: Evidence, now: Date, on db: Database) async throws -> Bool {
         let query: SQLQueryString
         switch outcome {
         case .attributed(let fields):
@@ -241,7 +284,9 @@ enum AdAttributionStore {
                 UPDATE ad_attribution_records SET exchange_state='done',exchange_attempts=\(bind:attempts),exchanged_at=\(bind:now),
                     attribution=\(bind:fields.attribution),campaign_id=\(bind:fields.campaignId),adgroup_id=\(bind:fields.adGroupId),
                     keyword_id=\(bind:fields.keywordId),ad_id=\(bind:fields.adId),claim_type=\(bind:fields.claimType),
-                    conversion_type=\(bind:fields.conversionType),country_or_region=\(bind:fields.countryOrRegion)
+                    conversion_type=\(bind:fields.conversionType),country_or_region=\(bind:fields.countryOrRegion),
+                    evidence_class=\(bind:evidence.classification.rawValue),evidence_config_hash=\(bind:evidence.configurationHash),
+                    evidence_classified_at=\(bind:now)
                 WHERE reference=\(bind:reference) AND exchange_state='processing' AND token IS NULL RETURNING id
                 """
         case .invalid:

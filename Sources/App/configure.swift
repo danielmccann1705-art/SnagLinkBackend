@@ -187,6 +187,8 @@ public func configure(_ app: Application,
         app.migrations.add(AllowRevenueCatEventDispatch())
         // Optional purchase-callback witness and immutable acquisition installation.
         app.migrations.add(CreateMeasurementPurchaseOrigins())
+        // Apple-only purchase attribution remains independent of ATT and cross-company consent.
+        app.migrations.add(ScopeMeasurementPurchaseOrigins())
 
         try await app.autoMigrate()
     } else {
