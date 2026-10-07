@@ -151,7 +151,7 @@ final class AdMeasurementRulesTests: XCTestCase {
             .appendingPathComponent("Sources/App/AdMeasurement")
         let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).filter { $0.pathExtension == "swift" }
         XCTAssertEqual(Set(files.map(\.lastPathComponent)), ["AdMeasurementPolicy.swift", "AdAttributionStore.swift", "AdMeasurementController.swift",
-                                                             "AppleAttributionExchangeService.swift", "AdMeasurementMaintenance.swift"])
+                                                             "AppleAttributionExchangeService.swift", "AdMeasurementMaintenance.swift", "LinkedInConversion.swift"])
         for file in files {
             let text = try String(contentsOf: file, encoding: .utf8)
             XCTAssertNil(text.range(of: #"(^|[^A-Za-z0-9_.])print\("#, options: .regularExpression), file.lastPathComponent)
@@ -160,7 +160,7 @@ final class AdMeasurementRulesTests: XCTestCase {
                     XCTAssertFalse(line.contains("\\(\(value)") || line.contains(".string(\(value)"), "\(file.lastPathComponent): \(line)")
                 }
             }
-            if file.lastPathComponent == "AdMeasurementController.swift" || file.lastPathComponent == "AdAttributionStore.swift" {
+            if ["AdMeasurementController.swift", "AdAttributionStore.swift", "LinkedInConversion.swift"].contains(file.lastPathComponent) {
                 XCTAssertFalse(text.contains("logger."), "\(file.lastPathComponent) does not log")
             }
         }
