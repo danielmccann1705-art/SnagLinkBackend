@@ -32,14 +32,23 @@ struct IssuedReportController: RouteCollection {
         let projectID = try id("projectId", req), actorID = try req.requireAuthenticatedUserId()
         let body = try req.content.decode(ReportIssueCommand.self)
         let hash = try PlatformMutationService.requestHash(body, route: "\(req.method):\(req.url.path)")
-        return try await req.db.transaction { db in
+        let applied = try await req.db.transaction { db -> (IssuedReportResponse, MeasurementRelayService.OutcomeCandidate?) in
             try await PlatformMutationService.lock(actorID: actorID, mutation: body.mutation, on: db)
             let (project, _) = try await ProjectAccessService.require(.review, projectID: projectID, actorID: actorID, on: db)
-            if let old = try await PlatformMutationService.replay(IssuedReportResponse.self, actorID: actorID, mutation: body.mutation, hash: hash, on: db) { return old }
+            if let old = try await PlatformMutationService.replay(IssuedReportResponse.self, actorID: actorID, mutation: body.mutation, hash: hash, on: db) { return (old, nil) }
             let result = try await IssuedReportService.issue(body, project: project, actorID: actorID, on: db)
-            try await PlatformMutationService.record(result, actorID: actorID, workspaceID: result.workspaceId, mutation: body.mutation, hash: hash, on: db)
-            return result
+            let occurredAt = try await PlatformMutationService.record(result, actorID: actorID, workspaceID: result.workspaceId, mutation: body.mutation, hash: hash, on: db)
+            let candidate = await MeasurementRelayService.outcomeCandidate(
+                accountID: actorID, operationID: body.mutation.operationId,
+                installationID: body.mutation.deviceId, event: .reportIssued,
+                occurredAt: occurredAt, on: db)
+            return (result, candidate)
         }
+        if let candidate = applied.1 {
+            await MeasurementRelayService.recordOutcome(
+                candidate, app: req.application, logger: req.logger, on: req.db)
+        }
+        return applied.0
     }
     @Sendable func list(req: Request) async throws -> IssuedReportPage {
         let projectID = try id("projectId", req), actorID = try req.requireAuthenticatedUserId()

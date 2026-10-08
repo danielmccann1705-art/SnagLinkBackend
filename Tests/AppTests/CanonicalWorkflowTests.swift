@@ -19,7 +19,21 @@ final class CanonicalWorkflowTests: XCTestCase {
         app.storage[PrivateObjectAllocationPolicy.InjectionKey.self] = privateStorage
         app.storage[PrivateContentStoreProvider.InjectionKey.self] = InMemoryPrivateContentStore(configuration: privateStorage)
     }
-    override func tearDown() async throws { if let app { try await app.asyncShutdown() } }
+    override func tearDown() async throws {
+        if let app {
+            if let sql = try? VerifiedIdentityService.sql(app.db) {
+                try? await sql.raw("""
+                    DELETE FROM measurement_dispatch_jobs j USING users u
+                    WHERE j.account_id=u.id AND u.email LIKE 'media-%@example.test'
+                    """).run()
+                try? await sql.raw("""
+                    DELETE FROM measurement_product_events e USING users u
+                    WHERE e.account_id=u.id AND u.email LIKE 'media-%@example.test'
+                    """).run()
+            }
+            try await app.asyncShutdown()
+        }
+    }
     private func user() async throws -> User {
         try await app.db.transaction { db in try await VerifiedIdentityService.resolveEmail("media-\(UUID())@example.test", name: "Synthetic photo tester", on: db) }
     }
@@ -80,6 +94,17 @@ final class CanonicalWorkflowTests: XCTestCase {
     private func action(_ snag: PlatformSnagResponse, extra: [String: Any] = [:]) -> [String: Any] {
         var body: [String: Any] = ["mutation": meta(), "expectedRevision": snag.revision, "expectedWorkflowRevision": snag.workflowRevision]
         body.merge(extra) { _, new in new }; return body
+    }
+    private func enableProductAnalytics() async throws {
+        try await FeatureFlag.query(on: app.db).filter(\.$key == "productAnalyticsEnabled").delete()
+        try await FeatureFlag(key: "productAnalyticsEnabled", enabled: true).save(on: app.db)
+    }
+    private func grantProductAnalytics(_ user: User) async throws {
+        let response = try await call(.PUT, "api/v2/measurement/permissions/productAnalytics", user, body: [
+            "requestId": UUID().uuidString, "decision": "granted",
+            "occurredAt": ISO8601DateFormatter().string(from: Date())
+        ])
+        XCTAssertEqual(response.status, .ok, response.body.string)
     }
     private func after(_ actor: User, project: PlatformProjectResponse, snag: PlatformSnagResponse, intent: UUID) async throws -> UUID {
         let path = path(project, snag)
@@ -186,6 +211,71 @@ final class CanonicalWorkflowTests: XCTestCase {
         let oldPhoto = first.attempt!.evidenceIds[0]
         let image = try await call(.GET, self.path(project, snag) + "/\(oldPhoto)/content", owner)
         XCTAssertEqual(image.status, .ok)
+    }
+    func testServerOutcomeEventsRequireOriginalExactConsentAndNeverBackfillReplay() async throws {
+        let owner = try await user(), ownerID = try owner.requireID()
+        let project = try await project(owner), original = try await logged(owner, project)
+        try await enableProductAnalytics()
+
+        let firstIntent = UUID(), firstMedia = try await after(owner, project: project, snag: original, intent: firstIntent)
+        let firstOperation = UUID(), firstDevice = UUID()
+        let firstBody: [String: Any] = [
+            "mutation": ["operationId": firstOperation.uuidString, "deviceId": firstDevice.uuidString],
+            "expectedRevision": original.revision, "expectedWorkflowRevision": original.workflowRevision,
+            "attemptId": firstIntent.uuidString, "evidenceIds": [firstMedia.uuidString]
+        ]
+        let firstResponse = try await call(.POST, workflowPath(project, original) + "/submit", owner, body: firstBody)
+        XCTAssertEqual(firstResponse.status, .ok, firstResponse.body.string)
+        let first = try firstResponse.content.decode(WorkflowResponse.self)
+
+        try await grantProductAnalytics(owner)
+        let replay = try await call(.POST, workflowPath(project, original) + "/submit", owner, body: firstBody)
+        XCTAssertEqual(replay.status, .ok, replay.body.string)
+        let sql = try VerifiedIdentityService.sql(app.db)
+        var eventCount = try await sql.raw("SELECT count(*) AS n FROM measurement_product_events WHERE account_id=\(bind:ownerID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(eventCount, 0, "a later grant must not backfill the original submission")
+
+        let rejected = try await decide(owner, project: project, submitted: first, kind: "send-back", reason: "Please include the corner")
+        let secondIntent = UUID(), secondMedia = try await after(owner, project: project, snag: rejected.snag, intent: secondIntent)
+        let submitOperation = UUID(), submitDevice = UUID()
+        let secondBody: [String: Any] = [
+            "mutation": ["operationId": submitOperation.uuidString, "deviceId": submitDevice.uuidString],
+            "expectedRevision": rejected.snag.revision, "expectedWorkflowRevision": rejected.snag.workflowRevision,
+            "attemptId": secondIntent.uuidString, "evidenceIds": [secondMedia.uuidString]
+        ]
+        let submittedResponse = try await call(.POST, workflowPath(project, rejected.snag) + "/submit", owner, body: secondBody)
+        XCTAssertEqual(submittedResponse.status, .ok, submittedResponse.body.string)
+        let submitted = try submittedResponse.content.decode(WorkflowResponse.self)
+        _ = try await decide(owner, project: project, submitted: submitted, kind: "accept")
+
+        let rows = try await sql.raw("""
+            SELECT event_name,properties::text AS properties,occurred_at,installation_id FROM measurement_product_events
+            WHERE account_id=\(bind:ownerID) ORDER BY received_at
+            """).all()
+        XCTAssertEqual(try rows.map { try $0.decode(column: "event_name", as: String.self) },
+                       ["completion_rejected", "completion_submitted", "completion_accepted"])
+        for row in rows {
+            XCTAssertEqual(try row.decode(column: "properties", as: String.self), "{}")
+        }
+        let submittedRow = try XCTUnwrap(rows.first {
+            (try? $0.decode(column: "installation_id", as: UUID.self)) == submitDevice
+        })
+        let receiptAt = try await sql.raw("""
+            SELECT created_at FROM mutation_receipts
+            WHERE actor_id=\(bind:ownerID) AND operation_id=\(bind:submitOperation)
+            """).first()!.decode(column: "created_at", as: Date.self)
+        XCTAssertEqual(try submittedRow.decode(column: "occurred_at", as: Date.self), receiptAt)
+
+        let replaySecond = try await call(.POST, workflowPath(project, rejected.snag) + "/submit", owner, body: secondBody)
+        XCTAssertEqual(replaySecond.status, .ok, replaySecond.body.string)
+        eventCount = try await sql.raw("SELECT count(*) AS n FROM measurement_product_events WHERE account_id=\(bind:ownerID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(eventCount, 3)
+        let payloads = try await sql.raw("SELECT payload::text AS payload FROM measurement_dispatch_jobs WHERE account_id=\(bind:ownerID) AND source_kind='productEvent'").all()
+        for payload in try payloads.map({ try $0.decode(column: "payload", as: String.self) }) {
+            XCTAssertFalse(payload.contains(project.project.id.uuidString))
+            XCTAssertFalse(payload.contains(original.snag.id.uuidString))
+            XCTAssertFalse(payload.contains(submitOperation.uuidString))
+        }
     }
     func testWaiverAndInternalFixRequireReviewerAndRecordHonestAttribution() async throws {
         let owner = try await user(), member = try await user(), project = try await project(owner, company: true)

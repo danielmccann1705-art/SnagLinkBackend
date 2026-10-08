@@ -31,8 +31,18 @@ struct PlatformMutationService {
         }
         return try decode(type, row.decode(column: "result_json", as: String.self))
     }
-    static func record<T: Encodable>(_ result: T, actorID: UUID, workspaceID: UUID, mutation: MutationMetadata, hash: String, on db: Database) async throws {
-        try await VerifiedIdentityService.sql(db).raw("INSERT INTO mutation_receipts (actor_id, operation_id, device_id, workspace_id, request_hash, result_json, created_at) VALUES (\(bind: actorID), \(bind: mutation.operationId), \(bind: mutation.deviceId), \(bind: workspaceID), \(bind: hash), \(bind: encode(result)), \(bind: Date()))").run()
+    /// Returns the database's immutable server receipt time from the same INSERT.
+    /// Existing callers may ignore it; outcome hooks use it without another query.
+    @discardableResult
+    static func record<T: Encodable>(_ result: T, actorID: UUID, workspaceID: UUID, mutation: MutationMetadata, hash: String, on db: Database) async throws -> Date {
+        guard let row = try await VerifiedIdentityService.sql(db).raw("""
+            INSERT INTO mutation_receipts
+                (actor_id,operation_id,device_id,workspace_id,request_hash,result_json,created_at)
+            VALUES (\(bind:actorID),\(bind:mutation.operationId),\(bind:mutation.deviceId),\(bind:workspaceID),
+                    \(bind:hash),\(bind:encode(result)),\(bind:Date()))
+            RETURNING created_at
+            """).first() else { throw Abort(.internalServerError, reason: "Mutation receipt unavailable") }
+        return try row.decode(column: "created_at", as: Date.self)
     }
     /// Holds the same workspace transaction lock as membership changes. The counter
     /// update and payload commit together; rolled-back writes cannot leave a gap.

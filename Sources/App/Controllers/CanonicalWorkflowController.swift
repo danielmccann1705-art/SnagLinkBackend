@@ -48,15 +48,32 @@ struct CanonicalWorkflowController: RouteCollection {
         let projectID = try id("projectId", req), snagID = try id("snagId", req), actorID = try req.requireAuthenticatedUserId()
         let command = try req.content.decode(WorkflowCommand.self)
         let hash = try PlatformMutationService.requestHash(command, route: "POST:\(req.url.path)")
-        return try await req.db.transaction { db in
+        let event: MeasurementRelayService.ServerOutcome?
+        switch action {
+        case .submit: event = .completionSubmitted
+        case .accept: event = .completionAccepted
+        case .sendBack: event = .completionRejected
+        default: event = nil
+        }
+        let applied = try await req.db.transaction { db -> (WorkflowResponse, MeasurementRelayService.OutcomeCandidate?) in
             try await PlatformMutationService.lock(actorID: actorID, mutation: command.mutation, on: db)
             let capability: ProjectAccessPolicy.Action = [.accept, .sendBack, .reopen, .internalFix].contains(action) ? .review : .submitCompletion
             let (project, actions) = try await ProjectAccessService.require(capability, projectID: projectID, actorID: actorID, on: db)
-            if let replay = try await PlatformMutationService.replay(WorkflowResponse.self, actorID: actorID, mutation: command.mutation, hash: hash, on: db) { return replay }
+            if let replay = try await PlatformMutationService.replay(WorkflowResponse.self, actorID: actorID, mutation: command.mutation, hash: hash, on: db) { return (replay, nil) }
             let snag = try await PlatformSnagService.find(snagID, projectID: projectID, on: db)
             let response = try await CanonicalWorkflowService.execute(command, action: action, snag: snag, project: project, actorID: actorID, actions: actions, on: db)
-            try await PlatformMutationService.record(response, actorID: actorID, workspaceID: project.workspaceId!, mutation: command.mutation, hash: hash, on: db)
-            return response
+            let occurredAt = try await PlatformMutationService.record(response, actorID: actorID, workspaceID: project.workspaceId!, mutation: command.mutation, hash: hash, on: db)
+            guard let event else { return (response, nil) }
+            let candidate = await MeasurementRelayService.outcomeCandidate(
+                accountID: actorID, operationID: command.mutation.operationId,
+                installationID: command.mutation.deviceId, event: event,
+                occurredAt: occurredAt, on: db)
+            return (response, candidate)
         }
+        if let candidate = applied.1 {
+            await MeasurementRelayService.recordOutcome(
+                candidate, app: req.application, logger: req.logger, on: req.db)
+        }
+        return applied.0
     }
 }

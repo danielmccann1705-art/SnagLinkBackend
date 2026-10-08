@@ -137,6 +137,25 @@ enum MeasurementCredentialCipher {
 }
 
 enum MeasurementRelayService {
+    enum ServerOutcome: String, Sendable {
+        case completionSubmitted = "completion_submitted"
+        case completionAccepted = "completion_accepted"
+        case completionRejected = "completion_rejected"
+        case reportIssued = "report_issued"
+    }
+
+    /// Transient authority captured only for a newly committed business mutation.
+    /// It is deliberately not reconstructed from a later request or consent grant.
+    struct OutcomeCandidate: Sendable {
+        let accountID: UUID
+        let operationID: UUID
+        let installationID: UUID
+        let event: ServerOutcome
+        let occurredAt: Date
+        fileprivate let consentRevision: UUID
+        fileprivate let subjectID: UUID
+    }
+
     static let futureSkew: TimeInterval = 300
     static let maximumEventAge: TimeInterval = 86_400
 
@@ -258,6 +277,143 @@ enum MeasurementRelayService {
         }
     }
 
+    /// Called inside the genuine new-mutation transaction, after its durable receipt
+    /// was written. The purpose lock makes this an exact snapshot of the grant which
+    /// covered the operation. A replay never reaches this call.
+    static func outcomeCandidate(accountID: UUID, operationID: UUID, installationID: UUID,
+                                 event: ServerOutcome, occurredAt: Date,
+                                 on db: Database) async -> OutcomeCandidate? {
+        guard let sql = try? VerifiedIdentityService.sql(db) else { return nil }
+        do {
+            try await sql.raw("SAVEPOINT optional_measurement_candidate").run()
+            let lockKey = "measurement-permission:\(accountID.uuidString):productAnalytics"
+            guard let lock = try await sql.raw("""
+                SELECT pg_try_advisory_xact_lock(hashtextextended(\(bind:lockKey),0)) AS acquired
+                """).first(), try lock.decode(column: "acquired", as: Bool.self) else {
+                try await sql.raw("RELEASE SAVEPOINT optional_measurement_candidate").run()
+                return nil
+            }
+            let flags = try await FeatureFlagService.resolve(on: db)
+            guard flags["productAnalyticsEnabled"] == true else {
+                try await sql.raw("RELEASE SAVEPOINT optional_measurement_candidate").run()
+                return nil
+            }
+            let row = try await sql.raw("""
+                SELECT c.revision,c.subject_id FROM measurement_permission_current c
+                JOIN measurement_subjects s ON s.id=c.subject_id AND s.account_id=c.account_id
+                  AND s.purpose=c.purpose AND s.state='active'
+                JOIN users u ON u.id=c.account_id AND u.lifecycle_state='active'
+                WHERE c.account_id=\(bind:accountID) AND c.purpose='productAnalytics'
+                  AND c.decision='granted' AND c.updated_at<=\(bind:occurredAt)
+                  AND NOT EXISTS(
+                    SELECT 1 FROM measurement_erasure_jobs e
+                    WHERE e.account_id=c.account_id AND e.subject_id=c.subject_id AND e.state<>'completed')
+                LIMIT 1
+                """).first()
+            let candidate: OutcomeCandidate?
+            if let row {
+                candidate = .init(accountID: accountID, operationID: operationID,
+                    installationID: installationID, event: event, occurredAt: occurredAt,
+                    consentRevision: try row.decode(column: "revision", as: UUID.self),
+                    subjectID: try row.decode(column: "subject_id", as: UUID.self))
+            } else { candidate = nil }
+            try await sql.raw("RELEASE SAVEPOINT optional_measurement_candidate").run()
+            return candidate
+        } catch {
+            try? await sql.raw("ROLLBACK TO SAVEPOINT optional_measurement_candidate").run()
+            try? await sql.raw("RELEASE SAVEPOINT optional_measurement_candidate").run()
+            return nil
+        }
+    }
+
+    /// Best-effort postcommit recording. Failures cannot change the business result.
+    /// If this is lost, a receipt replay does not reconstruct it under later consent.
+    static func recordOutcome(_ candidate: OutcomeCandidate,
+                              app: Application, logger _: Logger, on db: Database) async {
+        do {
+            try await persistOutcome(candidate, environment: app.environment.name, on: db)
+        } catch {
+            // Measurement is deliberately best-effort. A busy privacy barrier or
+            // unavailable measurement store must not delay or change the product result.
+        }
+    }
+
+    private static func persistOutcome(_ candidate: OutcomeCandidate, environment: String,
+                                       on db: Database) async throws {
+        let accountID = candidate.accountID
+        let eventID = outcomeEventID(environment: environment, accountID: accountID,
+                                     event: candidate.event, operationID: candidate.operationID)
+        let bodyHash = SHA256Hasher.hash(token: ["server-outcome-v1", environment,
+            accountID.uuidString.lowercased(), candidate.event.rawValue,
+            candidate.operationID.uuidString.lowercased(), candidate.installationID.uuidString.lowercased(),
+            candidate.consentRevision.uuidString.lowercased(),
+            candidate.subjectID.uuidString.lowercased()].joined(separator: "|"))
+        try await db.transaction { tx in
+            let sql = try VerifiedIdentityService.sql(tx)
+            guard let account = try await sql.raw("""
+                SELECT lifecycle_state FROM users WHERE id=\(bind:accountID) FOR UPDATE NOWAIT
+                """).first(), try account.decode(column: "lifecycle_state", as: String.self) == "active" else { return }
+            let lockKey = "measurement-permission:\(accountID.uuidString):productAnalytics"
+            guard let lock = try await sql.raw("""
+                SELECT pg_try_advisory_xact_lock(hashtextextended(\(bind:lockKey),0)) AS acquired
+                """).first(), try lock.decode(column: "acquired", as: Bool.self) else { return }
+            let flags = try await FeatureFlagService.resolve(on: tx)
+            guard flags["productAnalyticsEnabled"] == true else { return }
+            if let existing = try await sql.raw("""
+                SELECT body_hash FROM measurement_product_events
+                WHERE account_id=\(bind:accountID) AND event_id=\(bind:eventID)
+                """).first() {
+                guard try existing.decode(column: "body_hash", as: String.self) == bodyHash else {
+                    throw Abort(.conflict, reason: "Product outcome identity conflict")
+                }
+                return
+            }
+            guard try await sql.raw("""
+                SELECT 1 FROM measurement_permission_current c
+                JOIN measurement_subjects s ON s.id=c.subject_id AND s.account_id=c.account_id
+                  AND s.purpose=c.purpose AND s.state='active'
+                WHERE c.account_id=\(bind:accountID) AND c.purpose='productAnalytics'
+                  AND c.revision=\(bind:candidate.consentRevision)
+                  AND c.subject_id=\(bind:candidate.subjectID)
+                  AND c.decision='granted' AND c.updated_at<=\(bind:candidate.occurredAt)
+                  AND NOT EXISTS(
+                    SELECT 1 FROM measurement_erasure_jobs e
+                    WHERE e.account_id=c.account_id AND e.subject_id=c.subject_id AND e.state<>'completed')
+                LIMIT 1
+                """).first() != nil else { return }
+            let receivedAt = Date()
+            try await sql.raw("""
+                INSERT INTO measurement_product_events
+                    (account_id,event_id,installation_id,purpose,consent_revision,subject_id,occurred_at,received_at,
+                     schema_version,event_name,properties,body_hash)
+                VALUES (\(bind:accountID),\(bind:eventID),\(bind:candidate.installationID),'productAnalytics',
+                        \(bind:candidate.consentRevision),\(bind:candidate.subjectID),\(bind:candidate.occurredAt),\(bind:receivedAt),1,
+                        \(bind:candidate.event.rawValue),'{}'::jsonb,\(bind:bodyHash))
+                """).run()
+            let payload = try canonicalJSON(["event": candidate.event.rawValue,
+                "occurredAt": ISO8601DateFormatter().string(from: candidate.occurredAt)])
+            try await sql.raw("""
+                INSERT INTO measurement_dispatch_jobs
+                    (id,destination,source_kind,source_id,account_id,subject_id,consent_revision,state,available_at,payload,created_at)
+                VALUES (\(bind:UUID()),'posthog','productEvent',\(bind:eventID),\(bind:accountID),\(bind:candidate.subjectID),
+                        \(bind:candidate.consentRevision),'pending',\(bind:receivedAt),CAST(\(bind:payload) AS JSONB),\(bind:receivedAt))
+                ON CONFLICT(account_id,destination,source_kind,source_id) DO NOTHING
+                """).run()
+        }
+    }
+
+    private static func outcomeEventID(environment: String, accountID: UUID,
+                                       event: ServerOutcome, operationID: UUID) -> UUID {
+        let digest = SHA256.hash(data: Data(["server-outcome-id-v1", environment,
+            accountID.uuidString.lowercased(), event.rawValue,
+            operationID.uuidString.lowercased()].joined(separator: "|").utf8))
+        var bytes = Array(digest.prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x80
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+
     static func acceptApple(accountID: UUID, input: MeasurementAppleUpload, app: Application,
                             now: Date = Date(), on db: Database) async throws -> String {
         guard AdAttributionStore.Upload.isToken(input.token), AdAttributionStore.Upload.isAppVersion(input.appVersion) else {
@@ -361,7 +517,7 @@ enum MeasurementRelayService {
         guard input.event.schemaVersion == 1, input.occurredAt <= now.addingTimeInterval(futureSkew),
               input.occurredAt >= now.addingTimeInterval(-maximumEventAge) else { throw invalidEvent() }
         let p = input.event.properties
-        let none: Set<String> = ["onboarding_started", "onboarding_completed", "welcome_card_shown", "welcome_card_create_tapped",
+        let none: Set<String> = ["session_started", "onboarding_started", "onboarding_completed", "welcome_card_shown", "welcome_card_create_tapped",
                                  "first_project_created", "first_snag_created", "portal_introduction_shown",
                                  "portal_introduction_dismissed", "invitation_shown", "invitation_dismissed"]
         if none.contains(input.event.name) { guard p.isEmpty else { throw invalidEvent() }; return }

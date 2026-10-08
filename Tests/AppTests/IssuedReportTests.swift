@@ -14,7 +14,21 @@ final class IssuedReportTests: XCTestCase {
         app = try await Application.make(.testing); try await configure(app)
         app.storage[AccountDeletionTestActivation.self] = true
     }
-    override func tearDown() async throws { if let app { try await app.asyncShutdown() } }
+    override func tearDown() async throws {
+        if let app {
+            if let sql = try? VerifiedIdentityService.sql(app.db) {
+                try? await sql.raw("""
+                    DELETE FROM measurement_dispatch_jobs j USING users u
+                    WHERE j.account_id=u.id AND u.email LIKE 'report-%@example.test'
+                    """).run()
+                try? await sql.raw("""
+                    DELETE FROM measurement_product_events e USING users u
+                    WHERE e.account_id=u.id AND u.email LIKE 'report-%@example.test'
+                    """).run()
+            }
+            try await app.asyncShutdown()
+        }
+    }
 
     private func user(_ name: String = "Synthetic manager") async throws -> User {
         try await app.db.transaction { db in try await VerifiedIdentityService.resolveEmail("report-\(UUID())@example.test", name: name, on: db) }
@@ -53,6 +67,15 @@ final class IssuedReportTests: XCTestCase {
         _ = try await app.db.transaction { db in try await WorkspaceInvitationService.accept(token: invite.1, actorID: member.requireID(), on: db) }
     }
     private func path(_ project: PlatformProjectResponse) -> String { "api/v2/projects/\(project.project.id)/reports" }
+    private func grantProductAnalytics(_ user: User) async throws {
+        try await FeatureFlag.query(on: app.db).filter(\.$key == "productAnalyticsEnabled").delete()
+        try await FeatureFlag(key: "productAnalyticsEnabled", enabled: true).save(on: app.db)
+        let response = try await request(.PUT, "api/v2/measurement/permissions/productAnalytics", user: user, body: [
+            "requestId": UUID().uuidString, "decision": "granted",
+            "occurredAt": ISO8601DateFormatter().string(from: Date())
+        ])
+        XCTAssertEqual(response.status, .ok, response.body.string)
+    }
 
     func testIssueStoresOneImmutableRecordPerOperationAndHistoryDownloadAgree() async throws {
         let owner = try await user("Dana <Site> Manager"), envelope = try await project(owner)
@@ -155,6 +178,52 @@ final class IssuedReportTests: XCTestCase {
         try await VerifiedIdentityService.sql(app.db).raw("UPDATE users SET lifecycle_state='deleted',name=NULL,email=NULL,apple_user_id=NULL,auth_version=auth_version+1 WHERE id=\(bind: manager.requireID())").run()
         let read = try await request(.GET, path(envelope) + "/\(report.id)", user: owner).content.decode(IssuedReportDetail.self)
         XCTAssertEqual(read.report?.issuedBy.name, "Former member"); XCTAssertEqual(read.report?.issuedBy.former, true)
+    }
+
+    func testReportIssuedRecordsOnlyNewDurableIssueWithOriginalReceiptTime() async throws {
+        let owner = try await user(), ownerID = try owner.requireID(), envelope = try await project(owner)
+        _ = try await snag(owner, project: envelope, fields: ["title": "Synthetic sealant check"])
+        try await grantProductAnalytics(owner)
+
+        let preview = try await request(.POST, path(envelope) + "/preview", user: owner,
+                                        body: ["scope": [:] as [String: Any]])
+        XCTAssertEqual(preview.status, .ok, preview.body.string)
+        let sql = try VerifiedIdentityService.sql(app.db)
+        var count = try await sql.raw("SELECT count(*) AS n FROM measurement_product_events WHERE account_id=\(bind:ownerID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(count, 0)
+
+        let operation = UUID(), device = UUID()
+        let body: [String: Any] = [
+            "mutation": ["operationId": operation.uuidString, "deviceId": device.uuidString],
+            "scope": [:] as [String: Any]
+        ]
+        let first = try await request(.POST, path(envelope), user: owner, body: body)
+        XCTAssertEqual(first.status, .ok, first.body.string)
+        let replay = try await request(.POST, path(envelope), user: owner, body: body)
+        XCTAssertEqual(replay.status, .ok, replay.body.string)
+
+        let storedEvent = try await sql.raw("""
+            SELECT event_name,properties::text AS properties,occurred_at,installation_id
+            FROM measurement_product_events WHERE account_id=\(bind:ownerID)
+            """).first()
+        let row = try XCTUnwrap(storedEvent)
+        XCTAssertEqual(try row.decode(column: "event_name", as: String.self), "report_issued")
+        XCTAssertEqual(try row.decode(column: "properties", as: String.self), "{}")
+        XCTAssertEqual(try row.decode(column: "installation_id", as: UUID.self), device)
+        let receiptAt = try await sql.raw("""
+            SELECT created_at FROM mutation_receipts
+            WHERE actor_id=\(bind:ownerID) AND operation_id=\(bind:operation)
+            """).first()!.decode(column: "created_at", as: Date.self)
+        XCTAssertEqual(try row.decode(column: "occurred_at", as: Date.self), receiptAt)
+        count = try await sql.raw("SELECT count(*) AS n FROM measurement_product_events WHERE account_id=\(bind:ownerID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(count, 1)
+        let payload = try await sql.raw("""
+            SELECT payload::text AS payload FROM measurement_dispatch_jobs
+            WHERE account_id=\(bind:ownerID) AND source_kind='productEvent'
+            """).first()!.decode(column: "payload", as: String.self)
+        XCTAssertFalse(payload.contains(envelope.project.id.uuidString))
+        XCTAssertFalse(payload.contains(operation.uuidString))
+        XCTAssertFalse(payload.contains(try first.content.decode(IssuedReportResponse.self).id.uuidString))
     }
 
     func testAccountDeletionRemovesPersonalReportsWithTheProject() async throws {

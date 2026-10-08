@@ -571,8 +571,22 @@ final class MeasurementPrivacyTests: XCTestCase {
                             "properties": ["screen_index": "1", "duration_seconds": "12.30"]]
         let invalidResponse = try await request(.POST, "api/v2/measurement/events", token: jwt, object: invalid)
         XCTAssertEqual(invalidResponse.status, .badRequest)
+        var session = body
+        session["eventId"] = UUID().uuidString
+        session["event"] = ["schemaVersion": 1, "name": "session_started", "properties": [:]]
+        let acceptedSession = try await request(.POST, "api/v2/measurement/events", token: jwt, object: session)
+        XCTAssertEqual(acceptedSession.status, .accepted)
+        session["eventId"] = UUID().uuidString
+        session["event"] = ["schemaVersion": 1, "name": "session_started", "properties": ["source": "foreground"]]
+        let invalidSession = try await request(.POST, "api/v2/measurement/events", token: jwt, object: session)
+        XCTAssertEqual(invalidSession.status, .badRequest)
+        session["eventId"] = UUID().uuidString
+        session["event"] = ["schemaVersion": 1, "name": "completion_submitted", "properties": [:]]
+        let clientOutcome = try await request(.POST, "api/v2/measurement/events", token: jwt, object: session)
+        XCTAssertEqual(clientOutcome.status, .badRequest,
+                       "server-authoritative outcomes cannot be uploaded by a client")
         let dispatchCount = try await sql.raw("SELECT count(*) AS n FROM measurement_dispatch_jobs WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
-        XCTAssertEqual(dispatchCount, 1)
+        XCTAssertEqual(dispatchCount, 2)
 
         let withdrawn = try await put("productAnalytics", expected: revision, decision: "withdrawn")
         XCTAssertEqual(withdrawn.status, .ok)
@@ -584,6 +598,114 @@ final class MeasurementPrivacyTests: XCTestCase {
         let event = try XCTUnwrap(storedEvent)
         XCTAssertNil(try event.decode(column: "event_name", as: String?.self))
         XCTAssertNotNil(try event.decode(column: "revoked_at", as: Date?.self))
+    }
+
+    func testServerOutcomeCandidateCannotSurviveWithdrawalOrSubjectRotation() async throws {
+        try await enable("productAnalyticsEnabled")
+        let grant = try await put("productAnalytics", decision: "granted")
+        let revision = try uuid(try permission("productAnalytics", in: grant)["revision"])
+        let occurredAt = Date().addingTimeInterval(1)
+        let candidate = try await app.db.transaction { db in
+            await MeasurementRelayService.outcomeCandidate(
+                accountID: self.userID, operationID: UUID(), installationID: UUID(),
+                event: .completionSubmitted, occurredAt: occurredAt, on: db)
+        }
+        XCTAssertNotNil(candidate)
+
+        let withdrawn = try await put("productAnalytics", expected: revision, decision: "withdrawn")
+        XCTAssertEqual(withdrawn.status, .ok, withdrawn.body.string)
+        await MeasurementRelayService.recordOutcome(
+            try XCTUnwrap(candidate), app: app, logger: app.logger, on: app.db)
+        let count = try await sql.raw("""
+            SELECT count(*) AS n FROM measurement_product_events
+            WHERE account_id=\(bind:userID) AND event_name='completion_submitted'
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(count, 0)
+    }
+
+    func testServerOutcomeCandidateSkipsBusyPrivacyBarrier() async throws {
+        try await enable("productAnalyticsEnabled")
+        let grant = try await put("productAnalytics", decision: "granted")
+        XCTAssertEqual(grant.status, .ok)
+        let barrier = MeasurementTransactionGate()
+        let key = "measurement-permission:\(userID.uuidString):productAnalytics"
+        let blocker = Task {
+            try await self.app.db.transaction { db in
+                try await VerifiedIdentityService.lock(key, on: db)
+                await barrier.hold()
+            }
+        }
+        await barrier.waitUntilHeld()
+        let watchdog = Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            await barrier.release()
+        }
+        let clock = ContinuousClock(), started = clock.now
+        let candidate = try await app.db.transaction { db in
+            await MeasurementRelayService.outcomeCandidate(
+                accountID: self.userID, operationID: UUID(), installationID: UUID(),
+                event: .reportIssued, occurredAt: Date().addingTimeInterval(1), on: db)
+        }
+        let elapsed = started.duration(to: clock.now)
+        await barrier.release()
+        _ = await watchdog.result
+        try await blocker.value
+        XCTAssertNil(candidate)
+        XCTAssertLessThan(elapsed, .milliseconds(500), "optional measurement must not wait for the provider/privacy barrier")
+    }
+
+    func testServerOutcomePostcommitRecorderSkipsBusyPrivacyBarrier() async throws {
+        try await enable("productAnalyticsEnabled")
+        let grant = try await put("productAnalytics", decision: "granted")
+        XCTAssertEqual(grant.status, .ok)
+        let candidate = try await app.db.transaction { db in
+            await MeasurementRelayService.outcomeCandidate(
+                accountID: self.userID, operationID: UUID(), installationID: UUID(),
+                event: .reportIssued, occurredAt: Date().addingTimeInterval(1), on: db)
+        }
+        let barrier = MeasurementTransactionGate()
+        let key = "measurement-permission:\(userID.uuidString):productAnalytics"
+        let blocker = Task {
+            try await self.app.db.transaction { db in
+                try await VerifiedIdentityService.lock(key, on: db)
+                await barrier.hold()
+            }
+        }
+        await barrier.waitUntilHeld()
+        let watchdog = Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            await barrier.release()
+        }
+        let clock = ContinuousClock(), started = clock.now
+        await MeasurementRelayService.recordOutcome(
+            try XCTUnwrap(candidate), app: app, logger: app.logger, on: app.db)
+        let elapsed = started.duration(to: clock.now)
+        await barrier.release()
+        watchdog.cancel(); _ = await watchdog.result
+        try await blocker.value
+        XCTAssertLessThan(elapsed, .milliseconds(500), "postcommit measurement must not delay the product response")
+        let count = try await sql.raw("SELECT count(*) AS n FROM measurement_product_events WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(count, 0)
+    }
+
+    func testServerOutcomeCandidateSQLFailureRollsBackOnlyItsSavepoint() async throws {
+        try await enable("productAnalyticsEnabled")
+        let grant = try await put("productAnalytics", decision: "granted")
+        XCTAssertEqual(grant.status, .ok)
+        let marker = "synthetic-outcome-savepoint-\(UUID().uuidString.lowercased())"
+        try await app.db.transaction { db in
+            let transactionSQL = try VerifiedIdentityService.sql(db)
+            try await transactionSQL.raw("INSERT INTO feature_flags(id,key,enabled) VALUES(\(bind:UUID()),\(bind:marker),true)").run()
+            try await transactionSQL.raw("ALTER TABLE measurement_permission_current RENAME TO measurement_permission_current_hidden").run()
+            let candidate = await MeasurementRelayService.outcomeCandidate(
+                accountID: self.userID, operationID: UUID(), installationID: UUID(),
+                event: .completionAccepted, occurredAt: Date().addingTimeInterval(1), on: db)
+            XCTAssertNil(candidate)
+            try await transactionSQL.raw("ALTER TABLE measurement_permission_current_hidden RENAME TO measurement_permission_current").run()
+        }
+        let persisted = try await sql.raw("SELECT enabled FROM feature_flags WHERE key=\(bind:marker)").first()
+        XCTAssertEqual(try persisted?.decode(column: "enabled", as: Bool.self), true)
+        try await sql.raw("DELETE FROM feature_flags WHERE key=\(bind:marker)").run()
     }
 
     func testSameClientEventUUIDFromTwoAccountsCreatesTwoAccountScopedDeliveries() async throws {
@@ -1879,6 +2001,26 @@ final class MeasurementPrivacyTests: XCTestCase {
         XCTAssertEqual(intentState, "conflict")
         XCTAssertEqual(activeAcquisitions, 0)
         XCTAssertNil(origin)
+    }
+}
+
+private actor MeasurementTransactionGate {
+    private var held = false
+    private var released = false
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    func hold() async {
+        held = true
+        heldWaiters.forEach { $0.resume() }; heldWaiters.removeAll()
+        if !released { await withCheckedContinuation { releaseWaiters.append($0) } }
+    }
+    func waitUntilHeld() async {
+        if held { return }
+        await withCheckedContinuation { heldWaiters.append($0) }
+    }
+    func release() {
+        released = true
+        releaseWaiters.forEach { $0.resume() }; releaseWaiters.removeAll()
     }
 }
 
