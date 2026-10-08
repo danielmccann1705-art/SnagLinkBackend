@@ -832,6 +832,9 @@ final class MeasurementPrivacyTests: XCTestCase {
             let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(call.body.utf8)) as? [String: Any])
             XCTAssertNotNil(ISO8601DateFormatter().date(from: try XCTUnwrap(object["timestamp"] as? String)))
             XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(object["uuid"] as? String)))
+            let properties = try XCTUnwrap(object["properties"] as? [String: Any])
+            XCTAssertEqual(properties["$process_person_profile"] as? Bool, false)
+            XCTAssertEqual(properties["$geoip_disable"] as? Bool, true)
         }
     }
 

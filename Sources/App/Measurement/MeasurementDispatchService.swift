@@ -1,6 +1,36 @@
 import Vapor
 import Fluent
 import FluentSQL
+import AsyncHTTPClient
+
+/// One redirect-refusing client for measurement provider POSTs. Provider bodies
+/// carry write credentials, so a 3xx response must be returned as-is rather than
+/// replaying the request to a Location chosen by the receiver.
+final class MeasurementDirectHTTPClient: LifecycleHandler, @unchecked Sendable {
+    private let client: HTTPClient
+    private let logger: Logger
+
+    init(eventLoopGroup: EventLoopGroup, logger: Logger) {
+        client = HTTPClient(eventLoopGroupProvider: .shared(eventLoopGroup),
+            configuration: .init(redirectConfiguration: .disallow),
+            backgroundActivityLogger: logger)
+        self.logger = logger
+    }
+
+    func post(_ uri: URI, headers: HTTPHeaders, body: Data) async throws -> MeasurementDispatchService.Reply {
+        var request = HTTPClientRequest(url: uri.string)
+        request.method = .POST
+        request.headers = headers
+        request.body = .bytes(ByteBuffer(data: body))
+        let response = try await client.execute(request, timeout: .seconds(20), logger: logger)
+        _ = try await response.body.collect(upTo: 65_536)
+        return .init(status: Int(response.status.code), retryAfter: response.headers.first(name: .retryAfter))
+    }
+
+    func close() async throws { try await client.shutdown() }
+    func shutdown(_ application: Application) { try? client.syncShutdown() }
+    func shutdownAsync(_ application: Application) async { try? await client.shutdown() }
+}
 
 enum MeasurementDispatchService {
     struct Counts: Codable, Sendable, Equatable {
@@ -24,6 +54,8 @@ enum MeasurementDispatchService {
     struct Reply: Sendable { let status: Int; let retryAfter: String? }
     typealias Transport = @Sendable (URI, HTTPHeaders, Data) async throws -> Reply
     struct TransportKey: StorageKey { typealias Value = Transport }
+    private struct DirectHTTPKey: StorageKey { typealias Value = MeasurementDirectHTTPClient }
+    private struct DirectHTTPLock: LockKey {}
 
     private enum Outcome { case delivered, suppressed, retry, uncertain, manual }
     private struct Lease {
@@ -169,9 +201,18 @@ enum MeasurementDispatchService {
                     guard let row = try await sql.raw("SELECT environment FROM measurement_revenuecat_lifecycle_events WHERE id=\(bind:sourceID) AND account_id=\(bind:accountID)").first(),
                           try row.decode(column: "environment", as: String.self) == configuredEnvironment.rawValue else { return .suppressed }
                 }
-                var properties = payload
+                var properties = payload.reduce(into: [String: Any]()) { values, entry in
+                    values[entry.key] = entry.value
+                }
                 properties["distinct_id"] = opaqueSubject
                 properties["source_event_id"] = sourceID.uuidString.lowercased()
+                // PostHog's server capture API otherwise creates a person profile.
+                // The opaque subject remains available for event-level funnels and
+                // erasure, without asserting that a customer/person object exists.
+                properties["$process_person_profile"] = false
+                // This relay sees the backend's IP, not the customer's. Prevent
+                // PostHog from turning server location into user event location.
+                properties["$geoip_disable"] = true
                 let body = try JSONSerialization.data(withJSONObject: ["api_key": key,
                     "event": payload["event"] ?? "subscription_payment", "uuid": stableUUID(opaqueSubject, sourceKind, sourceID),
                     "timestamp": payload["occurredAt"] ?? ISO8601DateFormatter().string(from: now),
@@ -244,12 +285,14 @@ enum MeasurementDispatchService {
 
     private static func transport(_ app: Application) -> Transport? {
         if app.environment == .testing { return app.storage[TransportKey.self] }
-        return { uri, headers, body in
-            let response = try await app.client.post(uri, headers: headers) { request in
-                request.body = ByteBuffer(data: body); request.timeout = .seconds(20)
-            }
-            return .init(status: Int(response.status.code), retryAfter: response.headers.first(name: .retryAfter))
+        let direct = app.locks.lock(for: DirectHTTPLock.self).withLock {
+            if let existing = app.storage[DirectHTTPKey.self] { return existing }
+            let created = MeasurementDirectHTTPClient(eventLoopGroup: app.eventLoopGroup, logger: app.logger)
+            app.storage[DirectHTTPKey.self] = created
+            app.lifecycle.use(created)
+            return created
         }
+        return { uri, headers, body in try await direct.post(uri, headers: headers, body: body) }
     }
 
     private static func classify(_ reply: Reply) -> Outcome {
