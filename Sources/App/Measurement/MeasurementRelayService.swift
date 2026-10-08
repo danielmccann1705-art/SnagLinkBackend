@@ -170,8 +170,11 @@ enum MeasurementRelayService {
             let current = try await requirePermission(accountID: accountID, purpose: .crossCompanyAds,
                                                       revision: input.consentRevision, requireSubject: false, on: sql)
             guard current.decision == .granted else { throw permissionRequired() }
+            var continuityStartedAt: Date?
+            var continuityID: UUID?
             if let old = try await sql.raw("""
-                SELECT status,asserted_at FROM measurement_att_assertions
+                SELECT status,asserted_at,expires_at,consent_revision,continuity_started_at,continuity_id
+                FROM measurement_att_assertions
                 WHERE account_id=\(bind:accountID) AND installation_id=\(bind:input.installationId) FOR UPDATE
                 """).first() {
                 let oldAt = try old.decode(column: "asserted_at", as: Date.self)
@@ -182,14 +185,29 @@ enum MeasurementRelayService {
                     }
                     return try await MeasurementPrivacyService.readSnapshot(accountID: accountID, installationID: input.installationId, now: now, on: tx)
                 }
+                if input.attStatus == .authorized,
+                   try old.decode(column: "status", as: String.self) == MeasurementATTStatus.authorized.rawValue,
+                   try old.decode(column: "consent_revision", as: UUID.self) == input.consentRevision,
+                   try old.decode(column: "expires_at", as: Date.self) > now {
+                    continuityStartedAt = try old.decode(column: "continuity_started_at", as: Date?.self)
+                    continuityID = try old.decode(column: "continuity_id", as: UUID?.self)
+                }
+            }
+            if input.attStatus == .authorized, continuityStartedAt == nil || continuityID == nil {
+                continuityStartedAt = now
+                continuityID = UUID()
             }
             let expiry = now.addingTimeInterval(MeasurementPrivacyService.attLifetime)
             try await sql.raw("""
-                INSERT INTO measurement_att_assertions(account_id,installation_id,purpose,consent_revision,status,asserted_at,received_at,expires_at)
+                INSERT INTO measurement_att_assertions(account_id,installation_id,purpose,consent_revision,status,asserted_at,
+                    received_at,expires_at,continuity_started_at,continuity_id)
                 VALUES (\(bind:accountID),\(bind:input.installationId),'crossCompanyAds',\(bind:input.consentRevision),
-                        \(bind:input.attStatus.rawValue),\(bind:input.observedAt),\(bind:now),\(bind:expiry))
+                        \(bind:input.attStatus.rawValue),\(bind:input.observedAt),\(bind:now),\(bind:expiry),
+                        \(bind:continuityStartedAt),\(bind:continuityID))
                 ON CONFLICT (account_id,installation_id) DO UPDATE SET consent_revision=EXCLUDED.consent_revision,
-                    status=EXCLUDED.status,asserted_at=EXCLUDED.asserted_at,received_at=EXCLUDED.received_at,expires_at=EXCLUDED.expires_at
+                    status=EXCLUDED.status,asserted_at=EXCLUDED.asserted_at,received_at=EXCLUDED.received_at,
+                    expires_at=EXCLUDED.expires_at,continuity_started_at=EXCLUDED.continuity_started_at,
+                    continuity_id=EXCLUDED.continuity_id
                 """).run()
             if input.attStatus == .authorized, current.subjectID == nil {
                 let erasurePending = try await sql.raw("""

@@ -143,14 +143,20 @@ enum MeasurementPrivacyService {
             if purpose == .crossCompanyAds, input.decision == .granted,
                let installationID = input.installationId, let status = input.attStatus,
                let assertedAt = input.attAssertedAt, let attExpiry {
+                let continuityStartedAt: Date? = status == .authorized ? now : nil
+                let continuityID: UUID? = status == .authorized ? UUID() : nil
                 try await sql.raw("""
                     INSERT INTO measurement_att_assertions
-                        (account_id,installation_id,purpose,consent_revision,status,asserted_at,received_at,expires_at)
+                        (account_id,installation_id,purpose,consent_revision,status,asserted_at,received_at,expires_at,
+                         continuity_started_at,continuity_id)
                     VALUES (\(bind:accountID),\(bind:installationID),'crossCompanyAds',\(bind:revision),\(bind:status.rawValue),
-                            \(bind:assertedAt),\(bind:now),\(bind:attExpiry))
+                            \(bind:assertedAt),\(bind:now),\(bind:attExpiry),
+                            \(bind:continuityStartedAt),\(bind:continuityID))
                     ON CONFLICT (account_id,installation_id) DO UPDATE SET
                         consent_revision=EXCLUDED.consent_revision,status=EXCLUDED.status,asserted_at=EXCLUDED.asserted_at,
-                        received_at=EXCLUDED.received_at,expires_at=EXCLUDED.expires_at
+                        received_at=EXCLUDED.received_at,expires_at=EXCLUDED.expires_at,
+                        continuity_started_at=EXCLUDED.continuity_started_at,
+                        continuity_id=EXCLUDED.continuity_id
                     """).run()
             }
 

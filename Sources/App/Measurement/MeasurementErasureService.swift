@@ -7,10 +7,9 @@ enum MeasurementErasureService {
         var completed = 0
         var retrying = 0
         var manualRequired = 0
+        var pending = 0
     }
     struct Configuration: Sendable {
-        var postHogURL: String?
-        var postHogPersonalKey: String?
         var singularURL: String?
         var singularAPIKey: String?
     }
@@ -18,14 +17,12 @@ enum MeasurementErasureService {
     struct Reply: Sendable { let status: Int }
     typealias Transport = @Sendable (URI, HTTPHeaders, Data) async throws -> Reply
     struct TransportKey: StorageKey { typealias Value = Transport }
-    private enum Outcome: Equatable { case completed, retry, manual }
+    private enum Outcome: Equatable { case completed, pending, retry, manual }
     private struct Job { let id, token, accountID, subjectID: UUID; let destination: String }
 
     static func configuration(_ app: Application) -> Configuration {
         if app.environment == .testing, let value = app.storage[ConfigurationKey.self] { return value }
-        return .init(postHogURL: Environment.get("POSTHOG_ERASURE_URL"),
-                     postHogPersonalKey: Environment.get("POSTHOG_PERSONAL_API_KEY"),
-                     singularURL: Environment.get("SINGULAR_ERASURE_URL"),
+        return .init(singularURL: Environment.get("SINGULAR_ERASURE_URL"),
                      singularAPIKey: Environment.get("SINGULAR_API_KEY"))
     }
 
@@ -40,6 +37,7 @@ enum MeasurementErasureService {
             catch { counts.retrying += 1; continue }
             switch outcome {
             case .completed: counts.completed += 1
+            case .pending: counts.pending += 1
             case .retry: counts.retrying += 1
             case .manual: counts.manualRequired += 1
             }
@@ -50,6 +48,15 @@ enum MeasurementErasureService {
     private static func claim(now: Date, on db: Database) async throws -> Job? {
         try await db.transaction { tx in
             let sql = try VerifiedIdentityService.sql(tx)
+            // A PostHog attempt with a durable person receipt can resume by
+            // polling the same UUID. Other ambiguous provider attempts still
+            // require manual handling; no receipt is inferred from a lease.
+            try await sql.raw("""
+                UPDATE measurement_erasure_jobs j SET state='pending',lease_token=NULL,lease_expires_at=NULL,
+                    available_at=\(bind:now),last_error_kind=NULL
+                WHERE j.state='leased' AND j.lease_expires_at<=\(bind:now) AND j.destination='posthog'
+                  AND EXISTS(SELECT 1 FROM measurement_posthog_erasure_receipts r WHERE r.job_id=j.id)
+                """).run()
             try await sql.raw("""
                 UPDATE measurement_erasure_jobs SET state='manual_required',lease_token=NULL,lease_expires_at=NULL,
                     last_error_kind='expired_lease_ambiguous'
@@ -79,19 +86,24 @@ enum MeasurementErasureService {
     }
 
     private static func erase(_ job: Job, app: Application, on db: Database) async -> Outcome {
-        // Provider deletion endpoints and completion receipts have not been verified.
-        // Production must stay manual_required and retain every manifest. Synthetic
-        // tests inject a transport solely to prove durable state transitions.
+        if job.destination == "posthog" {
+            switch await PostHogErasureService.step(jobID: job.id, leaseToken: job.token,
+                accountID: job.accountID, subjectID: job.subjectID, app: app, on: db) {
+            case .completed: return .completed
+            case .pending: return .pending
+            case .retry: return .retry
+            case .manual: return .manual
+            }
+        }
+        // The remaining Singular/LinkedIn deletion contracts are unverified.
+        // Production retains every manifest; the Singular test fixture only
+        // exercises existing durable local state transitions.
         guard app.environment == .testing else { return .manual }
         guard job.destination != "linkedin" else { return .manual }
         let config = configuration(app)
-        let url: String?, key: String?
-        switch job.destination {
-        case "posthog": (url, key) = (config.postHogURL, config.postHogPersonalKey)
-        case "singular": (url, key) = (config.singularURL, config.singularAPIKey)
-        default: return .manual
-        }
-        guard let rawURL = url, rawURL.hasPrefix("https://"), let key, !key.isEmpty,
+        guard job.destination == "singular",
+              let rawURL = config.singularURL, rawURL.hasPrefix("https://"),
+              let key = config.singularAPIKey, !key.isEmpty,
               let transport = transport(app) else { return .manual }
         do {
             let sql = try VerifiedIdentityService.sql(db)
@@ -140,12 +152,13 @@ enum MeasurementErasureService {
             let state: String, completedAt: Date?, error: String?
             switch outcome {
             case .completed: (state, completedAt, error) = ("completed", now, nil)
+            case .pending: (state, completedAt, error) = ("pending", nil, nil)
             case .retry: (state, completedAt, error) = ("failing", nil, "provider_unavailable")
             case .manual: (state, completedAt, error) = ("manual_required", nil, "provider_configuration_required")
             }
             try await sql.raw("""
                 UPDATE measurement_erasure_jobs SET state=\(bind:state),completed_at=\(bind:completedAt),
-                    available_at=CASE WHEN \(bind:state)='failing' THEN \(bind:now.addingTimeInterval(900)) ELSE available_at END,
+                    available_at=CASE WHEN \(bind:state) IN ('pending','failing') THEN \(bind:now.addingTimeInterval(900)) ELSE available_at END,
                     lease_token=NULL,lease_expires_at=NULL,last_error_kind=\(bind:error)
                 WHERE id=\(bind:job.id) AND lease_token=\(bind:job.token) AND state='leased'
                 """).run()

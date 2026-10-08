@@ -172,12 +172,23 @@ enum MeasurementDispatchService {
                       AND installation_id=\(bind:installationID) LIMIT 1
                     """).first() != nil else { return .suppressed }
             }
+            let sourceKind = try row.decode(column: "source_kind", as: String.self)
+            let sourceID = try row.decode(column: "source_id", as: UUID.self)
             guard let payloadText = try row.decode(column: "payload_text", as: String?.self),
                   let payloadData = payloadText.data(using: .utf8),
                   let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: String] else { return .suppressed }
+            if destination == "linkedin" && sourceKind == "revenueCatLifecycle" {
+                guard let installationID, let verifiedEmailHash = payload["emailSha256"],
+                      let continuityText = payload["attContinuityId"],
+                      let attContinuityID = UUID(uuidString: continuityText),
+                      try await RevenueCatMeasurementService.linkedInPurchaseIsEligible(
+                        chargeID: sourceID, accountID: accountID, subjectID: subjectID,
+                        revision: revision, installationID: installationID,
+                        verifiedEmailHash: verifiedEmailHash,
+                        attContinuityID: attContinuityID, now: gateNow, on: sql)
+                else { return .suppressed }
+            }
             let opaque = try row.decode(column: "opaque_subject", as: UUID.self).uuidString.lowercased()
-            let sourceKind = try row.decode(column: "source_kind", as: String.self)
-            let sourceID = try row.decode(column: "source_id", as: UUID.self)
             return await send(destination: destination, sourceKind: sourceKind, sourceID: sourceID,
                               accountID: accountID, subjectID: subjectID, revision: revision,
                               installationID: installationID, opaqueSubject: opaque, payload: payload,
@@ -206,10 +217,10 @@ enum MeasurementDispatchService {
                 }
                 properties["distinct_id"] = opaqueSubject
                 properties["source_event_id"] = sourceID.uuidString.lowercased()
-                // PostHog's server capture API otherwise creates a person profile.
-                // The opaque subject remains available for event-level funnels and
-                // erasure, without asserting that a customer/person object exists.
-                properties["$process_person_profile"] = false
+                // Create the minimal person profile needed for provider-side erasure.
+                // The profile key remains the purpose-scoped opaque subject and no
+                // customer properties are attached.
+                properties["$process_person_profile"] = true
                 // This relay sees the backend's IP, not the customer's. Prevent
                 // PostHog from turning server location into user event location.
                 properties["$geoip_disable"] = true
@@ -248,10 +259,7 @@ enum MeasurementDispatchService {
                         SELECT durable_key_hash,occurred_at,purchased_at,environment,currency_code,amount
                         FROM measurement_revenuecat_events WHERE id=\(bind:sourceID) AND account_id=\(bind:accountID)
                         """).first(),
-                      let email = try await sql.raw("""
-                        SELECT subject FROM user_identities WHERE user_id=\(bind:accountID) AND provider='email'
-                        ORDER BY verified_at DESC LIMIT 1
-                        """).first()?.decode(column: "subject", as: String.self) else { return .manual }
+                      let emailHash = payload["emailSha256"] else { return .manual }
                 guard let factEnvironment = LinkedInConversion.Environment(rawValue: try source.decode(column: "environment", as: String.self)) else { return .suppressed }
                 let fact = LinkedInConversion.Fact.subscriptionPayment(accountID: accountID,
                     occurredAt: try source.decode(column: "occurred_at", as: Date.self),
@@ -264,7 +272,7 @@ enum MeasurementDispatchService {
                     expiresAt: now.addingTimeInterval(MeasurementPrivacyService.attLifetime))
                 let configuration = LinkedInConversion.Configuration(enabled: true, environment: environment,
                     signupRule: signup, subscriptionRule: subscription, accessToken: token, fetchedAt: now)
-                guard let prepared = LinkedInConversion.prepare(fact, verifiedEmail: email, permission: permission,
+                guard let prepared = LinkedInConversion.prepare(fact, verifiedEmailHash: emailHash, permission: permission,
                                                                 configuration: configuration, now: now) else { return .suppressed }
                 let delivery = await LinkedInConversion.send(prepared, configuration: configuration, now: now,
                     permission: { permission }, transport: { uri, headers, body in

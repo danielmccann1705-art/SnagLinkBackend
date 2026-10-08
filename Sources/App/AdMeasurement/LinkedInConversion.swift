@@ -104,18 +104,31 @@ enum LinkedInConversion {
     /// another identity. The hash remains personal data and is never logged.
     static func prepare(_ fact: Fact, verifiedEmail: String, permission: Permission,
                         configuration: Configuration, now: Date) -> Prepared? {
-        guard valid(permission, fact: fact, now: now), let conversion = rule(for: fact, configuration: configuration, now: now) else { return nil }
+        guard let emailHash = verifiedEmailHash(verifiedEmail) else { return nil }
+        return prepare(fact, verifiedEmailHash: emailHash, permission: permission,
+                       configuration: configuration, now: now)
+    }
+
+    static func verifiedEmailHash(_ verifiedEmail: String) -> String? {
         let email = verifiedEmail.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let parts = email.split(separator: "@", omittingEmptySubsequences: false)
         guard email.utf8.count <= 254, parts.count == 2, !parts[0].isEmpty, parts[0].utf8.count <= 64,
               parts[1].contains("."), !parts[1].hasPrefix("."), !parts[1].hasSuffix("."),
               parts[1] != "privaterelay.appleid.com",
               email.unicodeScalars.allSatisfy({ $0.value > 32 && $0.value < 127 && $0 != "\"" && $0 != "\\" }) else { return nil }
+        return SHA256Hasher.hash(token: email)
+    }
+
+    static func prepare(_ fact: Fact, verifiedEmailHash: String, permission: Permission,
+                        configuration: Configuration, now: Date) -> Prepared? {
+        guard valid(permission, fact: fact, now: now), let conversion = rule(for: fact, configuration: configuration, now: now),
+              verifiedEmailHash.count == 64,
+              verifiedEmailHash.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
         let milliseconds = fact.occurredAt.timeIntervalSince1970 * 1000
         guard milliseconds.isFinite, milliseconds > 0, milliseconds < Double(Int64.max) else { return nil }
         return .init(payload: .init(conversion: conversion, conversionHappenedAt: Int64(milliseconds),
             eventId: SHA256Hasher.hash(token: fact.key),
-            user: .init(userIds: [.init(idType: "SHA256_EMAIL", idValue: SHA256Hasher.hash(token: email))]),
+            user: .init(userIds: [.init(idType: "SHA256_EMAIL", idValue: verifiedEmailHash)]),
             conversionValue: fact.value), fact: fact, permissionRevision: permission.revision)
     }
 

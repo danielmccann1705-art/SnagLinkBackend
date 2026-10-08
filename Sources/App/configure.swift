@@ -189,6 +189,12 @@ public func configure(_ app: Application,
         app.migrations.add(CreateMeasurementPurchaseOrigins())
         // Apple-only purchase attribution remains independent of ATT and cross-company consent.
         app.migrations.add(ScopeMeasurementPurchaseOrigins())
+        // Exact cross-company purchase joins may enqueue LinkedIn with the same
+        // originating installation authority used by the dispatch-time gate.
+        app.migrations.add(AllowLinkedInPurchaseInstallation())
+        // Provider deletion receipts must exist before the PostHog erasure worker
+        // can resume a submitted request across process restarts.
+        app.migrations.add(CreatePostHogErasureReceipts())
 
         try await app.autoMigrate()
     } else {

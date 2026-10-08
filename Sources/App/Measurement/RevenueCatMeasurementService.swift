@@ -62,6 +62,9 @@ enum RevenueCatMeasurementService {
                 return
             }
             let lifecycleID = UUID()
+            let flags = try await FeatureFlagService.resolve(on: tx)
+            let linkedInIngestEligible = flags["crossCompanyAdsEnabled"] == true
+                && flags["linkedInConversionsEnabled"] == true
             let initialResolution = fact.effect == .unresolved ? "unresolved" :
                 ([RevenueCatLifecycleFact.Effect.refund, .refundReversal].contains(fact.effect) ? "pending_charge" : "resolved")
             try await sql.raw("""
@@ -98,11 +101,11 @@ enum RevenueCatMeasurementService {
                     try await sql.raw("""
                         INSERT INTO measurement_revenuecat_events
                             (id,account_id,durable_key_hash,fact_hash,event_kind,charge_kind,subscription_chain_key_hash,
-                             environment,occurred_at,purchased_at,received_at,currency_code,amount)
+                             environment,occurred_at,purchased_at,received_at,currency_code,amount,linkedin_ingest_eligible)
                         VALUES (\(bind:sourceID),\(bind:fact.accountID),\(bind:fact.chargeKeyHash),\(bind:fact.chargeFactHash),
                                 'subscription_payment',\(bind:fact.kind.rawValue),\(bind:fact.subscriptionChainKeyHash),
                                 \(bind:fact.environment.rawValue),\(bind:fact.eventGeneratedAt),\(bind:fact.purchasedAt),
-                                \(bind:now),\(bind:currency),\(bind:amount))
+                                \(bind:now),\(bind:currency),\(bind:amount),\(bind:linkedInIngestEligible))
                         """).run()
                     chargeID = sourceID
                 }
@@ -121,7 +124,6 @@ enum RevenueCatMeasurementService {
                 try await sql.raw("UPDATE measurement_revenuecat_lifecycle_events SET resolution=\(bind:lifecycleResolution) WHERE id=\(bind:lifecycleID)").run()
             }
 
-            let flags = try await FeatureFlagService.resolve(on: tx)
             if freshForRelay, flags["productAnalyticsEnabled"] == true,
                let permission = try await currentPermission(accountID: fact.accountID, purpose: .productAnalytics,
                                                              occurredAt: fact.eventGeneratedAt,
@@ -150,15 +152,149 @@ enum RevenueCatMeasurementService {
                 }
             }
             // RevenueCat does not identify the installation that originated the
-            // purchase. An authorised iPad must never authorise an ATT-denied iPhone,
-            // so no cross-company job is guessed from another device. A future
-            // authoritative install binding can add such a source without backfill.
+            // purchase. Cross-company dispatch is created only by the exact optional
+            // purchase-origin join above, never by guessing from another device.
         }
     }
 
     private struct Permission {
         let subjectID: UUID
         let revision: UUID
+    }
+
+    private struct LinkedInPurchaseAuthority {
+        let accountID: UUID
+        let installationID: UUID
+        let subjectID: UUID
+        let revision: UUID
+        let occurredAt: Date
+        let purchasedAt: Date
+        let currency: String
+        let amount: String
+        let lifecycleKind: String
+        let verifiedEmailHash: String?
+        let attContinuityStartedAt: Date
+        let attContinuityID: UUID
+    }
+
+    /// Enqueues only at the moment a verified RevenueCat charge has acquired an
+    /// exact cross-company purchase-origin link. There is deliberately no scan:
+    /// enabling a flag or granting permission later cannot backfill old money.
+    static func enqueueLinkedInPurchase(chargeID: UUID, app: Application, now: Date,
+                                        on db: Database) async throws {
+        let flags = try await FeatureFlagService.resolve(on: db)
+        guard flags["crossCompanyAdsEnabled"] == true,
+              flags["linkedInConversionsEnabled"] == true else { return }
+        let sql = try VerifiedIdentityService.sql(db)
+        guard let authority = try await linkedInPurchaseAuthority(
+            chargeID: chargeID, now: now, requireEventTimeATT: true, on: sql),
+              let verifiedEmailHash = authority.verifiedEmailHash else {
+            return
+        }
+        let payload = try canonicalJSON([
+            "event": "subscription_payment",
+            "occurredAt": iso(authority.occurredAt),
+            "currency": authority.currency,
+            "amount": authority.amount,
+            "lifecycleKind": authority.lifecycleKind,
+            "emailSha256": verifiedEmailHash,
+            "attContinuityId": authority.attContinuityID.uuidString.lowercased()
+        ])
+        try await enqueue(destination: "linkedin", sourceKind: "revenueCatLifecycle", sourceID: chargeID,
+                          accountID: authority.accountID,
+                          permission: .init(subjectID: authority.subjectID, revision: authority.revision),
+                          installationID: authority.installationID, payload: payload, now: now, on: sql)
+    }
+
+    /// Dispatch-time recheck of the same immutable acquisition and event-time
+    /// authority. Current permission and ATT alone are insufficient: both must
+    /// be the exact revision/install that existed no later than the charge fact.
+    static func linkedInPurchaseIsEligible(chargeID: UUID, accountID: UUID, subjectID: UUID,
+                                           revision: UUID, installationID: UUID,
+                                           verifiedEmailHash: String,
+                                           attContinuityID: UUID,
+                                           now: Date, on sql: SQLDatabase) async throws -> Bool {
+        guard let authority = try await linkedInPurchaseAuthority(
+            chargeID: chargeID, now: now, requireEventTimeATT: false, on: sql) else {
+            return false
+        }
+        return authority.accountID == accountID && authority.subjectID == subjectID
+            && authority.revision == revision && authority.installationID == installationID
+            && authority.verifiedEmailHash == verifiedEmailHash
+            && authority.attContinuityID == attContinuityID
+    }
+
+    private static func linkedInPurchaseAuthority(chargeID: UUID, now: Date, requireEventTimeATT: Bool,
+                                                   on sql: SQLDatabase) async throws -> LinkedInPurchaseAuthority? {
+        guard let row = try await sql.raw("""
+            SELECT r.account_id,r.occurred_at,r.purchased_at,r.currency_code,r.amount,r.charge_kind,
+                   a.installation_id,a.consent_revision,a.subject_id,att.continuity_started_at,att.continuity_id
+            FROM measurement_revenuecat_events r
+            JOIN measurement_purchase_charge_links l
+              ON l.charge_id=r.id AND l.purpose='crossCompanyAds' AND l.outcome='origin'
+            JOIN measurement_purchase_acquisitions a
+              ON a.id=l.acquisition_id AND a.purpose='crossCompanyAds' AND a.state='active'
+            JOIN users u ON u.id=r.account_id AND u.lifecycle_state='active'
+            JOIN measurement_permission_current c
+              ON c.account_id=r.account_id AND c.purpose='crossCompanyAds' AND c.decision='granted'
+             AND c.revision=a.consent_revision AND c.subject_id=a.subject_id
+            JOIN measurement_subjects s ON s.id=a.subject_id AND s.account_id=r.account_id
+             AND s.purpose='crossCompanyAds' AND s.state='active'
+            JOIN measurement_att_assertions att ON att.account_id=r.account_id
+             AND att.installation_id=a.installation_id AND att.consent_revision=a.consent_revision
+             AND att.status='authorized'
+            WHERE r.id=\(bind:chargeID) AND r.event_kind='subscription_payment'
+              AND r.charge_kind IN ('initial_purchase','renewal')
+              AND r.linkedin_ingest_eligible=TRUE
+              AND a.account_id=r.account_id AND a.product_id=r.product_id AND a.environment=r.environment
+              AND c.updated_at<=r.occurred_at AND c.updated_at<=r.purchased_at
+              AND att.expires_at>\(bind:now)
+              AND ((r.charge_kind='initial_purchase' AND EXISTS (
+                    SELECT 1 FROM measurement_purchase_intents i
+                    WHERE i.purpose='crossCompanyAds' AND i.state='matched' AND i.matched_charge_id=r.id
+                      AND i.linkedin_witness_eligible=TRUE
+                      AND i.account_id=r.account_id AND i.installation_id=a.installation_id
+                      AND i.consent_revision=a.consent_revision AND i.subject_id=a.subject_id
+                      AND i.att_asserted_at<=r.occurred_at AND i.att_asserted_at<=r.purchased_at
+                      AND i.att_expires_at>r.occurred_at AND i.att_expires_at>r.purchased_at
+                      AND i.att_continuity_started_at=att.continuity_started_at
+                      AND i.att_continuity_id=att.continuity_id))
+                   OR (r.charge_kind='renewal' AND
+                       (NOT \(bind:requireEventTimeATT) OR
+                        (att.continuity_started_at<=r.occurred_at
+                         AND att.continuity_started_at<=r.purchased_at))))
+              AND r.occurred_at<=\(bind:now) AND r.occurred_at>\(bind:now.addingTimeInterval(-7 * 86_400))
+              AND NOT EXISTS (
+                SELECT 1 FROM measurement_erasure_jobs e
+                WHERE e.subject_id=a.subject_id AND e.state<>'completed')
+              AND NOT EXISTS (
+                SELECT 1 FROM measurement_revenuecat_lifecycle_events le
+                WHERE le.charge_key_hash=r.durable_key_hash
+                  AND (le.conflict_hash IS NOT NULL OR le.resolution='unresolved'))
+            LIMIT 1
+            """).first() else { return nil }
+        guard let accountID = try row.decode(column: "account_id", as: UUID?.self),
+              let installationID = try row.decode(column: "installation_id", as: UUID?.self),
+              let subjectID = try row.decode(column: "subject_id", as: UUID?.self),
+              let revision = try row.decode(column: "consent_revision", as: UUID?.self),
+              let continuityStartedAt = try row.decode(column: "continuity_started_at", as: Date?.self),
+              let continuityID = try row.decode(column: "continuity_id", as: UUID?.self) else { return nil }
+        let occurredAt = try row.decode(column: "occurred_at", as: Date.self)
+        let purchasedAt = try row.decode(column: "purchased_at", as: Date.self)
+        let verifiedEmail = try await sql.raw("""
+            SELECT subject FROM user_identities
+            WHERE user_id=\(bind:accountID) AND provider='email'
+              AND verified_at<=\(bind:occurredAt) AND verified_at<=\(bind:purchasedAt)
+            ORDER BY verified_at DESC LIMIT 1
+            """).first()?.decode(column: "subject", as: String.self)
+        return .init(accountID: accountID, installationID: installationID, subjectID: subjectID,
+                     revision: revision,
+                     occurredAt: occurredAt, purchasedAt: purchasedAt,
+                     currency: try row.decode(column: "currency_code", as: String.self),
+                     amount: try row.decode(column: "amount", as: String.self),
+                     lifecycleKind: try row.decode(column: "charge_kind", as: String.self),
+                     verifiedEmailHash: verifiedEmail.flatMap(LinkedInConversion.verifiedEmailHash),
+                     attContinuityStartedAt: continuityStartedAt, attContinuityID: continuityID)
     }
 
     private static func currentPermission(accountID: UUID, purpose: MeasurementPurpose, occurredAt: Date,

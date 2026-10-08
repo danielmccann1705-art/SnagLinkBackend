@@ -833,7 +833,7 @@ final class MeasurementPrivacyTests: XCTestCase {
             XCTAssertNotNil(ISO8601DateFormatter().date(from: try XCTUnwrap(object["timestamp"] as? String)))
             XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(object["uuid"] as? String)))
             let properties = try XCTUnwrap(object["properties"] as? [String: Any])
-            XCTAssertEqual(properties["$process_person_profile"] as? Bool, false)
+            XCTAssertEqual(properties["$process_person_profile"] as? Bool, true)
             XCTAssertEqual(properties["$geoip_disable"] as? Bool, true)
         }
     }
@@ -1376,7 +1376,6 @@ final class MeasurementPrivacyTests: XCTestCase {
         XCTAssertEqual(bound.status, .noContent)
         XCTAssertEqual(withdrawn.status, .ok)
         app.storage[MeasurementErasureService.ConfigurationKey.self] = .init(
-            postHogURL: nil, postHogPersonalKey: nil,
             singularURL: "https://singular.invalid/erase", singularAPIKey: "singular_synthetic")
         let recorder = MeasurementErasureRecorder()
         app.storage[MeasurementErasureService.TransportKey.self] = recorder.transport
@@ -1716,6 +1715,368 @@ final class MeasurementPrivacyTests: XCTestCase {
         XCTAssertEqual(jobs, 0, "an acquisition match is preparatory and cannot enable provider delivery")
         let durable = try await sql.raw("SELECT row_to_json(i)::text AS body FROM measurement_purchase_intents i WHERE id=\(bind:intent)").first()!.decode(column: "body", as: String.self)
         XCTAssertFalse(durable.contains(capability)); XCTAssertFalse(durable.contains("origin-witness-first"))
+    }
+
+    func testExactVerifiedPurchaseJoinCreatesOneLinkedInOutboxAndDispatchesFromTheSameInstallation() async throws {
+        try await configurePurchaseOrigin()
+        try await enable("linkedInConversionsEnabled")
+        app.storage[MeasurementDispatchService.ConfigurationKey.self] = .init(
+            postHogProjectKey: nil, postHogEnvironment: nil,
+            singularURL: nil, singularAPIKey: nil, linkedInAccessToken: "linkedin_synthetic",
+            linkedInSignupRule: "101", linkedInSubscriptionRule: "31231714", linkedInEnvironment: .sandbox)
+        let recorder = MeasurementHTTPRecorder()
+        app.storage[MeasurementDispatchService.TransportKey.self] = recorder.transport
+        try await sql.raw("""
+            INSERT INTO user_identities(id,user_id,provider,subject,verified_at)
+            VALUES (\(bind:UUID()),\(bind:userID),'email',\(bind:"purchase-dispatch@example.test"),NOW())
+            """).run()
+
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let purchaseDate = Date()
+        let providerEventID = UUID().uuidString
+        let providerBody = try revenueCatBody(transaction: "dispatch-exact-initial",
+            eventID: providerEventID, eventTimestamp: purchaseDate, purchasedAt: purchaseDate)
+        let witness = try await witnessPurchase(intent, capability, transaction: "dispatch-exact-initial",
+                                                purchaseDate: purchaseDate)
+        let provider = try await webhook(providerBody)
+        let providerReplay = try await webhook(providerBody)
+        let witnessReplay = try await witnessPurchase(intent, capability, transaction: "dispatch-exact-initial",
+                                                      purchaseDate: purchaseDate)
+        XCTAssertEqual(witness.status, .accepted)
+        XCTAssertEqual(provider.status, .ok)
+        XCTAssertEqual(providerReplay.status, .ok)
+        XCTAssertEqual(witnessReplay.status, .accepted)
+
+        let jobs = try await sql.raw("""
+            SELECT j.destination,j.state,j.installation_id,j.consent_revision,j.subject_id,j.payload::text AS payload,
+                   r.id AS charge_id
+            FROM measurement_dispatch_jobs j
+            JOIN measurement_revenuecat_events r ON r.id=j.source_id
+            WHERE j.account_id=\(bind:userID) AND j.source_kind='revenueCatLifecycle'
+            ORDER BY j.destination
+            """).all()
+        XCTAssertEqual(jobs.count, 1)
+        let job = try XCTUnwrap(jobs.first)
+        XCTAssertEqual(try job.decode(column: "destination", as: String.self), "linkedin")
+        XCTAssertEqual(try job.decode(column: "state", as: String.self), "pending")
+        XCTAssertEqual(try job.decode(column: "installation_id", as: UUID?.self), installation)
+        XCTAssertEqual(try job.decode(column: "consent_revision", as: UUID.self), revision)
+        let storedPayload = try job.decode(column: "payload", as: String.self)
+        XCTAssertFalse(storedPayload.contains("purchase-dispatch@example.test"))
+        XCTAssertTrue(storedPayload.contains(try XCTUnwrap(LinkedInConversion.verifiedEmailHash("purchase-dispatch@example.test"))))
+
+        // A newer observation for the same still-authorised grant is current
+        // dispatch authority; it must not erase the immutable event-time proof.
+        try await sql.raw("""
+            UPDATE measurement_att_assertions SET asserted_at=\(bind:Date())
+            WHERE account_id=\(bind:userID) AND installation_id=\(bind:installation)
+            """).run()
+        let counts = await MeasurementDispatchService.run(app: app, on: app.db)
+        XCTAssertEqual(counts.delivered, 1)
+        let calls = await recorder.calls()
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.uri, "https://api.linkedin.com/rest/conversionEvents")
+        XCTAssertFalse(try XCTUnwrap(calls.first).body.contains("purchase-dispatch@example.test"))
+    }
+
+    func testProviderFirstJoinQueuesOnceButLaterFlagEnablementDoesNotBackfill() async throws {
+        try await configurePurchaseOrigin()
+        try await enable("linkedInConversionsEnabled")
+        try await sql.raw("""
+            INSERT INTO user_identities(id,user_id,provider,subject,verified_at)
+            VALUES (\(bind:UUID()),\(bind:userID),'email','arrival-order@example.test',NOW()-INTERVAL '1 minute')
+            """).run()
+        let (installation, revision) = try await grantPurchaseOrigin()
+
+        let first = try await preparePurchase(installation, revision)
+        let firstIntent = try XCTUnwrap(first.1), firstCapability = try XCTUnwrap(first.2)
+        let firstDate = Date()
+        let providerFirst = try await webhook(revenueCatBody(transaction: "dispatch-provider-first",
+            eventTimestamp: firstDate, purchasedAt: firstDate))
+        let witnessAfter = try await witnessPurchase(firstIntent, firstCapability,
+            transaction: "dispatch-provider-first", purchaseDate: firstDate)
+        XCTAssertEqual(providerFirst.status, .ok)
+        XCTAssertEqual(witnessAfter.status, .accepted)
+        let baseline = try await sql.raw("""
+            SELECT count(*) AS n FROM measurement_dispatch_jobs
+            WHERE account_id=\(bind:userID) AND destination='linkedin' AND source_kind='revenueCatLifecycle'
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(baseline, 1)
+
+        try await FeatureFlag.query(on: app.db).filter(\.$key == "linkedInConversionsEnabled").delete()
+        try await FeatureFlag(key: "linkedInConversionsEnabled", enabled: false).save(on: app.db)
+        let second = try await preparePurchase(installation, revision)
+        let secondIntent = try XCTUnwrap(second.1), secondCapability = try XCTUnwrap(second.2)
+        let secondDate = Date()
+        let witnessFirst = try await witnessPurchase(secondIntent, secondCapability,
+            transaction: "dispatch-flag-off", purchaseDate: secondDate)
+        let providerAfter = try await webhook(revenueCatBody(transaction: "dispatch-flag-off",
+            eventTimestamp: secondDate, purchasedAt: secondDate))
+        XCTAssertEqual(witnessFirst.status, .accepted)
+        XCTAssertEqual(providerAfter.status, .ok)
+
+        try await enable("linkedInConversionsEnabled")
+        _ = try await witnessPurchase(secondIntent, secondCapability,
+            transaction: "dispatch-flag-off", purchaseDate: secondDate)
+
+        // Provider evidence recorded while the destination is off stays off
+        // even if the exact purchase witness arrives after activation.
+        try await FeatureFlag.query(on: app.db).filter(\.$key == "linkedInConversionsEnabled").delete()
+        try await FeatureFlag(key: "linkedInConversionsEnabled", enabled: false).save(on: app.db)
+        let providerOff = try await preparePurchase(installation, revision)
+        let providerOffIntent = try XCTUnwrap(providerOff.1), providerOffCapability = try XCTUnwrap(providerOff.2)
+        let providerOffDate = Date()
+        _ = try await webhook(revenueCatBody(transaction: "dispatch-provider-off",
+            eventTimestamp: providerOffDate, purchasedAt: providerOffDate))
+        try await enable("linkedInConversionsEnabled")
+        _ = try await witnessPurchase(providerOffIntent, providerOffCapability,
+            transaction: "dispatch-provider-off", purchaseDate: providerOffDate)
+
+        // The inverse arrival order is frozen too: a witness first recorded
+        // while off cannot be promoted by a later provider callback.
+        try await FeatureFlag.query(on: app.db).filter(\.$key == "linkedInConversionsEnabled").delete()
+        try await FeatureFlag(key: "linkedInConversionsEnabled", enabled: false).save(on: app.db)
+        let witnessOff = try await preparePurchase(installation, revision)
+        let witnessOffIntent = try XCTUnwrap(witnessOff.1), witnessOffCapability = try XCTUnwrap(witnessOff.2)
+        let witnessOffDate = Date()
+        _ = try await witnessPurchase(witnessOffIntent, witnessOffCapability,
+            transaction: "dispatch-witness-off", purchaseDate: witnessOffDate)
+        try await enable("linkedInConversionsEnabled")
+        _ = try await webhook(revenueCatBody(transaction: "dispatch-witness-off",
+            eventTimestamp: witnessOffDate, purchasedAt: witnessOffDate))
+
+        let count = try await sql.raw("""
+            SELECT count(*) AS n FROM measurement_dispatch_jobs
+            WHERE account_id=\(bind:userID) AND destination='linkedin' AND source_kind='revenueCatLifecycle'
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(count, 1, "a later flag grant cannot backfill the charge joined while reporting was off")
+    }
+
+    func testSuppressedRenewalCannotBeBackfilledByDistinctProviderReplay() async throws {
+        try await configurePurchaseOrigin()
+        try await enable("linkedInConversionsEnabled")
+        try await sql.raw("""
+            INSERT INTO user_identities(id,user_id,provider,subject,verified_at)
+            VALUES (\(bind:UUID()),\(bind:userID),'email','renewal-replay@example.test',NOW()-INTERVAL '1 minute')
+            """).run()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let chain = "dispatch-renewal-replay-chain", initialDate = Date()
+        _ = try await witnessPurchase(intent, capability, transaction: "dispatch-renewal-replay-initial",
+                                      purchaseDate: initialDate)
+        _ = try await webhook(revenueCatBody(transaction: "dispatch-renewal-replay-initial",
+            eventTimestamp: initialDate, purchasedAt: initialDate, originalTransaction: chain))
+
+        try await FeatureFlag.query(on: app.db).filter(\.$key == "linkedInConversionsEnabled").delete()
+        try await FeatureFlag(key: "linkedInConversionsEnabled", enabled: false).save(on: app.db)
+        let renewalDate = Date()
+        _ = try await webhook(revenueCatBody(transaction: "dispatch-renewal-replay", type: "RENEWAL",
+            eventID: "renewal-off", eventTimestamp: renewalDate, purchasedAt: renewalDate,
+            originalTransaction: chain))
+        try await enable("linkedInConversionsEnabled")
+        _ = try await webhook(revenueCatBody(transaction: "dispatch-renewal-replay", type: "RENEWAL",
+            eventID: "renewal-after-enable", eventTimestamp: renewalDate, purchasedAt: renewalDate,
+            originalTransaction: chain))
+
+        let jobs = try await sql.raw("""
+            SELECT count(*) AS n FROM measurement_dispatch_jobs j
+            JOIN measurement_revenuecat_events r ON r.id=j.source_id
+            WHERE j.account_id=\(bind:userID) AND j.destination='linkedin' AND r.charge_kind='renewal'
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(jobs, 0, "a canonical renewal suppressed at first ingestion stays suppressed on a distinct provider replay")
+    }
+
+    func testEmailVerifiedAfterPurchaseDoesNotBackfillLinkedInIdentity() async throws {
+        try await configurePurchaseOrigin()
+        try await enable("linkedInConversionsEnabled")
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let purchaseDate = Date()
+        let body = try revenueCatBody(transaction: "dispatch-late-email", eventID: "late-email-first",
+                                      eventTimestamp: purchaseDate, purchasedAt: purchaseDate)
+        _ = try await witnessPurchase(intent, capability, transaction: "dispatch-late-email",
+                                      purchaseDate: purchaseDate)
+        _ = try await webhook(body)
+        try await sql.raw("""
+            INSERT INTO user_identities(id,user_id,provider,subject,verified_at)
+            VALUES (\(bind:UUID()),\(bind:userID),'email','late@example.test',NOW())
+            """).run()
+        _ = try await webhook(body)
+        let jobs = try await sql.raw("""
+            SELECT count(*) AS n FROM measurement_dispatch_jobs
+            WHERE account_id=\(bind:userID) AND destination='linkedin' AND source_kind='revenueCatLifecycle'
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(jobs, 0, "a later verified contact cannot identify an earlier purchase")
+    }
+
+    func testLaterATTObservationCannotAuthoriseRenewalAndWithdrawalScrubsQueuedPurchase() async throws {
+        try await configurePurchaseOrigin()
+        try await enable("linkedInConversionsEnabled")
+        try await sql.raw("""
+            INSERT INTO user_identities(id,user_id,provider,subject,verified_at)
+            VALUES (\(bind:UUID()),\(bind:userID),'email','att-withdrawal@example.test',NOW()-INTERVAL '1 minute')
+            """).run()
+        let (installation, revision) = try await grantPurchaseOrigin()
+        let prepared = try await preparePurchase(installation, revision)
+        let intent = try XCTUnwrap(prepared.1), capability = try XCTUnwrap(prepared.2)
+        let original = "dispatch-att-chain", initialDate = Date()
+        _ = try await witnessPurchase(intent, capability, transaction: "dispatch-att-initial",
+                                      purchaseDate: initialDate)
+        _ = try await webhook(revenueCatBody(transaction: "dispatch-att-initial",
+            eventTimestamp: initialDate, purchasedAt: initialDate, originalTransaction: original))
+
+        let renewalDate = Date()
+        let postGapContinuityID = UUID()
+        try await sql.raw("""
+            UPDATE measurement_att_assertions
+            SET asserted_at=\(bind:renewalDate.addingTimeInterval(1)),
+                continuity_started_at=\(bind:renewalDate.addingTimeInterval(1)),
+                continuity_id=\(bind:postGapContinuityID)
+            WHERE account_id=\(bind:userID) AND installation_id=\(bind:installation)
+            """).run()
+        let renewal = try await webhook(revenueCatBody(transaction: "dispatch-att-renewal", type: "RENEWAL",
+            eventTimestamp: renewalDate, purchasedAt: renewalDate, originalTransaction: original))
+        XCTAssertEqual(renewal.status, .ok)
+        let renewalJob = try await sql.raw("""
+            SELECT 1 FROM measurement_dispatch_jobs j JOIN measurement_revenuecat_events r ON r.id=j.source_id
+            WHERE j.account_id=\(bind:userID) AND j.destination='linkedin' AND r.charge_kind='renewal'
+            """).first()
+        XCTAssertNil(renewalJob, "an ATT observation after the provider fact cannot authorise it")
+
+        let withdrawn = try await put("crossCompanyAds", expected: revision, decision: "withdrawn")
+        XCTAssertEqual(withdrawn.status, .ok)
+        let queued = try await sql.raw("""
+            SELECT state,payload::text AS payload FROM measurement_dispatch_jobs
+            WHERE account_id=\(bind:userID) AND destination='linkedin'
+            """).first()
+        let scrubbed = try XCTUnwrap(queued)
+        XCTAssertEqual(try scrubbed.decode(column: "state", as: String.self), "suppressed")
+        XCTAssertNil(try scrubbed.decode(column: "payload", as: String?.self))
+        let regrant = try await put("crossCompanyAds", expected: try uuid(try permission("crossCompanyAds", in: withdrawn)["revision"]),
+                                    decision: "granted", installationID: installation,
+                                    attStatus: "authorized", attAssertedAt: Date())
+        XCTAssertEqual(regrant.status, .ok)
+        let pending = try await sql.raw("""
+            SELECT count(*) AS n FROM measurement_dispatch_jobs
+            WHERE account_id=\(bind:userID) AND destination='linkedin' AND state='pending'
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(pending, 0, "regrant cannot resurrect a scrubbed purchase")
+    }
+
+    func testATTDenialAndExpiryGapCannotBeHealedForQueuedPurchases() async throws {
+        try await configurePurchaseOrigin()
+        try await enable("linkedInConversionsEnabled")
+        app.storage[MeasurementDispatchService.ConfigurationKey.self] = .init(
+            postHogProjectKey: nil, postHogEnvironment: nil,
+            singularURL: nil, singularAPIKey: nil, linkedInAccessToken: "linkedin_synthetic",
+            linkedInSignupRule: "101", linkedInSubscriptionRule: "31231714", linkedInEnvironment: .sandbox)
+        let recorder = MeasurementHTTPRecorder()
+        app.storage[MeasurementDispatchService.TransportKey.self] = recorder.transport
+        try await sql.raw("""
+            INSERT INTO user_identities(id,user_id,provider,subject,verified_at)
+            VALUES (\(bind:UUID()),\(bind:userID),'email','att-continuity@example.test',NOW()-INTERVAL '1 minute')
+            """).run()
+        let installation = UUID()
+        let grant = try await put("crossCompanyAds", decision: "granted", installationID: installation,
+                                  attStatus: "authorized", attAssertedAt: Date().addingTimeInterval(-10))
+        let revision = try uuid(try permission("crossCompanyAds", in: grant)["revision"])
+
+        let first = try await preparePurchase(installation, revision)
+        let firstDate = Date()
+        _ = try await witnessPurchase(try XCTUnwrap(first.1), try XCTUnwrap(first.2),
+                                      transaction: "dispatch-before-denial", purchaseDate: firstDate)
+        _ = try await webhook(revenueCatBody(transaction: "dispatch-before-denial",
+            eventTimestamp: firstDate, purchasedAt: firstDate))
+
+        let preciseDate = ISO8601DateFormatter()
+        preciseDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let deniedAt = Date()
+        let denied = try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
+            "installationId": installation.uuidString, "consentRevision": revision.uuidString,
+            "attStatus": "denied", "observedAt": preciseDate.string(from: deniedAt)
+        ])
+        let reauthorised = try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
+            "installationId": installation.uuidString, "consentRevision": revision.uuidString,
+            "attStatus": "authorized", "observedAt": preciseDate.string(from: deniedAt.addingTimeInterval(0.01))
+        ])
+        XCTAssertEqual(denied.status, .ok)
+        XCTAssertEqual(reauthorised.status, .ok)
+
+        let second = try await preparePurchase(installation, revision)
+        let secondDate = Date()
+        _ = try await witnessPurchase(try XCTUnwrap(second.1), try XCTUnwrap(second.2),
+                                      transaction: "dispatch-before-expiry-gap", purchaseDate: secondDate)
+        _ = try await webhook(revenueCatBody(transaction: "dispatch-before-expiry-gap",
+            eventTimestamp: secondDate, purchasedAt: secondDate))
+        try await sql.raw("""
+            UPDATE measurement_att_assertions
+            SET received_at=NOW()-INTERVAL '2 days',expires_at=NOW()-INTERVAL '1 day'
+            WHERE account_id=\(bind:userID) AND installation_id=\(bind:installation)
+            """).run()
+        let refreshed = try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
+            "installationId": installation.uuidString, "consentRevision": revision.uuidString,
+            "attStatus": "authorized", "observedAt": preciseDate.string(from: Date().addingTimeInterval(0.01))
+        ])
+        XCTAssertEqual(refreshed.status, .ok)
+
+        let before = try await sql.raw("""
+            SELECT count(*) AS n FROM measurement_dispatch_jobs
+            WHERE account_id=\(bind:userID) AND destination='linkedin' AND state='pending'
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(before, 2)
+        let counts = await MeasurementDispatchService.run(app: app, on: app.db)
+        XCTAssertEqual(counts.suppressed, 2)
+        XCTAssertEqual(counts.delivered, 0)
+        let calls = await recorder.calls()
+        XCTAssertTrue(calls.isEmpty)
+        let after = try await sql.raw("""
+            SELECT count(*) AS n FROM measurement_dispatch_jobs
+            WHERE account_id=\(bind:userID) AND destination='linkedin' AND state='suppressed' AND payload IS NULL
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(after, 2)
+    }
+
+    func testRenewalAfterUninterruptedATTHeartbeatRetainsOriginalAuthority() async throws {
+        try await configurePurchaseOrigin()
+        try await enable("linkedInConversionsEnabled")
+        try await sql.raw("""
+            INSERT INTO user_identities(id,user_id,provider,subject,verified_at)
+            VALUES (\(bind:UUID()),\(bind:userID),'email','renewal-heartbeat@example.test',NOW()-INTERVAL '1 minute')
+            """).run()
+        let installation = UUID()
+        let grant = try await put("crossCompanyAds", decision: "granted", installationID: installation,
+                                  attStatus: "authorized", attAssertedAt: Date().addingTimeInterval(-10))
+        let revision = try uuid(try permission("crossCompanyAds", in: grant)["revision"])
+        let initial = try await preparePurchase(installation, revision)
+        let chain = "dispatch-heartbeat-chain", initialDate = Date()
+        _ = try await witnessPurchase(try XCTUnwrap(initial.1), try XCTUnwrap(initial.2),
+                                      transaction: "dispatch-heartbeat-initial", purchaseDate: initialDate)
+        _ = try await webhook(revenueCatBody(transaction: "dispatch-heartbeat-initial",
+            eventTimestamp: initialDate, purchasedAt: initialDate, originalTransaction: chain))
+
+        let preciseDate = ISO8601DateFormatter()
+        preciseDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let renewalDate = Date()
+        let heartbeat = try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
+            "installationId": installation.uuidString, "consentRevision": revision.uuidString,
+            "attStatus": "authorized", "observedAt": preciseDate.string(from: renewalDate.addingTimeInterval(0.01))
+        ])
+        XCTAssertEqual(heartbeat.status, .ok)
+        let renewalBody = try revenueCatBody(transaction: "dispatch-heartbeat-renewal", type: "RENEWAL",
+            eventID: "heartbeat-renewal", eventTimestamp: renewalDate, purchasedAt: renewalDate,
+            originalTransaction: chain)
+        _ = try await webhook(renewalBody)
+        _ = try await webhook(renewalBody)
+        let renewalJobs = try await sql.raw("""
+            SELECT count(*) AS n FROM measurement_dispatch_jobs j
+            JOIN measurement_revenuecat_events r ON r.id=j.source_id
+            WHERE j.account_id=\(bind:userID) AND j.destination='linkedin' AND r.charge_kind='renewal'
+            """).first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(renewalJobs, 1)
     }
 
     func testRevenueCatBeforeWitnessMatchesAndProviderEnvironmentMustAgree() async throws {

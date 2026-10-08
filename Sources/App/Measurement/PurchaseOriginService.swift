@@ -42,7 +42,8 @@ struct MeasurementPurchaseWitnessRequest: Content, Sendable {
 }
 
 /// Optional acquisition-origin evidence. These endpoints are side effects around
-/// StoreKit, never part of purchase fulfilment. A match never creates an ad job.
+/// StoreKit, never part of purchase fulfilment. Only an exact match may create a
+/// gated durable job; the purchase result never depends on measurement success.
 enum PurchaseOriginService {
     static let intentLifetime: TimeInterval = 15 * 60
     static let pendingLifetime: TimeInterval = 7 * 86_400
@@ -79,27 +80,36 @@ enum PurchaseOriginService {
             try await VerifiedIdentityService.lock("measurement-permission:\(accountID.uuidString):crossCompanyAds", on: tx)
             let sql = try VerifiedIdentityService.sql(tx)
             guard let row = try await sql.raw("""
-                SELECT c.subject_id FROM measurement_permission_current c
+                SELECT c.subject_id,a.asserted_at,a.expires_at,a.continuity_started_at,a.continuity_id
+                FROM measurement_permission_current c
                 JOIN measurement_subjects s ON s.id=c.subject_id AND s.state='active'
+                JOIN measurement_att_assertions a ON a.account_id=c.account_id
+                  AND a.installation_id=\(bind:input.installationId)
+                  AND a.consent_revision=\(bind:input.consentRevision)
+                  AND a.status='authorized' AND a.expires_at>\(bind:now)
                 WHERE c.account_id=\(bind:accountID) AND c.purpose='crossCompanyAds'
                   AND c.revision=\(bind:input.consentRevision) AND c.decision='granted'
                   AND NOT EXISTS(SELECT 1 FROM measurement_erasure_jobs e
                                  WHERE e.subject_id=s.id AND e.state<>'completed')
-                """).first(),
-                  try await sql.raw("""
-                    SELECT 1 FROM measurement_att_assertions
-                    WHERE account_id=\(bind:accountID) AND installation_id=\(bind:input.installationId)
-                      AND consent_revision=\(bind:input.consentRevision)
-                      AND status='authorized' AND expires_at>\(bind:now)
-                    """).first() != nil else { throw permissionRequired() }
+                """).first() else { throw permissionRequired() }
             let subjectID = try row.decode(column: "subject_id", as: UUID.self)
+            let assertedAt = try row.decode(column: "asserted_at", as: Date.self)
+            let attExpiresAt = try row.decode(column: "expires_at", as: Date.self)
+            guard let continuityStartedAt = try row.decode(column: "continuity_started_at", as: Date?.self) else {
+                throw permissionRequired()
+            }
+            guard let continuityID = try row.decode(column: "continuity_id", as: UUID?.self) else {
+                throw permissionRequired()
+            }
             try await sql.raw("""
                 INSERT INTO measurement_purchase_intents
                     (id,capability_hash,account_id,installation_id,consent_revision,subject_id,product_id,purpose,
-                     environment,state,issued_at,expires_at)
+                     environment,state,issued_at,expires_at,att_asserted_at,att_expires_at,
+                     att_continuity_started_at,att_continuity_id)
                 VALUES (\(bind:id),\(bind:capabilityHash(capability)),\(bind:accountID),\(bind:input.installationId),
                         \(bind:input.consentRevision),\(bind:subjectID),\(bind:input.productId),'crossCompanyAds',
-                        \(bind:config.environment.rawValue),'prepared',\(bind:now),\(bind:expires))
+                        \(bind:config.environment.rawValue),'prepared',\(bind:now),\(bind:expires),
+                        \(bind:assertedAt),\(bind:attExpiresAt),\(bind:continuityStartedAt),\(bind:continuityID))
                 """).run()
         }
         return .init(intentId: id, capability: capability, expiresAt: expires)
@@ -174,6 +184,9 @@ enum PurchaseOriginService {
             guard try await permissionCurrent(accountID, revision, installation, subject, now, sql) else {
                 throw permissionRequired()
             }
+            let flags = try await FeatureFlagService.resolve(on: tx)
+            let linkedInWitnessEligible = flags["crossCompanyAdsEnabled"] == true
+                && flags["linkedInConversionsEnabled"] == true
             if let other = try await sql.raw("""
                 SELECT id FROM measurement_purchase_intents
                 WHERE purpose='crossCompanyAds' AND transaction_key_hmac=\(bind:transactionHMAC)
@@ -187,7 +200,8 @@ enum PurchaseOriginService {
             try await sql.raw("""
                 UPDATE measurement_purchase_intents SET state='witnessed',witness_hash=\(bind:witnessHash),
                     transaction_key_hmac=\(bind:transactionHMAC),purchase_observed_at=\(bind:input.purchaseDate),
-                    witnessed_at=\(bind:now),pending_expires_at=\(bind:now.addingTimeInterval(pendingLifetime))
+                    witnessed_at=\(bind:now),pending_expires_at=\(bind:now.addingTimeInterval(pendingLifetime)),
+                    linkedin_witness_eligible=\(bind:linkedInWitnessEligible)
                 WHERE id=\(bind:intentID)
                 """).run()
             if let charge = try await sql.raw("""
@@ -200,8 +214,11 @@ enum PurchaseOriginService {
                 guard try await FeatureFlagService.resolve(on: tx)["crossCompanyAdsEnabled"] == true else {
                     throw unavailable()
                 }
-                return try await matchInitial(intentID: intentID, intent: intent, charge: charge,
-                                              witnessDate: input.purchaseDate, now: now, on: sql)
+                let result = try await matchInitial(intentID: intentID, intent: intent, charge: charge,
+                                                    witnessDate: input.purchaseDate, now: now, on: sql)
+                try await RevenueCatMeasurementService.enqueueLinkedInPurchase(
+                    chargeID: try charge.decode(column: "id", as: UUID.self), app: app, now: now, on: tx)
+                return result
             }
             return .accepted
         }
@@ -260,11 +277,15 @@ enum PurchaseOriginService {
                 UPDATE measurement_revenuecat_events SET origin_acquisition_id=\(bind:acquisitionID)
                 WHERE id=\(bind:chargeID)
                 """).run()
-            try await sql.raw("""
+            let linked = try await sql.raw("""
                 INSERT INTO measurement_purchase_charge_links(charge_id,purpose,acquisition_id,outcome,linked_at)
                 VALUES (\(bind:chargeID),'crossCompanyAds',\(bind:acquisitionID),'origin',\(bind:now))
-                ON CONFLICT(charge_id,purpose) DO NOTHING
-                """).run()
+                ON CONFLICT(charge_id,purpose) DO NOTHING RETURNING 1
+                """).first() != nil
+            if linked {
+                try await RevenueCatMeasurementService.enqueueLinkedInPurchase(
+                    chargeID: chargeID, app: app, now: now, on: db)
+            }
             return
         }
         guard fact.kind == .initialPurchase,
@@ -283,6 +304,8 @@ enum PurchaseOriginService {
         _ = try await matchInitial(intentID: intent.decode(column: "id", as: UUID.self), intent: intent,
                                    charge: charge, witnessDate: intent.decode(column: "purchase_observed_at", as: Date.self),
                                    now: now, on: sql)
+        try await RevenueCatMeasurementService.enqueueLinkedInPurchase(
+            chargeID: chargeID, app: app, now: now, on: db)
     }
 
     private static func matchInitial(intentID: UUID, intent: SQLRow, charge: SQLRow, witnessDate: Date,
