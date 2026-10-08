@@ -6,12 +6,16 @@ struct GoogleIdentityService {
     /// Must be called inside the one-use challenge transaction after signature,
     /// audience, presenter and nonce verification. Never trusts a client email.
     static func resolve(_ proof: GoogleIdentityProof, on db: Database) async throws -> User {
+        try await resolveOutcome(proof, on: db).user
+    }
+
+    static func resolveOutcome(_ proof: GoogleIdentityProof, on db: Database) async throws -> VerifiedIdentityService.Resolution {
         let contactEmail = proof.contactEmail.map(EmailValidator.normalize)
         try await VerifiedIdentityService.lock("identity-google:" + proof.subject, on: db)
         if let existing = try await identityOwner(proof.subject, on: db) {
             let user = try await VerifiedIdentityService.activeUser(existing, on: db)
             try await adoptVerifiedEmail(proof, for: user, on: db)
-            return user
+            return .init(user: user, insertedNewAccount: false)
         }
         // A matching contact hint is not account-control evidence. Keep the
         // existing recovery/linking route instead of moving data or purchases.
@@ -30,7 +34,7 @@ struct GoogleIdentityService {
         try await user.save(on: db)
         try await insert(proof.subject, for: user.requireID(), on: db)
         try await adoptVerifiedEmail(proof, for: user, on: db)
-        return user
+        return .init(user: user, insertedNewAccount: true)
     }
 
     /// An address Google says it has verified is proof of that address, so a person

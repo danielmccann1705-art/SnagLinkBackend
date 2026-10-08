@@ -72,12 +72,12 @@ struct GoogleAuthController: RouteCollection {
         let proof = try await GoogleIdentityVerifier.verify(input.identityToken, surface: .web, nonceHash: context.nonceHash, challengeCreatedAt: context.createdAt, config: provider, on: req)
         let result = try await req.db.transaction { db in
             _ = try await GoogleIdentityChallengeService.consume(input.challengeToken, purpose: .signIn, surface: .web, binding: binding, platform: platform, provider: provider, on: db)
-            let user = try await GoogleIdentityService.resolve(proof, on: db)
-            let session = try await BrowserSessionService.create(for: user, config: platform, on: db)
-            return (user, session)
+            let resolution = try await GoogleIdentityService.resolveOutcome(proof, on: db)
+            let session = try await BrowserSessionService.create(for: resolution.user, config: platform, on: db)
+            return (resolution, session)
         }
         let response = Response(status: .ok)
-        try response.content.encode(try await BrowserAuthController().response(for: result.0, csrf: result.1.principal.csrfToken, on: req.db))
+        try response.content.encode(try await BrowserAuthController().response(for: result.0.user, csrf: result.1.principal.csrfToken, on: req.db))
         response.cookies[BrowserSessionService.cookieName] = BrowserSessionService.cookie(result.1.token, maxAge: Int(BrowserSessionService.lifetime))
         response.cookies[Self.bindingCookie(for: input.challengeToken)] = BrowserSessionService.cookie("", maxAge: 0)
         response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
@@ -100,12 +100,12 @@ struct GoogleAuthController: RouteCollection {
         guard let verifier = input.verifier else { throw contextError() }
         let context = try await GoogleIdentityChallengeService.context(input.challengeToken, purpose: .signIn, surface: .ios, binding: verifier, platform: platform, provider: provider, on: req.db)
         let proof = try await GoogleIdentityVerifier.verify(input.identityToken, surface: .ios, nonceHash: context.nonceHash, challengeCreatedAt: context.createdAt, config: provider, on: req)
-        let user = try await req.db.transaction { db in
+        let resolution = try await req.db.transaction { db in
             _ = try await GoogleIdentityChallengeService.consume(input.challengeToken, purpose: .signIn, surface: .ios, binding: verifier, platform: platform, provider: provider, on: db)
-            return try await GoogleIdentityService.resolve(proof, on: db)
+            return try await GoogleIdentityService.resolveOutcome(proof, on: db)
         }
         let response = Response(status: .ok)
-        try response.content.encode(AuthController().issueAuthResponse(for: user, on: req))
+        try response.content.encode(AuthController().issueAuthResponse(for: resolution, on: req))
         response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
         return response
     }

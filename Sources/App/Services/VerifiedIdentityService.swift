@@ -3,6 +3,13 @@ import Fluent
 import FluentSQL
 
 struct VerifiedIdentityService {
+    /// Authority comes from the branch that inserted the account, never timestamps.
+    /// Use only the result returned by a successfully committed identity transaction.
+    struct Resolution: Sendable {
+        let user: User
+        let insertedNewAccount: Bool
+    }
+
     static func sql(_ db: Database) throws -> SQLDatabase {
         guard let sql = db as? SQLDatabase else { throw Abort(.serviceUnavailable) }
         return sql
@@ -22,10 +29,14 @@ struct VerifiedIdentityService {
     /// Called only after a one-use email challenge proves control, inside the
     /// challenge transaction. A mutable legacy profile is not an identity claim.
     static func resolveEmail(_ value: String, name: String?, on db: Database) async throws -> User {
+        try await resolveEmailOutcome(value, name: name, on: db).user
+    }
+
+    static func resolveEmailOutcome(_ value: String, name: String?, on db: Database) async throws -> Resolution {
         let email = EmailValidator.normalize(value)
         try await lock("identity-email:" + email, on: db)
         if let row = try await sql(db).raw("SELECT user_id FROM user_identities WHERE provider = 'email' AND subject = \(bind: email)").first() {
-            return try await activeUser(row.decode(column: "user_id", as: UUID.self), on: db)
+            return .init(user: try await activeUser(row.decode(column: "user_id", as: UUID.self), on: db), insertedNewAccount: false)
         }
         let legacy = try await sql(db).raw("SELECT id FROM users WHERE lower(btrim(email)) = \(bind: email) LIMIT 1").first()
         guard legacy == nil else {
@@ -34,7 +45,7 @@ struct VerifiedIdentityService {
         let user = User(appleUserId: nil, email: email, name: name, authProvider: .magicLink)
         try await user.save(on: db)
         try await addIdentity(provider: "email", subject: email, userID: user.requireID(), on: db)
-        return user
+        return .init(user: user, insertedNewAccount: true)
     }
 
     /// Apple subject is supplied only by the verified Apple JWT handler. Never
@@ -49,14 +60,18 @@ struct VerifiedIdentityService {
     /// whole transaction rolls back (no orphan identity row survives), and
     /// `transactionRetryingIdentityRace` runs it once more against the winner's rows.
     static func resolveApple(subject: String, email: String?, emailVerified: Bool = false, name: String?, on db: Database) async throws -> User {
+        try await resolveAppleOutcome(subject: subject, email: email, emailVerified: emailVerified, name: name, on: db).user
+    }
+
+    static func resolveAppleOutcome(subject: String, email: String?, emailVerified: Bool = false, name: String?, on db: Database) async throws -> Resolution {
         try await lock("identity-apple:" + subject, on: db)
         if let row = try await sql(db).raw("SELECT user_id FROM user_identities WHERE provider = 'apple' AND subject = \(bind: subject)").first() {
-            return try await activeUser(row.decode(column: "user_id", as: UUID.self), on: db)
+            return .init(user: try await activeUser(row.decode(column: "user_id", as: UUID.self), on: db), insertedNewAccount: false)
         }
         if let existing = try await User.query(on: db).filter(\.$appleUserId == subject).first() {
             let user = try await activeUser(existing.requireID(), on: db)
             try await addIdentity(provider: "apple", subject: subject, userID: user.requireID(), on: db)
-            return user
+            return .init(user: user, insertedNewAccount: false)
         }
         let address = email.map(EmailValidator.normalize).flatMap { $0.isEmpty ? nil : $0 }
         try await refuseAddressHeldElsewhere(address, verified: emailVerified, on: db)
@@ -72,7 +87,7 @@ struct VerifiedIdentityService {
                 throw ExistingAccountRecovery.refusal(try await ExistingAccountRecovery.methods(holding: address, excluding: userID, on: db))
             }
         }
-        return user
+        return .init(user: user, insertedNewAccount: true)
     }
 
     /// First sign-in for an Apple subject (audit F21, D1 §7 "F2"): an address that

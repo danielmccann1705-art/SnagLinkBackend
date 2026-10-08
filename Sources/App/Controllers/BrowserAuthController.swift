@@ -48,12 +48,12 @@ struct BrowserAuthController: RouteCollection {
         }
         let result = try await req.db.transaction { db in
             let challenge = try await IdentityChallengeService.consume(input.token, purpose: .browserSignIn, binding: binding, targetUserID: nil, config: config, on: db)
-            let user = try await VerifiedIdentityService.resolveEmail(challenge.email, name: challenge.requestedName, on: db)
-            let session = try await BrowserSessionService.create(for: user, config: config, on: db)
-            return (user, session)
+            let resolution = try await VerifiedIdentityService.resolveEmailOutcome(challenge.email, name: challenge.requestedName, on: db)
+            let session = try await BrowserSessionService.create(for: resolution.user, config: config, on: db)
+            return (resolution, session)
         }
         let response = Response(status: .ok)
-        try response.content.encode(try await self.response(for: result.0, csrf: result.1.principal.csrfToken, on: req.db))
+        try response.content.encode(try await self.response(for: result.0.user, csrf: result.1.principal.csrfToken, on: req.db))
         response.cookies[BrowserSessionService.cookieName] = BrowserSessionService.cookie(result.1.token, maxAge: Int(BrowserSessionService.lifetime))
         response.cookies[BrowserSessionService.bindingCookieName] = BrowserSessionService.cookie("", maxAge: 0)
         response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")

@@ -44,8 +44,8 @@ struct AuthController: RouteCollection {
         let emailVerified = appleToken.emailVerified?.value == true
         // One transaction for the account and its identities; a race the unique constraints
         // caught is retried once against the winner (F21, concurrent first sign-ins).
-        let user = try await VerifiedIdentityService.transactionRetryingIdentityRace(on: req.db) { db in
-            let user = try await VerifiedIdentityService.resolveApple(subject: appleUserId, email: email, emailVerified: emailVerified,
+        let resolution = try await VerifiedIdentityService.transactionRetryingIdentityRace(on: req.db) { db in
+            let resolution = try await VerifiedIdentityService.resolveAppleOutcome(subject: appleUserId, email: email, emailVerified: emailVerified,
                                                                       name: input.firstName, on: db)
             // The same adoption the web Apple path performs. Without it a person who
             // signs in with Apple on their phone has only an `apple` identity, so a
@@ -53,18 +53,18 @@ struct AuthController: RouteCollection {
             // account and Google would make a second one. Relay addresses from Hide
             // My Email adopt exactly like any other verified address.
             if emailVerified, let email, !email.isEmpty {
-                _ = try await VerifiedIdentityService.adoptProviderVerifiedEmail(email, to: user.requireID(), on: db)
+                _ = try await VerifiedIdentityService.adoptProviderVerifiedEmail(email, to: resolution.user.requireID(), on: db)
             }
-            return user
+            return resolution
         }
 
         // The app has always sent the authorization code; until now the server dropped
         // it. Exchanging it is what gives account deletion something to revoke with.
         // A failure here never fails sign-in — the user came to sign in, not to
         // provision a credential — but it is recorded so the gap is visible.
-        await storeRevocationCredential(input: input, user: user, configuration: configuration, on: req)
+        await storeRevocationCredential(input: input, user: resolution.user, configuration: configuration, on: req)
 
-        return try issueAuthResponse(for: user, on: req)
+        return try issueAuthResponse(for: resolution, on: req)
     }
 
     /// Best-effort. Absent configuration, an absent code and an Apple refusal are all
@@ -155,7 +155,7 @@ struct AuthController: RouteCollection {
         }
 
         let tokenHash = SHA256Hasher.hash(token: rawToken)
-        let user = try await req.db.transaction { db -> User in
+        let resolution = try await req.db.transaction { db -> VerifiedIdentityService.Resolution in
             guard let sql = db as? SQLDatabase else { throw Abort(.serviceUnavailable) }
             // Serialize consumption across processes, not only within one Worker.
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "signin-token:" + tokenHash), 0))").run()
@@ -177,10 +177,10 @@ struct AuthController: RouteCollection {
             authToken.consumedAt = Date()
             try await authToken.save(on: db)
 
-            return try await VerifiedIdentityService.resolveEmail(authToken.email, name: authToken.requestedName, on: db)
+            return try await VerifiedIdentityService.resolveEmailOutcome(authToken.email, name: authToken.requestedName, on: db)
         }
 
-        return try issueAuthResponse(for: user, on: req)
+        return try issueAuthResponse(for: resolution, on: req)
     }
 
     // MARK: - Sign out on this device
@@ -236,7 +236,8 @@ struct AuthController: RouteCollection {
     /// Builds the standard authenticated session response (30-day JWT), shared by all
     /// auth methods so they stay shape-compatible. Each token names its own session
     /// (`jti`), so signing out on one device ends that session alone.
-    func issueAuthResponse(for user: User, on req: Request) throws -> AuthResponse {
+    func issueAuthResponse(for resolution: VerifiedIdentityService.Resolution, on req: Request) throws -> AuthResponse {
+        let user = resolution.user
         let jwtPayload = UserJWTPayload(
             subject: SubjectClaim(value: user.id!.uuidString),
             expiration: ExpirationClaim(value: Date().addingTimeInterval(30 * 24 * 60 * 60)), // 30 days
@@ -257,7 +258,7 @@ struct AuthController: RouteCollection {
                 appleUserId: user.appleUserId,
                 authProvider: user.authProvider
             ),
-            isNewUser: user.createdAt == user.updatedAt
+            isNewUser: resolution.insertedNewAccount
         )
     }
 }

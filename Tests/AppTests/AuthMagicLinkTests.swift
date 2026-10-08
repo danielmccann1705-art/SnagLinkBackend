@@ -185,6 +185,24 @@ final class AuthMagicLinkEndpointTests: XCTestCase {
         })
     }
 
+    func testSecondIndependentSignInLinkDoesNotReportANewAccount() async throws {
+        try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
+        let email = "repeat-signin-\(UUID())@example.test"
+        var userID: UUID?
+        for isFirst in [true, false] {
+            let raw = try await seedToken(email: email)
+            try await app.test(.POST, "api/v1/auth/magic-link/verify", beforeRequest: { req in
+                try req.content.encode(["token": raw])
+            }, afterResponse: { res async throws in
+                XCTAssertEqual(res.status, .ok)
+                let body = try res.content.decode(AuthResponse.self)
+                XCTAssertEqual(body.isNewUser, isFirst)
+                if let previous = userID { XCTAssertEqual(body.user.id, previous) }
+                userID = body.user.id
+            })
+        }
+    }
+
     func testVerifyIsSingleUse() async throws {
         try XCTSkipUnless(dbAvailable, "DATABASE_URL not set")
         let email = "single-\(UUID().uuidString)@example.com"

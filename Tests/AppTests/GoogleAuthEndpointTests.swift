@@ -114,9 +114,25 @@ final class GoogleAuthEndpointTests: XCTestCase {
         XCTAssertEqual(signedNative.status, .ok, signedNative.body.string)
         let payload = try signedNative.content.decode(AuthResponse.self)
         XCTAssertEqual(payload.user.id, webUser)
+        XCTAssertFalse(payload.isNewUser, "A web-created account is not new at native sign-in")
         let session = try await request(.GET, "api/v2/auth/session", origin: nil, bearer: payload.token)
         XCTAssertEqual(session.status, .ok)
         XCTAssertTrue(signedNative.headers["set-cookie"].isEmpty)
+    }
+
+    func testNativeGoogleOnlyReportsTheActualFirstAccountCreation() async throws {
+        let subject = "new-account-authority-\(UUID())"
+        var userID: UUID?
+        for isFirst in [true, false] {
+            let (issued, _) = try await challenge(ios: true)
+            let response = try await request(.POST, "api/v2/auth/google/ios/verify",
+                body: verifyBody(issued, identity: token(issued, subject: subject, ios: true)), origin: nil)
+            XCTAssertEqual(response.status, .ok)
+            let payload = try response.content.decode(AuthResponse.self)
+            XCTAssertEqual(payload.isNewUser, isFirst)
+            if let previous = userID { XCTAssertEqual(payload.user.id, previous) }
+            userID = payload.user.id
+        }
     }
 
     func testOriginBindingNonceAndReplayRejectionsDoNotIssueSession() async throws {

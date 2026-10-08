@@ -79,7 +79,8 @@ struct AppleWebAuthController: RouteCollection {
             let proof = try await AppleWebIdentityService.verify(tokens.idToken, context: context, configuration: provider, req: req)
             session = try await VerifiedIdentityService.transactionRetryingIdentityRace(on: req.db) { db in
                 // Front-channel user/name JSON is not identity proof and is ignored.
-                let user = try await AppleWebIdentityService.resolve(proof, name: nil, on: db)
+                let resolution = try await AppleWebIdentityService.resolveOutcome(proof, name: nil, on: db)
+                let user = resolution.user
                 if proof.emailVerified, let email = proof.email {
                     _ = try await VerifiedIdentityService.adoptProviderVerifiedEmail(email, to: user.requireID(), on: db)
                 }

@@ -68,6 +68,10 @@ enum AppleWebIdentityService {
     /// The verified Apple subject selects the account. An equal contact email
     /// never merges an Apple identity into an existing email/Google account.
     static func resolve(_ proof: AppleWebProof, name: String?, on db: Database) async throws -> User {
+        try await resolveOutcome(proof, name: name, on: db).user
+    }
+
+    static func resolveOutcome(_ proof: AppleWebProof, name: String?, on db: Database) async throws -> VerifiedIdentityService.Resolution {
         try await VerifiedIdentityService.lock("identity-apple:" + proof.subject, on: db)
         let sql = try VerifiedIdentityService.sql(db)
         let existing = try await sql.raw("""
@@ -77,12 +81,11 @@ enum AppleWebIdentityService {
         if let existing {
             let id = try existing.decode(column: "id", as: UUID.self)
             _ = try await sql.raw("SELECT id FROM users WHERE id=\(bind: id) FOR UPDATE").first()
-            let user = try await VerifiedIdentityService.resolveApple(subject: proof.subject, email: proof.email, name: name, on: db)
-            return user
+            return try await VerifiedIdentityService.resolveAppleOutcome(subject: proof.subject, email: proof.email, name: name, on: db)
         }
         // A first sign-in: the same rule, identifier and sentence as native Apple (F21),
         // decided in one place so the two surfaces cannot drift apart again.
-        return try await VerifiedIdentityService.resolveApple(subject: proof.subject, email: proof.email,
+        return try await VerifiedIdentityService.resolveAppleOutcome(subject: proof.subject, email: proof.email,
                                                               emailVerified: proof.emailVerified, name: name, on: db)
     }
     static func invalidIdentity() -> Abort { Abort(.unauthorized, reason: "Apple sign-in could not be verified. Start again", identifier: "apple_identity_invalid") }
