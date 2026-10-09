@@ -198,6 +198,8 @@ public func configure(_ app: Application,
         // Optional pre-auth signup intents, one canonical signup fact per inserted
         // account and the dedicated `signupFact` outbox source.
         app.migrations.add(CreateMeasurementSignupIntents())
+        // Optional pre-auth Apple Ads evidence slot, linked only at new-account adoption.
+        app.migrations.add(AddSignupAppleEvidenceSlot())
 
         try await app.autoMigrate()
     } else {

@@ -321,7 +321,7 @@ enum SignupIntentService {
         // optional block is abandoned rather than making authentication wait.
         guard let row = try await sql.raw("""
             SELECT state,provider,environment,expires_at,received_at,capability_hash,binding_kind,binding_id,
-                   apple_nonce_hash,installation_id,product_analytics,apple_ads,cross_company_ads
+                   apple_nonce_hash,installation_id,product_analytics,apple_ads,cross_company_ads,apple_slot_reference
             FROM measurement_signup_intents WHERE id=\(bind:intentID) FOR UPDATE NOWAIT
             """).first() else { return .none }
         guard try row.decode(column: "state", as: String.self) == "bound" else { return .none }
@@ -424,6 +424,13 @@ enum SignupIntentService {
             }
         }
         try await hook(app, .afterConsent, accountID, sql)
+        // A pre-auth Apple slot, if one was reserved before creation, joins this signup
+        // only through the exact Apple revision, installation and new account.
+        if let appleRevision {
+            try await SignupAppleEvidenceService.link(intentID: intentID,
+                reference: try row.decode(column: "apple_slot_reference", as: String?.self),
+                accountID: accountID, appleRevision: appleRevision, installationID: installationID, on: sql)
+        }
 
         var continuityID: UUID?
         if let crossRevision {
@@ -509,10 +516,15 @@ enum SignupIntentService {
                 let settled: String? = try await db.transaction { tx in
                     let txSQL = try VerifiedIdentityService.sql(tx)
                     guard let locked = try await txSQL.raw("""
-                        SELECT state,capability_hash FROM measurement_signup_intents WHERE id=\(bind:intentID) FOR UPDATE
+                        SELECT state,capability_hash,apple_slot_reference FROM measurement_signup_intents
+                        WHERE id=\(bind:intentID) FOR UPDATE
                         """).first(), let lockedHash = try locked.decode(column: "capability_hash", as: String?.self),
                           BrowserSessionService.constantTimeEqual(lockedHash, expected) else { throw notFound() }
                     guard try locked.decode(column: "state", as: String.self) == state else { return nil }
+                    if let slot = try locked.decode(column: "apple_slot_reference", as: String?.self) {
+                        // Never linked to an account: an in-flight exchange finds nothing to fill.
+                        try await SignupAppleEvidenceService.discard(intentID: intentID, reference: slot, on: txSQL)
+                    }
                     try await txSQL.raw("""
                         UPDATE measurement_signup_intents SET state='cancelled',cancelled_at=\(bind:now) WHERE id=\(bind:intentID)
                         """).run()
@@ -532,7 +544,8 @@ enum SignupIntentService {
                             "measurement-permission:\(accountID.uuidString):\(purpose.rawValue)", on: tx)
                     }
                     guard let locked = try await txSQL.raw("""
-                        SELECT state,capability_hash,account_id,product_revision,apple_revision,cross_revision,signup_fact_id
+                        SELECT state,capability_hash,account_id,product_revision,apple_revision,cross_revision,signup_fact_id,
+                               apple_slot_reference
                         FROM measurement_signup_intents WHERE id=\(bind:intentID) FOR UPDATE
                         """).first(), let lockedHash = try locked.decode(column: "capability_hash", as: String?.self),
                           BrowserSessionService.constantTimeEqual(lockedHash, expected) else { throw notFound() }
@@ -559,6 +572,10 @@ enum SignupIntentService {
                                 decision: .withdrawn, occurredAt: now, installationID: nil, attStatus: nil,
                                 attAssertedAt: nil, now: now, on: tx)
                         }
+                    }
+                    if let slot = try locked.decode(column: "apple_slot_reference", as: String?.self) {
+                        // This intent's own Apple evidence goes with it, whatever the current revision.
+                        try await SignupAppleEvidenceService.discard(intentID: intentID, reference: slot, on: txSQL)
                     }
                     if let factID = try locked.decode(column: "signup_fact_id", as: UUID?.self) {
                         try await txSQL.raw("""
@@ -633,7 +650,7 @@ enum SignupIntentService {
     private static let scrubAssignments = """
         capability_hash=NULL,installation_id=NULL,product_analytics=NULL,apple_ads=NULL,cross_company_ads=NULL,
         att_status=NULL,att_observed_at=NULL,apple_nonce_hash=NULL,binding_id=NULL,account_id=NULL,
-        product_revision=NULL,apple_revision=NULL,cross_revision=NULL
+        product_revision=NULL,apple_revision=NULL,cross_revision=NULL,apple_slot_reference=NULL,apple_slot_reserved_at=NULL
         """
 
     /// Scheduled retention: unclaimed expired intents become `expired` tombstones and
@@ -641,6 +658,8 @@ enum SignupIntentService {
     static func cleanup(now: Date = Date(), limit: Int = 5_000, on db: Database) async throws -> Int {
         let sql = try VerifiedIdentityService.sql(db)
         let bounded = max(0, min(limit, 50_000))
+        // Unlinked Apple slots go before their intents lose the pointer.
+        let slots = try await SignupAppleEvidenceService.cleanup(now: now, on: db)
         let expired = try await sql.raw("""
             WITH due AS (
                 SELECT id FROM measurement_signup_intents
@@ -662,12 +681,17 @@ enum SignupIntentService {
                 FROM due WHERE i.id=due.id RETURNING 1)
             SELECT count(*) AS total FROM changed
             """).first()?.decode(column: "total", as: Int.self) ?? 0
-        return expired + settled
+        return expired + settled + slots
     }
 
     /// Called from `MeasurementPrivacyService.eraseAccount`, which already holds the
     /// account row and every purpose barrier, after exposure capture.
     static func eraseAccount(_ accountID: UUID, now: Date, on sql: SQLDatabase) async throws {
+        let slots = try await sql.raw("""
+            SELECT apple_slot_reference FROM measurement_signup_intents
+            WHERE account_id=\(bind:accountID) AND apple_slot_reference IS NOT NULL
+            """).all().map { try $0.decode(column: "apple_slot_reference", as: String.self) }
+        for slot in slots { try await SignupAppleEvidenceService.discard(reference: slot, on: sql) }
         try await sql.raw("""
             UPDATE measurement_signup_intents SET \(unsafeRaw: scrubAssignments),scrubbed_at=COALESCE(scrubbed_at,\(bind:now))
             WHERE account_id=\(bind:accountID)

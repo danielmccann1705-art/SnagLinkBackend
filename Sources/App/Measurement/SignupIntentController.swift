@@ -7,6 +7,23 @@ struct SignupIntentController: RouteCollection {
         let intents = routes.grouped("api", "v2", "measurement", "signup-intents")
         intents.on(.POST, body: .collect(maxSize: "2kb"), use: issue)
         intents.on(.POST, ":intentId", "cancel", body: .collect(maxSize: "1kb"), use: cancel)
+        intents.on(.POST, ":intentId", "apple-evidence", body: .collect(maxSize: "4kb"), use: appleEvidence)
+    }
+
+    @Sendable func appleEvidence(req: Request) async throws -> Response {
+        try requireNative(req)
+        let platform = try PlatformConfiguration.load(on: req.application)
+        try await limit(req, platform: platform, route: "apple-evidence")
+        guard let raw = req.parameters.get("intentId"), raw.utf8.count == 36, let intentID = UUID(uuidString: raw) else {
+            throw SignupIntentService.notFound()
+        }
+        let input = try decode(SignupAppleEvidenceRequest.self, req)
+        let reference = try await SignupAppleEvidenceService.submit(intentID: intentID, input: input,
+                                                                    app: req.application, on: req.db)
+        let response = Response(status: .created)
+        try response.content.encode(AdMeasurementReceipt(reference: reference))
+        response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        return response
     }
 
     @Sendable func issue(req: Request) async throws -> Response {
