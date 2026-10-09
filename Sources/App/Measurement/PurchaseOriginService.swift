@@ -86,7 +86,7 @@ enum PurchaseOriginService {
                 JOIN measurement_att_assertions a ON a.account_id=c.account_id
                   AND a.installation_id=\(bind:input.installationId)
                   AND a.consent_revision=\(bind:input.consentRevision)
-                  AND a.status='authorized' AND a.expires_at>\(bind:now)
+                  AND \(unsafeRaw: MeasurementPrivacyService.crossCompanyATTCarriesAuthority("a")) AND a.expires_at>\(bind:now)
                 WHERE c.account_id=\(bind:accountID) AND c.purpose='crossCompanyAds'
                   AND c.revision=\(bind:input.consentRevision) AND c.decision='granted'
                   AND NOT EXISTS(SELECT 1 FROM measurement_erasure_jobs e
@@ -458,7 +458,8 @@ enum PurchaseOriginService {
             WHERE c.account_id=\(bind:account) AND c.purpose='crossCompanyAds' AND c.decision='granted'
               AND c.revision=\(bind:revision) AND c.subject_id=\(bind:subject) AND s.state='active'
               AND (\(bind:authorityAt) IS NULL OR c.updated_at<=\(bind:authorityAt))
-              AND a.consent_revision=\(bind:revision) AND a.status='authorized' AND a.expires_at>\(bind:now)
+              AND a.consent_revision=\(bind:revision) AND a.expires_at>\(bind:now)
+              AND \(unsafeRaw: MeasurementPrivacyService.crossCompanyATTCarriesAuthority("a"))
               AND NOT EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.subject_id=s.id AND e.state<>'completed')
             LIMIT 1
             """).first() != nil

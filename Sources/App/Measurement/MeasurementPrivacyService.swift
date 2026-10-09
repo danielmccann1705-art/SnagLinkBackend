@@ -48,6 +48,27 @@ struct MeasurementPermissionUpdate: Content, Sendable, Equatable {
     }
 }
 
+/// The actual state of a purpose for the reading installation, reported beside `effective` so the
+/// app can say why a choice is not active (additive field `activation`, 9 Oct 2026).
+enum MeasurementActivation: String, Codable, Sendable {
+    /// Undecided, denied or withdrawn.
+    case notChosen = "not_chosen"
+    /// Effective now (the same as `effective == true`).
+    case active
+    /// Cross-company only: chosen, but Apple's tracking permission was not authorised when this
+    /// revision was recorded, or a refusal has since been recorded for it on this installation.
+    /// Nothing later makes it effective and nothing is replayed; only a new choice recorded with
+    /// fresh authorised ATT (a new revision) can.
+    case chosenInactiveATT = "chosen_inactive_att"
+    /// Cross-company only: chosen with authorised ATT, but this installation has no live authorised
+    /// observation for this revision yet (a choice made on another installation, or the 24 h
+    /// observation of an uninterrupted choice has lapsed). An authorised observation from this
+    /// installation may activate it; a refusal makes it `chosen_inactive_att`.
+    case chosenAwaitingATT = "chosen_awaiting_att"
+    /// Chosen, but something else keeps it off (provider erasure pending, no active subject).
+    case chosenInactive = "chosen_inactive"
+}
+
 struct MeasurementPermissionResponse: Content, Sendable {
     let purpose: MeasurementPurpose
     let revision: UUID?
@@ -59,6 +80,7 @@ struct MeasurementPermissionResponse: Content, Sendable {
     let attAssertedAt: Date?
     let attExpiresAt: Date?
     let erasurePending: Bool
+    let activation: MeasurementActivation
 }
 
 struct MeasurementPermissionsEnvelope: Content, Sendable {
@@ -71,6 +93,25 @@ enum MeasurementPrivacyService {
     static let clientFutureSkew: TimeInterval = 300
     static let attClaimMaximumAge: TimeInterval = 900
     static let attLifetime: TimeInterval = 86_400
+
+    /// The one rule for cross-company authority from an installation's ATT row (`alias` names a
+    /// `measurement_att_assertions` row in the caller's SQL). It holds only when:
+    /// - the row is authorised;
+    /// - it carries a server continuity, which is never created for a revision that is inactive
+    ///   on this installation: one recorded while ATT was not authorised, or one for which a
+    ///   denied, restricted or not-determined status has been recorded here since;
+    /// - the revision itself was recorded with fresh authorised ATT (the settings route accepts a
+    ///   grant only with an assertion at most 15 minutes old; signup adoption writes a
+    ///   cross-company revision only with fresh authorised ATT from the same installation).
+    /// A later authorised observation or heartbeat therefore never activates such a revision, and
+    /// nothing queued or withheld while it was inactive is replayed (Dan, 9 Oct 2026, section 3).
+    /// Callers still check the expiry and any continuity they froze.
+    static func crossCompanyATTCarriesAuthority(_ alias: String) -> String {
+        "\(alias).status='authorized' AND \(alias).continuity_id IS NOT NULL AND EXISTS(" +
+        "SELECT 1 FROM measurement_consent_events choice WHERE choice.account_id=\(alias).account_id " +
+        "AND choice.id=\(alias).consent_revision AND choice.purpose='crossCompanyAds' " +
+        "AND choice.decision='granted' AND choice.att_status='authorized')"
+    }
 
     static func read(accountID: UUID, installationID: UUID?, now: Date = Date(), on db: Database) async throws -> MeasurementPermissionsEnvelope {
         _ = try await VerifiedIdentityService.activeUser(accountID, on: db)
@@ -390,11 +431,12 @@ enum MeasurementPrivacyService {
     static func readSnapshot(accountID: UUID, installationID: UUID?, now: Date, on db: Database) async throws -> MeasurementPermissionsEnvelope {
         let sql = try VerifiedIdentityService.sql(db)
         let rows = try await sql.raw("""
-            SELECT c.purpose,c.revision,c.decision,c.updated_at,s.opaque_subject,
+            SELECT c.purpose,c.revision,c.decision,c.updated_at,s.opaque_subject,choice.att_status AS choice_att_status,
                    EXISTS(SELECT 1 FROM measurement_erasure_jobs e JOIN measurement_subjects es ON es.id=e.subject_id
                           WHERE e.account_id=c.account_id AND es.purpose=c.purpose AND e.state<>'completed') AS erasure_pending
             FROM measurement_permission_current c
             LEFT JOIN measurement_subjects s ON s.id=c.subject_id AND s.state='active'
+            LEFT JOIN measurement_consent_events choice ON choice.account_id=c.account_id AND choice.id=c.revision
             WHERE c.account_id=\(bind:accountID)
             """).all()
         var current: [String: SQLRow] = [:]
@@ -403,7 +445,7 @@ enum MeasurementPrivacyService {
         var assertion: SQLRow?
         if let installationID {
             assertion = try await sql.raw("""
-                SELECT consent_revision,status,asserted_at,expires_at FROM measurement_att_assertions
+                SELECT consent_revision,status,asserted_at,expires_at,continuity_id FROM measurement_att_assertions
                 WHERE account_id=\(bind:accountID) AND installation_id=\(bind:installationID)
                 """).first()
         }
@@ -411,27 +453,42 @@ enum MeasurementPrivacyService {
         let permissions = try MeasurementPurpose.allCases.map { purpose -> MeasurementPermissionResponse in
             guard let row = current[purpose.rawValue] else {
                 return .init(purpose: purpose, revision: nil, decision: "undecided", effective: false, subjectId: nil,
-                             updatedAt: nil, attStatus: nil, attAssertedAt: nil, attExpiresAt: nil, erasurePending: false)
+                             updatedAt: nil, attStatus: nil, attAssertedAt: nil, attExpiresAt: nil, erasurePending: false,
+                             activation: .notChosen)
             }
             let revision = try row.decode(column: "revision", as: UUID.self)
             let decision = try row.decode(column: "decision", as: String.self)
             let erasure = try row.decode(column: "erasure_pending", as: Bool.self)
             var status: MeasurementATTStatus?, asserted: Date?, expires: Date?
             var attEffective = purpose != .crossCompanyAds
-            if purpose == .crossCompanyAds, let assertion,
-               try assertion.decode(column: "consent_revision", as: UUID.self) == revision {
-                status = try MeasurementATTStatus(rawValue: assertion.decode(column: "status", as: String.self))
-                asserted = try assertion.decode(column: "asserted_at", as: Date.self)
-                expires = try assertion.decode(column: "expires_at", as: Date.self)
-                attEffective = status == .authorized && expires! > now
+            // Cross-company: the same rule as `crossCompanyATTCarriesAuthority`.
+            var refusedATT = false
+            if purpose == .crossCompanyAds {
+                refusedATT = try row.decode(column: "choice_att_status", as: String?.self) != MeasurementATTStatus.authorized.rawValue
+                if let assertion, try assertion.decode(column: "consent_revision", as: UUID.self) == revision {
+                    status = try MeasurementATTStatus(rawValue: assertion.decode(column: "status", as: String.self))
+                    asserted = try assertion.decode(column: "asserted_at", as: Date.self)
+                    expires = try assertion.decode(column: "expires_at", as: Date.self)
+                    let continuity = try assertion.decode(column: "continuity_id", as: UUID?.self)
+                    if status != .authorized || continuity == nil { refusedATT = true }
+                    attEffective = !refusedATT && status == .authorized && expires! > now
+                }
             }
             let opaque = try row.decode(column: "opaque_subject", as: UUID?.self)
             let hasRequiredSubject = purpose == .appleAds || opaque != nil
-            let effective = decision == MeasurementDecision.granted.rawValue && attEffective && !erasure && hasRequiredSubject
+            let granted = decision == MeasurementDecision.granted.rawValue
+            let effective = granted && attEffective && !erasure && hasRequiredSubject
+            let activation: MeasurementActivation
+            if !granted { activation = .notChosen }
+            else if effective { activation = .active }
+            else if purpose == .crossCompanyAds && refusedATT { activation = .chosenInactiveATT }
+            else if purpose == .crossCompanyAds && !attEffective { activation = .chosenAwaitingATT }
+            else { activation = .chosenInactive }
             return .init(purpose: purpose, revision: revision, decision: decision, effective: effective,
                          subjectId: purpose == .crossCompanyAds && effective ? opaque : nil,
                          updatedAt: try row.decode(column: "updated_at", as: Date.self),
-                         attStatus: status, attAssertedAt: asserted, attExpiresAt: expires, erasurePending: erasure)
+                         attStatus: status, attAssertedAt: asserted, attExpiresAt: expires, erasurePending: erasure,
+                         activation: activation)
         }
         return .init(permissions: permissions)
     }

@@ -1022,6 +1022,73 @@ final class SignupIntentTests: XCTestCase {
         let thirdJobs = try await jobs(third.user.id)
         XCTAssertEqual(thirdJobs.map(\.state), ["suppressed"])
     }
+
+    // MARK: - ATT: no later activation after sign-up (Dan, 9 October 2026, section 3)
+
+    func testRefusedCrossCompanyChoiceAdoptsNothingForItAndLaterAuthorisedATTCannotAddIt() async throws {
+        try await enable("productAnalyticsEnabled", "crossCompanyAdsEnabled", "linkedInConversionsEnabled")
+        let recorder = SignupHTTPRecorder()
+        configureDelivery(recorder)
+        let refused = try await issue("apple", cross: true)
+        let auth = try signedIn(try await apple(try appleToken(subject: "signup-att-later-\(UUID())", nonce: refused.nonce, email: address()),
+                                                context: context(refused, att: "denied")), new: true)
+        let adopted = try await consents(auth.user.id)
+        XCTAssertEqual(adopted, ["productAnalytics"], "adoption is unchanged: nothing is written for the refused choice")
+        let product = try await XCTUnwrapAsync(try await sql.raw("SELECT revision FROM measurement_permission_current WHERE account_id=\(bind:auth.user.id) AND purpose='productAnalytics'").first())
+        // ATT allowed after sign-up: there is no cross-company revision for it to reach.
+        for revision in [UUID(), try product.decode(column: "revision", as: UUID.self)] {
+            let later = try await request(.PUT, "api/v2/measurement/devices/att", object: [
+                "installationId": refused.installation.uuidString, "consentRevision": revision.uuidString,
+                "attStatus": "authorized", "observedAt": date()], bearer: auth.token)
+            XCTAssertEqual(later.status, .conflict, later.body.string)
+        }
+        let read = try await request(.GET, "api/v2/measurement/permissions", bearer: auth.token)
+        XCTAssertEqual(read.status, .ok)
+        let permissions = try XCTUnwrap(try json(read)["permissions"] as? [[String: Any]])
+        let cross = try XCTUnwrap(permissions.first { $0["purpose"] as? String == "crossCompanyAds" })
+        XCTAssertEqual(cross["decision"] as? String, "undecided")
+        XCTAssertEqual(cross["effective"] as? Bool, false)
+        XCTAssertEqual(cross["activation"] as? String, "not_chosen")
+        let queued = try await jobs(auth.user.id)
+        XCTAssertEqual(queued.map(\.destination), ["posthog"])
+        _ = await MeasurementDispatchService.run(app: app, on: app.db)
+        let linkedIn = await recorder.calls().filter { $0.uri == "https://api.linkedin.com/rest/conversionEvents" }
+        XCTAssertTrue(linkedIn.isEmpty)
+        let subjects = try await count("SELECT count(*) AS n FROM measurement_subjects WHERE account_id=\(bind:auth.user.id) AND purpose='crossCompanyAds'")
+        XCTAssertEqual(subjects, 0)
+    }
+
+    func testQueuedLinkedInSignupIsIneligibleOnceItsRevisionIsInactiveOnTheInstallation() async throws {
+        try await enable("crossCompanyAdsEnabled", "linkedInConversionsEnabled")
+        let recorder = SignupHTTPRecorder()
+        configureDelivery(recorder)
+        let intent = try await issue("apple", product: false, cross: true)
+        let auth = try signedIn(try await apple(try appleToken(subject: "signup-att-latch-\(UUID())", nonce: intent.nonce, email: address()),
+                                                context: context(intent, att: "authorized")), new: true)
+        let queued = try await jobs(auth.user.id)
+        XCTAssertEqual(queued.map(\.destination), ["linkedin"])
+        XCTAssertEqual(queued.map(\.state), ["pending"])
+        let row = try await XCTUnwrapAsync(try await sql.raw("SELECT revision FROM measurement_permission_current WHERE account_id=\(bind:auth.user.id) AND purpose='crossCompanyAds'").first())
+        let revision = try row.decode(column: "revision", as: UUID.self)
+        func observe(_ status: String, at: Date) async throws -> XCTHTTPResponse {
+            try await request(.PUT, "api/v2/measurement/devices/att", object: [
+                "installationId": intent.installation.uuidString, "consentRevision": revision.uuidString,
+                "attStatus": status, "observedAt": date(at)], bearer: auth.token)
+        }
+        let denied = try await observe("denied", at: Date().addingTimeInterval(1))
+        XCTAssertEqual(denied.status, .ok, denied.body.string)
+        let allowed = try await observe("authorized", at: Date().addingTimeInterval(2))
+        XCTAssertEqual(allowed.status, .ok, allowed.body.string)
+        let permissions = try XCTUnwrap(try json(allowed)["permissions"] as? [[String: Any]])
+        let cross = try XCTUnwrap(permissions.first { $0["purpose"] as? String == "crossCompanyAds" })
+        XCTAssertEqual(cross["effective"] as? Bool, false)
+        XCTAssertEqual(cross["activation"] as? String, "chosen_inactive_att")
+        _ = await MeasurementDispatchService.run(app: app, on: app.db)
+        let linkedIn = await recorder.calls().filter { $0.uri == "https://api.linkedin.com/rest/conversionEvents" }
+        XCTAssertTrue(linkedIn.isEmpty)
+        let after = try await jobs(auth.user.id)
+        XCTAssertEqual(after.map(\.state), ["suppressed"])
+    }
 }
 
 // MARK: - Fixtures

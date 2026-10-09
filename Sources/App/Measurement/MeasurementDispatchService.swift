@@ -184,10 +184,13 @@ enum MeasurementDispatchService {
             let installationID = try row.decode(column: "installation_id", as: UUID?.self)
             if purpose == .crossCompanyAds {
                 guard let installationID else { return .suppressed }
+                // An installation on which this revision is inactive (refused ATT at the choice or
+                // since) never carries authority, even after a later authorised observation.
                 guard try await sql.raw("""
-                    SELECT 1 FROM measurement_att_assertions WHERE account_id=\(bind:accountID)
-                      AND consent_revision=\(bind:revision) AND status='authorized' AND expires_at>\(bind:gateNow)
-                      AND installation_id=\(bind:installationID) LIMIT 1
+                    SELECT 1 FROM measurement_att_assertions a WHERE a.account_id=\(bind:accountID)
+                      AND a.consent_revision=\(bind:revision) AND a.expires_at>\(bind:gateNow)
+                      AND \(unsafeRaw: MeasurementPrivacyService.crossCompanyATTCarriesAuthority("a"))
+                      AND a.installation_id=\(bind:installationID) LIMIT 1
                     """).first() != nil else { return .suppressed }
             }
             let sourceKind = try row.decode(column: "source_kind", as: String.self)

@@ -504,20 +504,29 @@ final class MeasurementPrivacyTests: XCTestCase {
         XCTAssertEqual(wrongInstallation.status, .conflict)
     }
 
-    func testFreshAuthorizedObservationActivatesAPreviouslyDeniedGrant() async throws {
+    /// Inverted on 9 October 2026 (Dan's direction, section 3): this test was
+    /// `testFreshAuthorizedObservationActivatesAPreviouslyDeniedGrant`. A grant recorded while ATT
+    /// was denied is never activated by a later observation; only a new choice made with fresh
+    /// authorised ATT is (CrossCompanyATTActivationTests).
+    func testLaterAuthorizedObservationNeverActivatesAGrantMadeWhileATTWasDenied() async throws {
         let installation = UUID()
         let denied = try await put("crossCompanyAds", decision: "granted", installationID: installation,
                                    attStatus: "denied", attAssertedAt: Date().addingTimeInterval(-2))
         let revision = try uuid(try permission("crossCompanyAds", in: denied)["revision"])
         XCTAssertNil(try permission("crossCompanyAds", in: denied)["subjectId"])
+        XCTAssertEqual(try permission("crossCompanyAds", in: denied)["activation"] as? String, "chosen_inactive_att")
         let authorized = try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
             "installationId": installation.uuidString, "consentRevision": revision.uuidString,
             "attStatus": "authorized", "observedAt": date()
         ])
         XCTAssertEqual(authorized.status, .ok)
         let state = try permission("crossCompanyAds", in: authorized)
-        XCTAssertEqual(state["effective"] as? Bool, true)
-        XCTAssertNotNil(state["subjectId"])
+        XCTAssertEqual(state["effective"] as? Bool, false)
+        XCTAssertNil(state["subjectId"])
+        XCTAssertEqual(state["attStatus"] as? String, "authorized")
+        XCTAssertEqual(state["activation"] as? String, "chosen_inactive_att")
+        let subjects = try await sql.raw("SELECT count(*) AS n FROM measurement_subjects WHERE account_id=\(bind:userID) AND purpose='crossCompanyAds'").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(subjects, 0)
     }
 
     func testOfflineWithdrawalOlderThanOneDayIsAcceptedAndExactlyReplayable() async throws {
@@ -2126,53 +2135,69 @@ final class MeasurementPrivacyTests: XCTestCase {
         let grant = try await put("crossCompanyAds", decision: "granted", installationID: installation,
                                   attStatus: "authorized", attAssertedAt: Date().addingTimeInterval(-10))
         let revision = try uuid(try permission("crossCompanyAds", in: grant)["revision"])
+        // Observation times are whole-second ISO-8601 (`date`), exactly what the iOS client's
+        // JSONEncoder `.iso8601` sends. The 8 October version sent fractional seconds, which the
+        // production Linux decoder rejects (ATT-SERVER-AND-LINUX-OCT9.md); continuity is decided by
+        // the server's continuity UUID, never by client timestamps.
+        func observe(_ status: String, at: Date) async throws -> XCTHTTPResponse {
+            try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
+                "installationId": installation.uuidString, "consentRevision": revision.uuidString,
+                "attStatus": status, "observedAt": date(at)
+            ])
+        }
 
+        // Queued under the first continuity, then the 24 h observation lapses. A later authorised
+        // refresh of this uninterrupted choice starts a new continuity and cannot heal the queue.
         let first = try await preparePurchase(installation, revision)
         let firstDate = Date()
         _ = try await witnessPurchase(try XCTUnwrap(first.1), try XCTUnwrap(first.2),
-                                      transaction: "dispatch-before-denial", purchaseDate: firstDate)
-        _ = try await webhook(revenueCatBody(transaction: "dispatch-before-denial",
-            eventTimestamp: firstDate, purchasedAt: firstDate))
-
-        let preciseDate = ISO8601DateFormatter()
-        preciseDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let deniedAt = Date()
-        let denied = try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
-            "installationId": installation.uuidString, "consentRevision": revision.uuidString,
-            "attStatus": "denied", "observedAt": preciseDate.string(from: deniedAt)
-        ])
-        let reauthorised = try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
-            "installationId": installation.uuidString, "consentRevision": revision.uuidString,
-            "attStatus": "authorized", "observedAt": preciseDate.string(from: deniedAt.addingTimeInterval(0.01))
-        ])
-        XCTAssertEqual(denied.status, .ok)
-        XCTAssertEqual(reauthorised.status, .ok)
-
-        let second = try await preparePurchase(installation, revision)
-        let secondDate = Date()
-        _ = try await witnessPurchase(try XCTUnwrap(second.1), try XCTUnwrap(second.2),
-                                      transaction: "dispatch-before-expiry-gap", purchaseDate: secondDate)
+                                      transaction: "dispatch-before-expiry-gap", purchaseDate: firstDate)
         _ = try await webhook(revenueCatBody(transaction: "dispatch-before-expiry-gap",
-            eventTimestamp: secondDate, purchasedAt: secondDate))
+            eventTimestamp: firstDate, purchasedAt: firstDate))
         try await sql.raw("""
             UPDATE measurement_att_assertions
             SET received_at=NOW()-INTERVAL '2 days',expires_at=NOW()-INTERVAL '1 day'
             WHERE account_id=\(bind:userID) AND installation_id=\(bind:installation)
             """).run()
-        let refreshed = try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
-            "installationId": installation.uuidString, "consentRevision": revision.uuidString,
-            "attStatus": "authorized", "observedAt": preciseDate.string(from: Date().addingTimeInterval(0.01))
-        ])
+        let refreshed = try await observe("authorized", at: Date())
         XCTAssertEqual(refreshed.status, .ok)
+        XCTAssertEqual(try permission("crossCompanyAds", in: refreshed)["activation"] as? String, "active")
+        let afterGap = await MeasurementDispatchService.run(app: app, on: app.db)
+        XCTAssertEqual(afterGap.suppressed, 1)
+        XCTAssertEqual(afterGap.delivered, 0)
 
-        let before = try await sql.raw("""
+        // Queued under the refreshed continuity, then a denial and a later authorisation. The denial
+        // breaks continuity, and since 9 October it also keeps this revision inactive on this
+        // installation: the later authorisation is recorded but activates nothing.
+        let second = try await preparePurchase(installation, revision)
+        let secondDate = Date()
+        _ = try await witnessPurchase(try XCTUnwrap(second.1), try XCTUnwrap(second.2),
+                                      transaction: "dispatch-before-denial", purchaseDate: secondDate)
+        _ = try await webhook(revenueCatBody(transaction: "dispatch-before-denial",
+            eventTimestamp: secondDate, purchasedAt: secondDate))
+        let pending = try await sql.raw("""
             SELECT count(*) AS n FROM measurement_dispatch_jobs
             WHERE account_id=\(bind:userID) AND destination='linkedin' AND state='pending'
             """).first()!.decode(column: "n", as: Int.self)
-        XCTAssertEqual(before, 2)
-        let counts = await MeasurementDispatchService.run(app: app, on: app.db)
-        XCTAssertEqual(counts.suppressed, 2)
-        XCTAssertEqual(counts.delivered, 0)
+        XCTAssertEqual(pending, 1)
+        let deniedAt = Date().addingTimeInterval(1)
+        let denied = try await observe("denied", at: deniedAt)
+        XCTAssertEqual(denied.status, .ok)
+        // Rapid change within one wall-clock second: a different status at the same whole-second
+        // time conflicts; it can never be ordered after the denial.
+        let sameSecond = try await observe("authorized", at: deniedAt)
+        XCTAssertEqual(sameSecond.status, .conflict)
+        let reauthorised = try await observe("authorized", at: deniedAt.addingTimeInterval(1))
+        XCTAssertEqual(reauthorised.status, .ok)
+        let state = try permission("crossCompanyAds", in: reauthorised)
+        XCTAssertEqual(state["effective"] as? Bool, false)
+        XCTAssertEqual(state["activation"] as? String, "chosen_inactive_att")
+        let refusedAfterDenial = try await preparePurchase(installation, revision)
+        XCTAssertEqual(refusedAfterDenial.0.status, .forbidden)
+
+        let afterDenial = await MeasurementDispatchService.run(app: app, on: app.db)
+        XCTAssertEqual(afterDenial.suppressed, 1)
+        XCTAssertEqual(afterDenial.delivered, 0)
         let calls = await recorder.calls()
         XCTAssertTrue(calls.isEmpty)
         let after = try await sql.raw("""
@@ -2200,12 +2225,13 @@ final class MeasurementPrivacyTests: XCTestCase {
         _ = try await webhook(revenueCatBody(transaction: "dispatch-heartbeat-initial",
             eventTimestamp: initialDate, purchasedAt: initialDate, originalTransaction: chain))
 
-        let preciseDate = ISO8601DateFormatter()
-        preciseDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        // Whole-second time, as the iOS client sends it, strictly after the renewal occurrence and
+        // the grant's assertion (ATT-SERVER-AND-LINUX-OCT9.md: fractional seconds were a Linux-only
+        // test artefact).
         let renewalDate = Date()
         let heartbeat = try await request(.PUT, "api/v2/measurement/devices/att", token: jwt, object: [
             "installationId": installation.uuidString, "consentRevision": revision.uuidString,
-            "attStatus": "authorized", "observedAt": preciseDate.string(from: renewalDate.addingTimeInterval(0.01))
+            "attStatus": "authorized", "observedAt": date(renewalDate.addingTimeInterval(1))
         ])
         XCTAssertEqual(heartbeat.status, .ok)
         let renewalBody = try revenueCatBody(transaction: "dispatch-heartbeat-renewal", type: "RENEWAL",

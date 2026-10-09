@@ -270,7 +270,7 @@ enum RevenueCatMeasurementService {
              AND s.purpose='crossCompanyAds' AND s.state='active'
             JOIN measurement_att_assertions att ON att.account_id=r.account_id
              AND att.installation_id=a.installation_id AND att.consent_revision=a.consent_revision
-             AND att.status='authorized'
+             AND \(unsafeRaw: MeasurementPrivacyService.crossCompanyATTCarriesAuthority("att"))
             WHERE r.id=\(bind:chargeID) AND r.event_kind='subscription_payment'
               AND r.charge_kind IN ('initial_purchase','renewal')
               AND r.linkedin_ingest_eligible=TRUE

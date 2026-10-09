@@ -198,6 +198,17 @@ enum MeasurementRelayService {
             let current = try await requirePermission(accountID: accountID, purpose: .crossCompanyAds,
                                                       revision: input.consentRevision, requireSubject: false, on: sql)
             guard current.decision == .granted else { throw permissionRequired() }
+            // No automatic later activation (Dan, 9 Oct 2026, section 3). Only a revision recorded with
+            // fresh authorised ATT can ever be activated, and a refusal recorded for it on this
+            // installation (at the choice or since) keeps it inactive here for good. Such an
+            // observation is still recorded, so the read reports the actual ATT status, but it gets
+            // no continuity and no subject: nothing becomes effective and nothing is replayed.
+            // Only a new choice made with fresh authorised ATT (a new revision) activates it.
+            let choice = try await sql.raw("""
+                SELECT att_status FROM measurement_consent_events
+                WHERE account_id=\(bind:accountID) AND id=\(bind:input.consentRevision) AND purpose='crossCompanyAds'
+                """).first()
+            var activatable = try choice?.decode(column: "att_status", as: String?.self) == MeasurementATTStatus.authorized.rawValue
             var continuityStartedAt: Date?
             var continuityID: UUID?
             if let old = try await sql.raw("""
@@ -213,15 +224,20 @@ enum MeasurementRelayService {
                     }
                     return try await MeasurementPrivacyService.readSnapshot(accountID: accountID, installationID: input.installationId, now: now, on: tx)
                 }
-                if input.attStatus == .authorized,
-                   try old.decode(column: "status", as: String.self) == MeasurementATTStatus.authorized.rawValue,
-                   try old.decode(column: "consent_revision", as: UUID.self) == input.consentRevision,
-                   try old.decode(column: "expires_at", as: Date.self) > now {
-                    continuityStartedAt = try old.decode(column: "continuity_started_at", as: Date?.self)
-                    continuityID = try old.decode(column: "continuity_id", as: UUID?.self)
+                if try old.decode(column: "consent_revision", as: UUID.self) == input.consentRevision {
+                    let oldAuthorized = try old.decode(column: "status", as: String.self) == MeasurementATTStatus.authorized.rawValue
+                    let oldContinuity = try old.decode(column: "continuity_id", as: UUID?.self)
+                    if !oldAuthorized || oldContinuity == nil {
+                        // A refusal for this revision is already recorded on this installation.
+                        activatable = false
+                    } else if input.attStatus == .authorized, try old.decode(column: "expires_at", as: Date.self) > now {
+                        // Uninterrupted authorised heartbeat: the same continuity.
+                        continuityStartedAt = try old.decode(column: "continuity_started_at", as: Date?.self)
+                        continuityID = oldContinuity
+                    }
                 }
             }
-            if input.attStatus == .authorized, continuityStartedAt == nil || continuityID == nil {
+            if input.attStatus == .authorized, activatable, continuityStartedAt == nil || continuityID == nil {
                 continuityStartedAt = now
                 continuityID = UUID()
             }
@@ -237,7 +253,7 @@ enum MeasurementRelayService {
                     expires_at=EXCLUDED.expires_at,continuity_started_at=EXCLUDED.continuity_started_at,
                     continuity_id=EXCLUDED.continuity_id
                 """).run()
-            if input.attStatus == .authorized, current.subjectID == nil {
+            if input.attStatus == .authorized, activatable, current.subjectID == nil {
                 let erasurePending = try await sql.raw("""
                     SELECT 1 FROM measurement_erasure_jobs e JOIN measurement_subjects s ON s.id=e.subject_id
                     WHERE e.account_id=\(bind:accountID) AND s.purpose='crossCompanyAds' AND e.state<>'completed' LIMIT 1
@@ -562,9 +578,9 @@ enum MeasurementRelayService {
     private static func effectiveATT(accountID: UUID, installationID: UUID, revision: UUID,
                                      now: Date, on sql: SQLDatabase) async throws -> Bool {
         try await sql.raw("""
-            SELECT 1 FROM measurement_att_assertions WHERE account_id=\(bind:accountID)
-              AND installation_id=\(bind:installationID) AND consent_revision=\(bind:revision)
-              AND status='authorized' AND expires_at>\(bind:now)
+            SELECT 1 FROM measurement_att_assertions a WHERE a.account_id=\(bind:accountID)
+              AND a.installation_id=\(bind:installationID) AND a.consent_revision=\(bind:revision)
+              AND \(unsafeRaw: MeasurementPrivacyService.crossCompanyATTCarriesAuthority("a")) AND a.expires_at>\(bind:now)
             """).first() != nil
     }
 
