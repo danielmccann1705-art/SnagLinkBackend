@@ -1,4 +1,5 @@
 import Vapor
+import Fluent
 
 /// Native-only pre-auth signup measurement routes. Capabilities travel only in request
 /// bodies, never in a URL; the request logger records route patterns and status codes only.
@@ -31,6 +32,10 @@ struct SignupIntentController: RouteCollection {
         let platform = try PlatformConfiguration.load(on: req.application)
         try await limit(req, platform: platform, route: "issue")
         let input = try decode(SignupIntentRequest.self, req)
+        // A second, per-installation bucket keeps one device from using the shared
+        // per-address ceiling. Installation IDs are client-chosen, so the address
+        // ceiling above remains the abuse bound.
+        try await limitInstallation(input.installationId, platform: platform, on: req.db)
         let issued = try await SignupIntentService.issue(input, platform: platform, on: req.db)
         let response = Response(status: .created)
         try response.content.encode(issued)
@@ -62,6 +67,14 @@ struct SignupIntentController: RouteCollection {
     private func decode<T: Content>(_ type: T.Type, _ req: Request) throws -> T {
         do { return try req.content.decode(type) }
         catch { throw Abort(.badRequest, reason: "Use a valid measurement request", identifier: "measurement_request_invalid") }
+    }
+
+    private func limitInstallation(_ installation: UUID, platform: PlatformConfiguration, on db: Database) async throws {
+        let key = "signup-intent-installation:" + SHA256Hasher.hash(token: platform.environment + ":" + installation.uuidString.lowercased())
+        try await db.transaction { db in
+            try await VerifiedIdentityService.lock("rate:" + key, on: db)
+            try await RateLimitService.enforce(key: key, action: .signupIntentInstallation, on: db)
+        }
     }
 
     private func limit(_ req: Request, platform: PlatformConfiguration, route: String) async throws {

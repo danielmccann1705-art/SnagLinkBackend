@@ -564,19 +564,46 @@ final class SignupIntentTests: XCTestCase {
         let again = try await request(.POST, "api/v2/measurement/signup-intents/\(intent.id)/cancel", object: ["capability": intent.capability])
         XCTAssertEqual(try json(again)["state"] as? String, "cancelled", "idempotent")
 
-        // Twenty per address and window; the next is refused before anything is written.
+        // Fifteen per installation and window (five sign-in screen views of three intents);
+        // the next from that installation is refused before anything is written.
         let flood = "signup-flood-" + UUID().uuidString
+        // A fresh installation: the vocabulary checks above already used `base`'s bucket.
+        var floodBody = base; floodBody["installationId"] = UUID().uuidString
         var created = 0
-        for _ in 0..<20 {
-            let response = try await request(.POST, "api/v2/measurement/signup-intents", object: base, from: flood)
+        for _ in 0..<15 {
+            let response = try await request(.POST, "api/v2/measurement/signup-intents", object: floodBody, from: flood)
             if response.status == .created, let id = UUID(uuidString: try json(response)["intentId"] as? String ?? "") {
                 intents.append(id); created += 1
             }
         }
-        XCTAssertEqual(created, 20)
-        let limited = try await request(.POST, "api/v2/measurement/signup-intents", object: base, from: flood)
+        XCTAssertEqual(created, 15)
+        let limited = try await request(.POST, "api/v2/measurement/signup-intents", object: floodBody, from: flood)
         XCTAssertEqual(limited.status, .tooManyRequests)
         XCTAssertEqual(limited.headers.first(name: .cacheControl), "no-store")
+        XCTAssertNotNil(limited.headers.first(name: "Retry-After"))
+        // The same installation from another address is still limited: the bucket is per installation.
+        let elsewhere = try await request(.POST, "api/v2/measurement/signup-intents", object: floodBody, from: "signup-other-" + UUID().uuidString)
+        XCTAssertEqual(elsewhere.status, .tooManyRequests)
+        // Other installations behind the same shared address continue until the address
+        // ceiling (60 per window, three times the former 20) is reached: 16 requests above
+        // plus 44 here. The address ceiling remains the abuse bound, since installation IDs
+        // are chosen by the client.
+        var shared = 0
+        for _ in 0..<44 {
+            var other = floodBody; other["installationId"] = UUID().uuidString
+            let response = try await request(.POST, "api/v2/measurement/signup-intents", object: other, from: flood)
+            if response.status == .created, let id = UUID(uuidString: try json(response)["intentId"] as? String ?? "") {
+                intents.append(id); shared += 1
+            }
+        }
+        XCTAssertEqual(shared, 44)
+        var fresh = floodBody; fresh["installationId"] = UUID().uuidString
+        let ceiling = try await request(.POST, "api/v2/measurement/signup-intents", object: fresh, from: flood)
+        XCTAssertEqual(ceiling.status, .tooManyRequests)
+        XCTAssertEqual(ceiling.headers.first(name: .cacheControl), "no-store")
+        let floodInstallation = try XCTUnwrap(UUID(uuidString: try XCTUnwrap(floodBody["installationId"] as? String)))
+        let rows = try await count("SELECT count(*) AS n FROM measurement_signup_intents WHERE installation_id=\(bind:floodInstallation)")
+        XCTAssertEqual(rows, 15, "refused requests wrote nothing")
     }
 
     // MARK: - 4. Atomic fact, eligibility freeze, replay and cancellation
