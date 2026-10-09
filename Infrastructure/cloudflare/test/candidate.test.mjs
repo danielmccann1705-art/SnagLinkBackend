@@ -125,6 +125,7 @@ const notCarried=new Map([
   // package's deploy configuration sets (STAGING-PACKAGE-2.0.1-MEASUREMENT.md). Absent means off,
   // so a configuration generated without them leaves measurement exactly as it is today.
   ['FEATURE_PRODUCT_ANALYTICS_ENABLED','measurement package only; absent = off'],
+  ['FEATURE_MEASUREMENT_CHOICES_ENABLED','measurement package only; absent = off, so the app hides its privacy choices'],
   ['POSTHOG_MEASUREMENT_ENVIRONMENT','measurement package only; must be sandbox'],
   ['MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT','measurement package only; must be sandbox'],
   ['REVENUECAT_APP_ID','measurement package only; optional sandbox webhook'],

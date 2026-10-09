@@ -114,6 +114,18 @@ function measurementEnvironment(env, candidate) {
     if (env[key] !== 'false') throw new Error('Advertising measurement switches can only be "false" in staging');
     selected[key] = 'false';
   }
+  // The app's privacy-choices capability (registry key measurementChoicesEnabled). Absent, the
+  // default false applies and the app hides its choices. Only the enabled unified candidate, which
+  // serves the measurement routes, may say "true".
+  if (env.FEATURE_MEASUREMENT_CHOICES_ENABLED !== undefined) {
+    if (!['true', 'false'].includes(env.FEATURE_MEASUREMENT_CHOICES_ENABLED)) {
+      throw new Error('FEATURE_MEASUREMENT_CHOICES_ENABLED is absent, "true" or "false"');
+    }
+    if (env.FEATURE_MEASUREMENT_CHOICES_ENABLED === 'true' && (!candidate || env.STAGING_PLATFORM_ENABLED !== 'true')) {
+      throw new Error('Measurement choices require the enabled unified candidate');
+    }
+    selected.FEATURE_MEASUREMENT_CHOICES_ENABLED = env.FEATURE_MEASUREMENT_CHOICES_ENABLED;
+  }
   const product = ['FEATURE_PRODUCT_ANALYTICS_ENABLED', 'POSTHOG_PROJECT_API_KEY', 'POSTHOG_MEASUREMENT_ENVIRONMENT'];
   const origin = ['MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY', 'MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT'];
   const revenueCat = ['REVENUECAT_WEBHOOK_AUTHORIZATION', 'REVENUECAT_APP_ID'];

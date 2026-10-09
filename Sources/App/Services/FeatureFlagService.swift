@@ -22,6 +22,10 @@ struct FeatureFlagService {
         // only while this is on, and only for a grant recorded under a portal-covering notice. It
         // stays off until the portal's own view/withdraw route for the choice ships.
         ("portalProductAnalyticsEnabled", "FEATURE_PORTAL_PRODUCT_ANALYTICS_ENABLED", false),
+        // Server capability for the app's privacy choices (replacement 2.0.1): the app shows its optional
+        // measurement choices only when this is served as true, so a server without the measurement routes
+        // (an older production image never serves the key) is never asked to save a choice. Gates no route.
+        ("measurementChoicesEnabled", "FEATURE_MEASUREMENT_CHOICES_ENABLED", false),
     ]
 
     /// `lookup` is the process environment; a test passes its own instead of setting a variable the

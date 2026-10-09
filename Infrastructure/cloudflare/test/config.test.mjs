@@ -356,6 +356,21 @@ test('measurement forwards only the sandbox product analytics, purchase-origin a
   assert.equal(productOnly.REVENUECAT_WEBHOOK_AUTHORIZATION,undefined);
 });
 
+test('the privacy-choices capability is absent (off), "true" or "false", and "true" only on the enabled candidate', () => {
+  assert.equal(containerEnvironment(candidate()).FEATURE_MEASUREMENT_CHOICES_ENABLED, undefined);
+  for (const value of ['true','false']) {
+    assert.equal(containerEnvironment({...candidate(),FEATURE_MEASUREMENT_CHOICES_ENABLED:value}).FEATURE_MEASUREMENT_CHOICES_ENABLED, value);
+    assert.equal(containerEnvironment({...candidate(),...measurement(),FEATURE_MEASUREMENT_CHOICES_ENABLED:value})
+      .FEATURE_MEASUREMENT_CHOICES_ENABLED, value);
+  }
+  for (const value of ['yes','TRUE','1','']) {
+    assert.throws(() => containerEnvironment({...candidate(),FEATURE_MEASUREMENT_CHOICES_ENABLED:value}));
+  }
+  assert.throws(() => containerEnvironment({...sample(),FEATURE_MEASUREMENT_CHOICES_ENABLED:'true'}));
+  assert.throws(() => containerEnvironment({...sample(),...platform(),FEATURE_MEASUREMENT_CHOICES_ENABLED:'true'}));
+  assert.equal(containerEnvironment({...sample(),FEATURE_MEASUREMENT_CHOICES_ENABLED:'false'}).FEATURE_MEASUREMENT_CHOICES_ENABLED, 'false');
+});
+
 test('measurement cannot reach production, advertising or provider erasure from staging', () => {
   for (const override of [{POSTHOG_MEASUREMENT_ENVIRONMENT:'production'}, {POSTHOG_MEASUREMENT_ENVIRONMENT:undefined},
     {POSTHOG_PROJECT_API_KEY:'phx_personal_key_do_not_echo_000000000'}, {POSTHOG_PROJECT_API_KEY:undefined},
