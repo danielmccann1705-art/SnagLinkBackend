@@ -670,7 +670,7 @@ final class PostHogDelayedIngestionTests: XCTestCase {
             VALUES (\(bind:job),\(bind:userID),\(bind:subjectID),'posthog','pending',NOW(),NOW())
             """).run()
         try await sql.raw("""
-            INSERT INTO measurement_posthog_erasure_receipts(job_id,project_id,person_uuid,phase,resolved_at,requested_at,
+            INSERT INTO measurement_posthog_erasure_receipts(job_id,posthog_project_id,person_uuid,phase,resolved_at,requested_at,
                 provider_created_at,events_verified_at)
             VALUES (\(bind:job),'123456',\(bind:UUID()),'events_verified',NOW(),NOW(),NOW(),NOW())
             """).run()

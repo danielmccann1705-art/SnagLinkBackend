@@ -38,6 +38,9 @@ final class InternalReasonVocabularyTests: XCTestCase {
         .revenueCatConfiguration: "revenuecat_configuration",
         .revenueCatUnavailable: "revenuecat_unavailable",
         .revenueCatPending: "revenuecat_pending",
+        // Optional measurement providers (added with the measurement privacy state; recorded 9 Oct).
+        .measurementErasurePending: "measurement_erasure_pending",
+        .measurementErasureUnavailable: "measurement_erasure_unavailable",
     ]
 
     /// B2's four write kinds and B3's read kind, as one set.

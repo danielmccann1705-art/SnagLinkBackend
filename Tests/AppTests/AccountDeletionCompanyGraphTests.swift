@@ -12,6 +12,19 @@ final class AccountDeletionCompanyGraphTests: XCTestCase {
     }
     override func tearDown() async throws { if let app { try await app.asyncShutdown() } }
 
+    /// The company inventory and graph erasure discover company-scoped tables by a column named
+    /// `workspace_id`, `team_id` or `project_id` and compare it with UUIDs. A column of another type
+    /// under one of those names breaks every company closure (9 October 2026: the PostHog receipt's
+    /// TEXT `project_id`). This also protects older images running on this schema.
+    func testCompanyScopeColumnNamesAreAlwaysUUIDs() async throws {
+        let rows=try await VerifiedIdentityService.sql(app.db).raw("""
+            SELECT table_name||'.'||column_name||' '||data_type AS name FROM information_schema.columns
+            WHERE table_schema=current_schema() AND column_name IN ('workspace_id','team_id','project_id') AND data_type<>'uuid'
+            ORDER BY 1
+            """).all()
+        XCTAssertEqual(try rows.map { try $0.decode(column:"name",as:String.self) }, [])
+    }
+
     private struct Graph {
         let owner: User; let workspace: Team; let project: Project; let snag: Snag
         let linkID: UUID; let linkToken: String; let mediaKeys: [String]

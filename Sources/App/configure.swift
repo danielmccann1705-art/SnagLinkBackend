@@ -208,6 +208,9 @@ public func configure(_ app: Application,
         // Product-purpose purchase-callback witness: confirmed purchase origin for product
         // analytics without any advertising consent (constraint-only, reversible).
         app.migrations.add(AddProductPurchaseOriginPurpose())
+        // The PostHog receipt's TEXT project number must not be named `project_id`: company
+        // inventory and graph erasure scan that name as a project UUID (rollback check, 9 Oct).
+        app.migrations.add(RenamePostHogErasureReceiptProject())
 
         try await app.autoMigrate()
     } else {

@@ -107,7 +107,7 @@ enum PostHogErasureService {
                 guard let person = matchedPerson(reply.body, distinctID: opaque) else { return .manual }
                 // Persist the exact provider person UUID before any delete request.
                 guard try await sql.raw("""
-                    INSERT INTO measurement_posthog_erasure_receipts(job_id,project_id,person_uuid,phase,resolved_at,in_flight_until)
+                    INSERT INTO measurement_posthog_erasure_receipts(job_id,posthog_project_id,person_uuid,phase,resolved_at,in_flight_until)
                     SELECT id,\(bind:config.projectID),\(bind:person),'resolved',\(bind:now),\(bind:inFlightUntil)
                     FROM measurement_erasure_jobs WHERE id=\(bind:jobID) AND lease_token=\(bind:leaseToken)
                       AND state='leased' AND lease_expires_at>\(bind:now)
@@ -115,7 +115,7 @@ enum PostHogErasureService {
                     """).first() != nil else { return .retry }
                 return .pending
             }
-            guard try receipt.decode(column: "project_id", as: String.self) == config.projectID else { return .manual }
+            guard try receipt.decode(column: "posthog_project_id", as: String.self) == config.projectID else { return .manual }
             let person = try receipt.decode(column: "person_uuid", as: UUID.self)
             let phase = try receipt.decode(column: "phase", as: String.self)
             let round = try receipt.decode(column: "round", as: Int.self)
