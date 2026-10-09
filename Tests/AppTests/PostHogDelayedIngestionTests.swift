@@ -169,6 +169,37 @@ final class PostHogDelayedIngestionTests: XCTestCase {
         XCTAssertEqual(value, expected, message, file: file, line: line)
     }
 
+    private func lastErrorKind(_ job: UUID) async throws -> String? {
+        try await sql.raw("SELECT last_error_kind FROM measurement_erasure_jobs WHERE id=\(bind:job)").first()!
+            .decode(column: "last_error_kind", as: String?.self)
+    }
+
+    /// The job and its receipt carry the same durable manual reason.
+    private func assertManualReason(_ job: UUID, _ reason: PostHogErasureService.ManualReason,
+                                    file: StaticString = #filePath, line: UInt = #line) async throws {
+        let kind = try await lastErrorKind(job)
+        XCTAssertEqual(kind, reason.rawValue, file: file, line: line)
+        let row = try await receipt(job)
+        XCTAssertEqual(try row.decode(column: "manual_reason", as: String?.self), reason.rawValue, file: file, line: line)
+        XCTAssertNotNil(try row.decode(column: "manual_at", as: Date?.self), file: file, line: line)
+        let completedAt = try await sql.raw("SELECT completed_at FROM measurement_erasure_jobs WHERE id=\(bind:job)")
+            .first()!.decode(column: "completed_at", as: Date?.self)
+        XCTAssertNil(completedAt, "a manual job never completes", file: file, line: line)
+    }
+
+    /// Moves this job's whole clock and the fake's back by `seconds`: every receipt
+    /// and pass time and every provider row. Only the clock moves.
+    private func advanceClock(_ job: UUID, _ fake: FakePostHog, by seconds: TimeInterval) async throws {
+        let columns = ["resolved_at", "requested_at", "queue_acknowledged_at", "provider_created_at",
+                       "events_verified_at", "profile_absent_at", "in_flight_until", "quiet_until"]
+        let receiptSet = columns.map { "\($0)=\($0)-make_interval(secs => \(seconds))" }.joined(separator: ",")
+        try await sql.raw("UPDATE measurement_posthog_erasure_receipts SET \(unsafeRaw: receiptSet) WHERE job_id=\(bind:job)").run()
+        let passSet = ["checked_at", "requested_at", "provider_verified_at", "provider_created_at"]
+            .map { "\($0)=\($0)-make_interval(secs => \(seconds))" }.joined(separator: ",")
+        try await sql.raw("UPDATE measurement_posthog_erasure_passes SET \(unsafeRaw: passSet) WHERE job_id=\(bind:job)").run()
+        await fake.ageDeletions(by: seconds)
+    }
+
     private struct Pass: Equatable { let round: Int; let stage, check, outcome: String; let count: Int? }
     private func passes(_ job: UUID) async throws -> [Pass] {
         try await sql.raw("""
@@ -239,15 +270,18 @@ final class PostHogDelayedIngestionTests: XCTestCase {
         try await assertPhase(job, "quiet")
     }
 
-    /// Asserts quiet_until = max(this round's request, in-flight bound) + window.
+    /// Asserts quiet_until = max(pass 1 completion, this round's request, in-flight
+    /// bound) + window: pass 2 always runs at least one full window after pass 1.
     private func assertQuietWindow(_ job: UUID, file: StaticString = #filePath, line: UInt = #line) async throws {
         let row = try await receipt(job)
         let requested = try XCTUnwrap(row.decode(column: "requested_at", as: Date?.self))
         let inFlight = try row.decode(column: "in_flight_until", as: Date?.self)
+        let profileAbsent = try XCTUnwrap(row.decode(column: "profile_absent_at", as: Date?.self))
         let quietUntil = try XCTUnwrap(row.decode(column: "quiet_until", as: Date?.self))
-        let expected = max(requested, inFlight ?? requested).addingTimeInterval(window)
+        let expected = max(profileAbsent, requested, inFlight ?? requested).addingTimeInterval(window)
         XCTAssertEqual(quietUntil.timeIntervalSince1970, expected.timeIntervalSince1970, accuracy: 0.001,
                        file: file, line: line)
+        XCTAssertGreaterThanOrEqual(quietUntil.timeIntervalSince(profileAbsent), window - 0.001, file: file, line: line)
     }
 
     /// Grant, deliver and store one event so the subject has a real profile.
@@ -387,6 +421,7 @@ final class PostHogDelayedIngestionTests: XCTestCase {
             Pass(round: 1, stage: "deletion", check: "deletion_status", outcome: "absent", count: nil),
             Pass(round: 1, stage: "deletion", check: "profile", outcome: "absent", count: nil),
             Pass(round: 1, stage: "quiet", check: "events", outcome: "present", count: 1),
+            Pass(round: 1, stage: "reresolve", check: "profile", outcome: "present", count: nil),
             Pass(round: 2, stage: "deletion", check: "deletion_status", outcome: "absent", count: nil),
             Pass(round: 2, stage: "deletion", check: "profile", outcome: "absent", count: nil),
             Pass(round: 2, stage: "quiet", check: "events", outcome: "absent", count: 0),
@@ -420,8 +455,11 @@ final class PostHogDelayedIngestionTests: XCTestCase {
         XCTAssertEqual(counts.manualRequired, 1, "late events without a resolvable profile cannot be person-deleted")
         XCTAssertEqual(counts.completed, 0)
         try await assertState(job, "manual_required")
-        let lastPass = try await passes(job).last
-        XCTAssertEqual(lastPass, Pass(round: 1, stage: "quiet", check: "events", outcome: "present", count: 1))
+        try await assertManualReason(job, .profilelessLateEvents)
+        let recorded = try await passes(job)
+        XCTAssertEqual(recorded.suffix(2), [
+            Pass(round: 1, stage: "quiet", check: "events", outcome: "present", count: 1),
+            Pass(round: 1, stage: "reresolve", check: "profile", outcome: "absent", count: nil)])
         let deletes = await fake.callCount("POST bulk_delete")
         XCTAssertEqual(deletes, 1)
     }
@@ -453,6 +491,7 @@ final class PostHogDelayedIngestionTests: XCTestCase {
         let counts = try await run(job)
         XCTAssertEqual(counts.manualRequired, 1, "a status row from an earlier request cannot verify this round")
         try await assertState(job, "manual_required")
+        try await assertManualReason(job, .staleReceipt)
         let deletes = await fake.callCount("POST bulk_delete")
         XCTAssertEqual(deletes, 2)
         let survivors = await fake.storedCount(opaque)
@@ -560,9 +599,14 @@ final class PostHogDelayedIngestionTests: XCTestCase {
             }
         }
         try await assertState(job, "manual_required")
+        try await assertManualReason(job, .roundsExhausted)
         let recorded = try await passes(job)
-        XCTAssertEqual(recorded.count, 3 * PostHogErasureService.maximumRounds)
-        XCTAssertEqual(recorded.filter { $0.outcome == "present" }.count, PostHogErasureService.maximumRounds)
+        // Three passes per round, plus the re-resolution that started each later round.
+        XCTAssertEqual(recorded.count, 3 * PostHogErasureService.maximumRounds + PostHogErasureService.maximumRounds - 1)
+        XCTAssertEqual(recorded.filter { $0.stage == "quiet" && $0.outcome == "present" }.count,
+                       PostHogErasureService.maximumRounds)
+        XCTAssertEqual(recorded.filter { $0.stage == "reresolve" && $0.outcome == "present" }.count,
+                       PostHogErasureService.maximumRounds - 1)
         let deletes = await fake.callCount("POST bulk_delete")
         XCTAssertEqual(deletes, PostHogErasureService.maximumRounds)
         let later = try await run(job)
@@ -597,6 +641,7 @@ final class PostHogDelayedIngestionTests: XCTestCase {
         let lastPass = try await passes(job).last
         XCTAssertEqual(lastPass,
                        Pass(round: 1, stage: "quiet", check: "events", outcome: "unverifiable", count: nil))
+        try await assertManualReason(job, .unverifiable)
     }
 
     func testAccountDeletionStaysPendingThroughTheQuietPeriodAndSettlesAfterIt() async throws {
@@ -651,13 +696,189 @@ final class PostHogDelayedIngestionTests: XCTestCase {
         XCTAssertEqual(remaining, 0)
     }
 
+    /// Dan's case (9 October): late data survives the first deletion, and the
+    /// repeated deletion for the same person returns the original receipt. The job
+    /// must not complete; it lands in manual_required with every pass recorded.
+    func testLateDataSurvivesTheFirstDeletionAndTheReissuedDeletionReturnsTheOriginalReceipt() async throws {
+        let fake = FakePostHog(sourceSemantics: true)
+        wire(fake)
+        let revision = try await exposedSubject(fake)
+        let withdrawn = try await withdraw(revision)
+        XCTAssertEqual(withdrawn.status, .ok)
+        let (subjectID, opaque) = try await subject()
+        let job = try await erasureJob(subjectID)
+        try await endSettlePeriod(subjectID)
+        try await driveRoundToQuiet(job, fake)
+        try await assertQuietWindow(job)
+        let firstPerson = try await receipt(job).decode(column: "person_uuid", as: UUID.self)
+        let cleared = await fake.storedCount(opaque)
+        XCTAssertEqual(cleared, 0, "the first deletion removed everything written before its request")
+
+        // A capture accepted before the cutoff is written only now, after PostHog
+        // verified the first deletion: outside its `_timestamp <= created_at` predicate.
+        await fake.storeLateEvent(distinctID: opaque)
+        // Rounds are at least one ingestion-lag window apart in reality.
+        try await advanceClock(job, fake, by: window)
+        let firstCreatedRow = try await receipt(job)
+        let firstCreated = try XCTUnwrap(try firstCreatedRow.decode(column: "provider_created_at", as: Date?.self))
+        try await endQuietPeriod(job)
+
+        var counts = try await run(job)
+        XCTAssertEqual(counts.pending, 1)
+        try await assertPhase(job, "reresolving", "pass 2 counts the surviving late event")
+        counts = try await run(job)
+        XCTAssertEqual(counts.pending, 1)
+        try await assertRound(job, 2)
+        let secondPerson = try await receipt(job).decode(column: "person_uuid", as: UUID.self)
+        XCTAssertEqual(secondPerson, firstPerson, "the late event recreated the profile with the derived UUID")
+        counts = try await run(job)
+        XCTAssertEqual(counts.pending, 1, "the re-issued deletion is acknowledged with a 202")
+        try await assertPhase(job, "polling")
+        let secondRequestedRow = try await receipt(job)
+        let secondRequested = try XCTUnwrap(try secondRequestedRow.decode(column: "requested_at", as: Date?.self))
+        await fake.processDeletions()
+        counts = try await run(job)
+        XCTAssertEqual(counts.manualRequired, 1)
+        XCTAssertEqual(counts.completed, 0)
+        try await assertState(job, "manual_required")
+        try await assertManualReason(job, .staleReceipt)
+        try await assertPhase(job, "polling", "the stale round keeps its receipt as it was")
+
+        // PostHog kept one event deletion for the person: the same row, same created_at.
+        let rows = await fake.deletionCreatedAt(firstPerson)
+        XCTAssertEqual(rows.count, 1, "one event deletion per person UUID")
+        XCTAssertEqual(try XCTUnwrap(rows.first).timeIntervalSince1970, firstCreated.timeIntervalSince1970, accuracy: 0.001)
+        let statusPasses = try await sql.raw("""
+            SELECT round,outcome,provider_created_at,requested_at FROM measurement_posthog_erasure_passes
+            WHERE job_id=\(bind:job) AND check_kind='deletion_status' ORDER BY sequence
+            """).all()
+        XCTAssertEqual(statusPasses.count, 2)
+        let firstStatus = try statusPasses[0].decode(column: "provider_created_at", as: Date?.self)
+        let staleStatus = try statusPasses[1].decode(column: "provider_created_at", as: Date?.self)
+        XCTAssertEqual(try statusPasses[1].decode(column: "outcome", as: String.self), "stale")
+        XCTAssertEqual(try XCTUnwrap(staleStatus).timeIntervalSince1970, try XCTUnwrap(firstStatus).timeIntervalSince1970,
+                       accuracy: 0.001, "the repeated deletion answered with the first round's row")
+        XCTAssertEqual(try XCTUnwrap(statusPasses[1].decode(column: "requested_at", as: Date?.self)).timeIntervalSince1970,
+                       secondRequested.timeIntervalSince1970, accuracy: 0.001)
+        XCTAssertLessThan(try XCTUnwrap(staleStatus), secondRequested)
+
+        let recorded = try await passes(job)
+        XCTAssertEqual(recorded, [
+            Pass(round: 1, stage: "deletion", check: "deletion_status", outcome: "absent", count: nil),
+            Pass(round: 1, stage: "deletion", check: "profile", outcome: "absent", count: nil),
+            Pass(round: 1, stage: "quiet", check: "events", outcome: "present", count: 1),
+            Pass(round: 1, stage: "reresolve", check: "profile", outcome: "present", count: nil),
+            Pass(round: 2, stage: "deletion", check: "deletion_status", outcome: "stale", count: nil)])
+        let deletes = await fake.callCount("POST bulk_delete")
+        XCTAssertEqual(deletes, 2)
+        let survivors = await fake.storedCount(opaque)
+        XCTAssertEqual(survivors, 1, "the late event survives both requests")
+        let later = try await run(job)
+        XCTAssertEqual(later.completed + later.pending + later.manualRequired, 0, "manual_required is never re-claimed")
+    }
+
+    /// Correction of 9 October: the quiet period is anchored to pass 1's
+    /// completion. With the old anchor (request + window) a provider deletion
+    /// slower than the window left pass 2 due the moment pass 1 finished.
+    func testSlowProviderDeletionStartsTheQuietPeriodAtPassOneCompletion() async throws {
+        let fake = FakePostHog(sourceSemantics: true)
+        wire(fake)
+        let revision = try await exposedSubject(fake)
+        let withdrawn = try await withdraw(revision)
+        XCTAssertEqual(withdrawn.status, .ok)
+        let (subjectID, _) = try await subject()
+        let job = try await erasureJob(subjectID)
+        try await endSettlePeriod(subjectID)
+        try await run(job)
+        try await run(job)
+        try await assertPhase(job, "polling")
+        // PostHog verified the deletion two windows after the request (off-peak batch).
+        try await sql.raw("""
+            UPDATE measurement_posthog_erasure_receipts SET requested_at=requested_at-make_interval(secs => \(bind:2 * window)),
+                queue_acknowledged_at=queue_acknowledged_at-make_interval(secs => \(bind:2 * window))
+            WHERE job_id=\(bind:job)
+            """).run()
+        await fake.processDeletions()
+        try await run(job)
+        try await assertPhase(job, "events_verified")
+        try await run(job)
+        try await assertPhase(job, "quiet")
+        try await assertQuietWindow(job)
+        let row = try await receipt(job)
+        let requested = try XCTUnwrap(row.decode(column: "requested_at", as: Date?.self))
+        let profileAbsent = try XCTUnwrap(row.decode(column: "profile_absent_at", as: Date?.self))
+        let quietUntil = try XCTUnwrap(row.decode(column: "quiet_until", as: Date?.self))
+        XCTAssertLessThan(requested.addingTimeInterval(window), profileAbsent,
+                          "request + window had already passed when pass 1 finished")
+        XCTAssertGreaterThan(quietUntil, Date().addingTimeInterval(window - 60))
+        let calls = await fake.callCount()
+        let counts = try await run(job)
+        XCTAssertEqual(counts.pending, 1)
+        XCTAssertEqual(counts.completed, 0)
+        let callsAfter = await fake.callCount()
+        XCTAssertEqual(callsAfter, calls, "no event query until a full window after pass 1")
+        try await assertPhase(job, "quiet")
+    }
+
+    func testManualReasonAndStaleEvidenceChecksAreEnforcedAndRollbackIsRefused() async throws {
+        let subjectID = UUID(), job = UUID()
+        try await sql.raw("""
+            INSERT INTO measurement_subjects(id,account_id,purpose,opaque_subject,state,created_at,revoked_at)
+            VALUES (\(bind:subjectID),\(bind:userID),'productAnalytics',\(bind:UUID()),'revoked',NOW(),NOW())
+            """).run()
+        try await sql.raw("""
+            INSERT INTO measurement_erasure_jobs(id,account_id,subject_id,destination,state,available_at,created_at)
+            VALUES (\(bind:job),\(bind:userID),\(bind:subjectID),'posthog','pending',NOW(),NOW())
+            """).run()
+        try await sql.raw("""
+            INSERT INTO measurement_posthog_erasure_receipts(job_id,posthog_project_id,person_uuid,phase,resolved_at,requested_at)
+            VALUES (\(bind:job),'123456',\(bind:UUID()),'polling',NOW(),NOW())
+            """).run()
+        for reason in PostHogErasureService.ManualReason.allCases {
+            try await sql.raw("""
+                UPDATE measurement_posthog_erasure_receipts SET manual_reason=\(bind:reason.rawValue),manual_at=NOW()
+                WHERE job_id=\(bind:job)
+                """).run()
+        }
+        for change in ["manual_reason='posthog_made_up',manual_at=NOW()", "manual_reason='posthog_unverifiable',manual_at=NULL",
+                       "manual_reason=NULL,manual_at=NOW()"] {
+            do {
+                try await sql.raw("UPDATE measurement_posthog_erasure_receipts SET \(unsafeRaw: change) WHERE job_id=\(bind:job)").run()
+                XCTFail("receipt check accepted: \(change)")
+            } catch {}
+        }
+        func insertPass(_ sequence: Int, _ values: String) async throws {
+            try await sql.raw("""
+                INSERT INTO measurement_posthog_erasure_passes(job_id,sequence,round,stage,check_kind,checked_at,person_uuid,
+                    requested_at,provider_verified_at,provider_created_at,event_count,outcome)
+                VALUES (\(bind:job),\(bind:sequence),\(unsafeRaw: values))
+                """).run()
+        }
+        let person = UUID().uuidString
+        for (index, refused) in [
+            "1,'deletion','deletion_status',NOW(),'\(person)',NOW(),NULL,NULL,NULL,'stale'",
+            "1,'deletion','deletion_status',NOW(),'\(person)',NOW(),NULL,NOW()+INTERVAL '1 second',NULL,'stale'",
+            "1,'deletion','profile',NOW(),'\(person)',NULL,NULL,NOW()-INTERVAL '1 hour',NULL,'stale'",
+            "1,'reresolve','events',NOW(),NULL,NULL,NULL,NULL,1,'present'",
+            "1,'deletion','deletion_status',NOW(),'\(person)',NOW(),NULL,NOW(),NULL,'absent'"].enumerated() {
+            do { try await insertPass(index + 1, refused); XCTFail("pass check accepted: \(refused)") } catch {}
+        }
+        try await insertPass(1, "2,'deletion','deletion_status',NOW(),'\(person)',NOW(),NOW()-INTERVAL '50 minutes',NOW()-INTERVAL '1 hour',NULL,'stale'")
+        try await insertPass(2, "1,'reresolve','profile',NOW(),NULL,NULL,NULL,NULL,NULL,'absent'")
+        do {
+            try await AddPostHogErasureManualResolution().revert(on: app.db)
+            XCTFail("rollback must be refused")
+        } catch {}
+    }
+
     func testMigrationNamesReceiptChecksRequiresAQuietPeriodAndRefusesRollback() async throws {
         let names = try await sql.raw("""
             SELECT conname FROM pg_constraint
             WHERE conrelid='measurement_posthog_erasure_receipts'::regclass AND contype='c' ORDER BY conname
             """).all().map { try $0.decode(column: "conname", as: String.self) }
         XCTAssertEqual(names, ["posthog_erasure_receipt_completed", "posthog_erasure_receipt_completed_after_quiet",
-                               "posthog_erasure_receipt_events_verified", "posthog_erasure_receipt_phase",
+                               "posthog_erasure_receipt_events_verified", "posthog_erasure_receipt_manual",
+                               "posthog_erasure_receipt_phase",
                                "posthog_erasure_receipt_project", "posthog_erasure_receipt_quiet",
                                "posthog_erasure_receipt_requested", "posthog_erasure_receipt_round"])
         let subjectID = UUID(), job = UUID()
@@ -788,6 +1009,9 @@ private actor FakePostHog {
             + String(hex[16..<20]) + "-" + String(hex[20..<32])
         return UUID(uuidString: text)!
     }
+
+    /// The provider's event-deletion rows for one person, by created_at.
+    func deletionCreatedAt(_ person: UUID) -> [Date] { deletions.filter { $0.person == person }.map(\.createdAt) }
 
     func ageDeletions(by seconds: TimeInterval) {
         deletions = deletions.map { .init(person: $0.person, createdAt: $0.createdAt.addingTimeInterval(-seconds),

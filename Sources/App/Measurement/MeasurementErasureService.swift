@@ -32,8 +32,8 @@ enum MeasurementErasureService {
             let job: Job
             do { guard let value = try await claim(now: Date(), on: db) else { break }; job = value }
             catch { counts.retrying += 1; break }
-            let outcome = await erase(job, app: app, on: db)
-            do { try await finish(job, outcome: outcome, now: Date(), on: db) }
+            let (outcome, postHogReason) = await erase(job, app: app, on: db)
+            do { try await finish(job, outcome: outcome, postHogReason: postHogReason, now: Date(), on: db) }
             catch { counts.retrying += 1; continue }
             switch outcome {
             case .completed: counts.completed += 1
@@ -85,16 +85,20 @@ enum MeasurementErasureService {
         }
     }
 
-    private static func erase(_ job: Job, app: Application, on db: Database) async -> Outcome {
-        if job.destination == "posthog" {
-            switch await PostHogErasureService.step(jobID: job.id, leaseToken: job.token,
-                accountID: job.accountID, subjectID: job.subjectID, app: app, on: db) {
-            case .completed: return .completed
-            case .pending: return .pending
-            case .retry: return .retry
-            case .manual: return .manual
-            }
+    /// PostHog escalations carry their durable reason (POSTHOG-MANUAL-REMEDIATION.md).
+    private static func erase(_ job: Job, app: Application,
+                              on db: Database) async -> (Outcome, PostHogErasureService.ManualReason?) {
+        guard job.destination == "posthog" else { return (await eraseOther(job, app: app, on: db), nil) }
+        switch await PostHogErasureService.step(jobID: job.id, leaseToken: job.token,
+            accountID: job.accountID, subjectID: job.subjectID, app: app, on: db) {
+        case .completed: return (.completed, nil)
+        case .pending: return (.pending, nil)
+        case .retry: return (.retry, nil)
+        case .manual(let reason): return (.manual, reason)
         }
+    }
+
+    private static func eraseOther(_ job: Job, app: Application, on db: Database) async -> Outcome {
         // The remaining Singular/LinkedIn deletion contracts are unverified.
         // Production retains every manifest; the Singular test fixture only
         // exercises existing durable local state transitions.
@@ -146,7 +150,8 @@ enum MeasurementErasureService {
         }
     }
 
-    private static func finish(_ job: Job, outcome: Outcome, now: Date, on db: Database) async throws {
+    private static func finish(_ job: Job, outcome: Outcome, postHogReason: PostHogErasureService.ManualReason?,
+                               now: Date, on db: Database) async throws {
         try await db.transaction { tx in
             let sql = try VerifiedIdentityService.sql(tx)
             let state: String, completedAt: Date?, error: String?
@@ -154,26 +159,38 @@ enum MeasurementErasureService {
             case .completed: (state, completedAt, error) = ("completed", now, nil)
             case .pending: (state, completedAt, error) = ("pending", nil, nil)
             case .retry: (state, completedAt, error) = ("failing", nil, "provider_unavailable")
-            case .manual: (state, completedAt, error) = ("manual_required", nil, "provider_configuration_required")
+            case .manual: (state, completedAt, error) = ("manual_required", nil,
+                                                         postHogReason?.rawValue ?? "provider_configuration_required")
             }
-            try await sql.raw("""
+            let updated = try await sql.raw("""
                 UPDATE measurement_erasure_jobs SET state=\(bind:state),completed_at=\(bind:completedAt),
                     available_at=CASE WHEN \(bind:state) IN ('pending','failing') THEN \(bind:now.addingTimeInterval(900)) ELSE available_at END,
                     lease_token=NULL,lease_expires_at=NULL,last_error_kind=\(bind:error)
                 WHERE id=\(bind:job.id) AND lease_token=\(bind:job.token) AND state='leased'
-                """).run()
+                RETURNING id
+                """).first() != nil
+            if updated, outcome == .manual, let postHogReason {
+                try await PostHogErasureService.recordManual(jobID: job.id, reason: postHogReason, at: now, on: sql)
+            }
             if outcome == .completed, job.destination == "singular" {
                 try await sql.raw("DELETE FROM measurement_device_bindings WHERE subject_id=\(bind:job.subjectID)").run()
             }
-            try await sql.raw("""
-                UPDATE account_deletion_jobs j SET measurement_erasure_state=CASE
-                    WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id AND e.state='manual_required') THEN 'manual_required'
-                    WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id AND e.state='failing') THEN 'failing'
-                    WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id AND e.state<>'completed') THEN 'pending'
-                    ELSE 'completed' END
-                WHERE j.id IN (SELECT account_deletion_job_id FROM measurement_erasure_jobs
-                               WHERE account_id=\(bind:job.accountID) AND account_deletion_job_id IS NOT NULL)
-                """).run()
+            try await settleAccountDeletionState(accountID: job.accountID, on: sql)
         }
+    }
+
+    /// Recomputes `account_deletion_jobs.measurement_erasure_state` for every account
+    /// deletion of this account from its erasure jobs. Shared by the worker and by a
+    /// recorded manual PostHog resolution (`PostHogManualResolution`).
+    static func settleAccountDeletionState(accountID: UUID, on sql: SQLDatabase) async throws {
+        try await sql.raw("""
+            UPDATE account_deletion_jobs j SET measurement_erasure_state=CASE
+                WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id AND e.state='manual_required') THEN 'manual_required'
+                WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id AND e.state='failing') THEN 'failing'
+                WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id AND e.state<>'completed') THEN 'pending'
+                ELSE 'completed' END
+            WHERE j.id IN (SELECT account_deletion_job_id FROM measurement_erasure_jobs
+                           WHERE account_id=\(bind:accountID) AND account_deletion_job_id IS NOT NULL)
+            """).run()
     }
 }

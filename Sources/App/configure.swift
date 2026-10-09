@@ -211,6 +211,10 @@ public func configure(_ app: Application,
         // The PostHog receipt's TEXT project number must not be named `project_id`: company
         // inventory and graph erasure scan that name as a project UUID (rollback check, 9 Oct).
         app.migrations.add(RenamePostHogErasureReceiptProject())
+        // PostHog manual escalation reasons, stale-receipt pass evidence and the closing
+        // record a person writes through `posthog-erasure-resolve` (POSTHOG-MANUAL-REMEDIATION.md).
+        app.migrations.add(AddPostHogErasureManualResolution())
+        app.asyncCommands.use(PostHogErasureResolveCommand(), as: "posthog-erasure-resolve")
 
         try await app.autoMigrate()
     } else {

@@ -12,16 +12,23 @@ import CoreFoundation
 /// provider passes per deletion round (POSTHOG-DELAYED-INGESTION-OCT9.md):
 ///  1. the queued person event deletion is verified for *this round's* request
 ///     and the profile lookup is empty;
-///  2. once the ingestion-lag window has passed, measured from the later of this
-///     round's deletion request and the subject's last possible in-flight capture,
-///     a Query API count of events carrying the opaque distinct ID is zero and the
-///     profile lookup is still empty.
+///  2. once the ingestion-lag window has passed again, measured from the latest of
+///     pass 1's completion, this round's deletion request and the subject's last
+///     possible in-flight capture, a Query API count of events carrying the opaque
+///     distinct ID is zero and the profile lookup is still empty. Anchoring to pass
+///     1's completion means a slow provider deletion can never shorten the quiet
+///     period (POSTHOG-DELAYED-INGESTION-OCT9.md, correction of 9 October).
 /// PostHog's person deletion removes only events written before its request
 /// (`_timestamp <= created_at` in its source), so data that lands later is
 /// invisible to pass 1. When pass 2 finds data the person deletion is re-issued
 /// for a bounded number of rounds; late events with no resolvable profile, or a
 /// round PostHog does not freshly verify, escalate to manual handling. Every
-/// pass is retained in `measurement_posthog_erasure_passes`.
+/// pass is retained in `measurement_posthog_erasure_passes`, and every manual
+/// escalation carries a durable `ManualReason` (POSTHOG-MANUAL-REMEDIATION.md).
+///
+/// The ingestion-lag window (24 h) and the round limit (3) are PROVISIONAL SANDBOX
+/// PARAMETERS chosen for acceptance testing. They are not PostHog figures and not a
+/// production deletion guarantee.
 enum PostHogErasureService {
     static let liveReceiverAccepted = false
     static let host = "https://eu.posthog.com"
@@ -35,6 +42,46 @@ enum PostHogErasureService {
     /// Deletion rounds per job, the first included. A later round exists only
     /// because pass 2 found data; exhausting them requires manual handling.
     static let maximumRounds = 3
+
+    /// Why a job needs a person (`manual_required`). Written to the job's
+    /// `last_error_kind` and to the receipt's `manual_reason`; the remediation
+    /// procedure is keyed by these exact spellings, which tests pin by hand.
+    enum ManualReason: String, CaseIterable, Sendable, Equatable {
+        /// This round's deletion status is a row created before this round's
+        /// request: PostHog keeps one event deletion per person UUID, so the
+        /// re-issued request queued nothing new and covers nothing written since.
+        case staleReceipt = "posthog_stale_receipt"
+        /// Pass 2 found events for the opaque distinct ID and no profile owns it:
+        /// no supported person deletion reaches those events.
+        case profilelessLateEvents = "posthog_profileless_late_events"
+        /// Event absence cannot be verified: the Query API refused (401, 403 or
+        /// 404, for example a key without Query Read) or did not answer with one
+        /// fresh non-negative count.
+        case unverifiable = "posthog_unverifiable"
+        /// Pass 2 still found late data in the last permitted round.
+        case roundsExhausted = "posthog_rounds_exhausted"
+        /// The first resolution did not find exactly one profile owning only the
+        /// opaque distinct ID (missing, ambiguous or alias-expanded), or a
+        /// re-resolution found a profile that is not exclusively ours.
+        case profileUnresolved = "posthog_profile_unresolved"
+        /// A malformed persons list, or a deletion status for another person,
+        /// malformed, or marked completed without a coherent verification time.
+        case responseInvalid = "posthog_response_invalid"
+        /// The provider refused a request in a way that needs action: a redirect,
+        /// authentication or scope failure, or a non-queued deletion answer.
+        case requestRefused = "posthog_request_refused"
+        /// No successful verification inside the internal observation window.
+        case observationWindowExpired = "posthog_observation_window_expired"
+        /// The receipt is missing a time its phase requires, or has an unknown phase.
+        case receiptInconsistent = "posthog_receipt_inconsistent"
+        /// The job or subject no longer meets the erasure preconditions (lease lost,
+        /// subject not revoked, or the outbox still holds sendable rows).
+        case subjectIneligible = "posthog_subject_ineligible"
+        /// The live gate is closed, the configuration is missing or invalid, or the
+        /// receipt belongs to another project. Same spelling the worker used before.
+        case configuration = "provider_configuration_required"
+    }
+
     struct Configuration: Sendable {
         let projectID: String
         let apiKey: String
@@ -51,7 +98,7 @@ enum PostHogErasureService {
     struct Reply: Sendable { let status: Int; let body: Data }
     typealias Transport = @Sendable (HTTPMethod, URI, HTTPHeaders, Data?) async throws -> Reply
     struct TransportKey: StorageKey { typealias Value = Transport }
-    enum Outcome: Equatable { case completed, pending, retry, manual }
+    enum Outcome: Equatable, Sendable { case completed, pending, retry, manual(ManualReason) }
     private struct ClientKey: StorageKey { typealias Value = PostHogErasureHTTPClient }
     private struct ClientLock: LockKey {}
 
@@ -71,7 +118,7 @@ enum PostHogErasureService {
                      app: Application, now: Date = Date(), on db: Database) async -> Outcome {
         guard app.environment == .testing || liveReceiverAccepted,
               let config = configuration(app), config.valid,
-              let transport = transport(app) else { return .manual }
+              let transport = transport(app) else { return .manual(.configuration) }
         do {
             let sql = try VerifiedIdentityService.sql(db)
             guard let subject = try await sql.raw("""
@@ -83,7 +130,7 @@ enum PostHogErasureService {
                   AND s.purpose='productAnalytics' AND s.state='revoked'
                   AND NOT EXISTS (SELECT 1 FROM measurement_dispatch_jobs d
                     WHERE d.subject_id=s.id AND d.destination='posthog' AND d.state IN ('pending','failing','leased'))
-                """).first() else { return .manual }
+                """).first() else { return .manual(.subjectIneligible) }
             let opaque = try subject.decode(column: "opaque_subject", as: UUID.self).uuidString.lowercased()
             // Latest instant a capture for this subject could still have been in
             // flight when the dispatch barrier was recorded (claim-time lease end).
@@ -104,7 +151,7 @@ enum PostHogErasureService {
                 }
                 let reply = try await transport(.GET, URI(string: base + "?distinct_id=" + opaque), headers, nil)
                 guard reply.status == 200 else { return classifyRead(reply.status) }
-                guard let person = matchedPerson(reply.body, distinctID: opaque) else { return .manual }
+                guard let person = matchedPerson(reply.body, distinctID: opaque) else { return .manual(.profileUnresolved) }
                 // Persist the exact provider person UUID before any delete request.
                 guard try await sql.raw("""
                     INSERT INTO measurement_posthog_erasure_receipts(job_id,posthog_project_id,person_uuid,phase,resolved_at,in_flight_until)
@@ -115,7 +162,9 @@ enum PostHogErasureService {
                     """).first() != nil else { return .retry }
                 return .pending
             }
-            guard try receipt.decode(column: "posthog_project_id", as: String.self) == config.projectID else { return .manual }
+            guard try receipt.decode(column: "posthog_project_id", as: String.self) == config.projectID else {
+                return .manual(.configuration)
+            }
             let person = try receipt.decode(column: "person_uuid", as: UUID.self)
             let phase = try receipt.decode(column: "phase", as: String.self)
             let round = try receipt.decode(column: "round", as: Int.self)
@@ -147,7 +196,7 @@ enum PostHogErasureService {
                     // 5xx/timeout/malformed acceptance are ambiguous; keep the
                     // persisted attempt and poll. Redirects/auth/refusals need action.
                     if reply.status == 202 || (500...599).contains(reply.status) { return .pending }
-                    return .manual
+                    return .manual(.requestRefused)
                 }
                 try await sql.raw("""
                     UPDATE measurement_posthog_erasure_receipts SET phase='polling',queue_acknowledged_at=\(bind:now)
@@ -157,20 +206,31 @@ enum PostHogErasureService {
                 // Acknowledgement only enters polling. A 202 is never a completion.
                 return .pending
             case "submitting", "polling":
-                guard let requested = try receipt.decode(column: "requested_at", as: Date?.self) else { return .manual }
+                guard let requested = try receipt.decode(column: "requested_at", as: Date?.self) else {
+                    return .manual(.receiptInconsistent)
+                }
                 let expired = now.timeIntervalSince(requested) >= observationWindow
                 let reply: Reply
                 do {
                     reply = try await transport(.GET,
                         URI(string: base + "deletion_status/?person_uuid=" + person.uuidString.lowercased() + "&status=all"), headers, nil)
-                } catch { return expired ? .manual : .retry }
-                guard reply.status == 200 else { return expired ? .manual : classifyRead(reply.status) }
+                } catch { return expired ? .manual(.observationWindowExpired) : .retry }
+                guard reply.status == 200 else { return expired ? .manual(.observationWindowExpired) : classifyRead(reply.status) }
                 // The status row must belong to this round's request. A row created
                 // before it (a person whose event deletion was already queued once)
                 // says nothing about data written since, so it is invalid here.
                 switch deletionStatus(reply.body, person: person, requestedAt: requested, now: now) {
-                case .invalid: return .manual
-                case .pending: return expired ? .manual : .pending
+                case .invalid: return .manual(.responseInvalid)
+                case .stale(let created, let verified):
+                    // PostHog keeps one event deletion per person UUID: this round's
+                    // request queued nothing new and the answer is the earlier
+                    // request's row (same created_at). It verifies nothing written
+                    // since that request, so this round can never complete.
+                    try await recordPass(lease, sql, round: round, stage: "deletion", check: "deletion_status",
+                        at: now, person: person, requestedAt: requested, providerVerifiedAt: verified,
+                        providerCreatedAt: created, eventCount: nil, outcome: "stale")
+                    return .manual(.staleReceipt)
+                case .pending: return expired ? .manual(.observationWindowExpired) : .pending
                 case .verified(let created, let verified):
                     return try await db.transaction { tx -> Outcome in
                         let txSQL = try VerifiedIdentityService.sql(tx)
@@ -184,23 +244,29 @@ enum PostHogErasureService {
                             """).first() != nil else { return .retry }
                         try await recordPass(lease, txSQL, round: round, stage: "deletion", check: "deletion_status",
                             at: now, person: person, requestedAt: requested, providerVerifiedAt: verified,
-                            eventCount: nil, outcome: "absent")
+                            providerCreatedAt: created, eventCount: nil, outcome: "absent")
                         return .pending
                     }
                 }
             case "events_verified":
-                guard let requested = try receipt.decode(column: "requested_at", as: Date?.self) else { return .manual }
+                guard let requested = try receipt.decode(column: "requested_at", as: Date?.self) else {
+                    return .manual(.receiptInconsistent)
+                }
                 let expired = now.timeIntervalSince(requested) >= observationWindow
                 // The documented status endpoint verifies events, not profile removal.
                 let reply: Reply
                 do { reply = try await transport(.GET, URI(string: base + "?distinct_id=" + opaque), headers, nil) }
-                catch { return expired ? .manual : .retry }
-                guard reply.status == 200 else { return expired ? .manual : classifyRead(reply.status) }
-                guard let results = list(reply.body) else { return .manual }
-                guard results.isEmpty else { return expired ? .manual : .pending }
-                // Pass 1 is complete. The quiet period starts from the later of this
-                // round's request and the last possible in-flight capture.
-                let quietFrom = max(requested, inFlightUntil ?? requested)
+                catch { return expired ? .manual(.observationWindowExpired) : .retry }
+                guard reply.status == 200 else { return expired ? .manual(.observationWindowExpired) : classifyRead(reply.status) }
+                guard let results = list(reply.body) else { return .manual(.responseInvalid) }
+                guard results.isEmpty else { return expired ? .manual(.observationWindowExpired) : .pending }
+                // Pass 1 is complete. The quiet period runs one full window from the
+                // latest of pass 1's completion (now), this round's request and the
+                // last possible in-flight capture. Anchored to pass 1, a provider
+                // deletion that took longer than the window cannot leave the quiet
+                // period already expired, so pass 2 always sees one more window of
+                // ingestion after the deletion was verified.
+                let quietFrom = max(now, requested, inFlightUntil ?? now)
                 let quietUntil = quietFrom.addingTimeInterval(config.ingestionLagWindow)
                 return try await db.transaction { tx -> Outcome in
                     let txSQL = try VerifiedIdentityService.sql(tx)
@@ -218,17 +284,20 @@ enum PostHogErasureService {
                     return .pending
                 }
             case "quiet":
-                guard let quietUntil = try receipt.decode(column: "quiet_until", as: Date?.self) else { return .manual }
+                guard let quietUntil = try receipt.decode(column: "quiet_until", as: Date?.self) else {
+                    return .manual(.receiptInconsistent)
+                }
                 // No provider request is made, and nothing completes, inside the window.
                 guard now >= quietUntil else { return .pending }
                 let overdue = now.timeIntervalSince(quietUntil) >= observationWindow
-                guard let body = eventCountQuery(distinctID: opaque) else { return .manual }
+                guard let body = eventCountQuery(distinctID: opaque) else { return .manual(.unverifiable) }
                 let reply: Reply
                 do { reply = try await transport(.POST, URI(string: "\(host)/api/projects/\(config.projectID)/query/"), headers, body) }
-                catch { return overdue ? .manual : .retry }
+                catch { return overdue ? .manual(.observationWindowExpired) : .retry }
                 guard reply.status == 200 else {
-                    let outcome: Outcome = overdue ? .manual : classifyRead(reply.status)
-                    if outcome == .manual {
+                    let outcome: Outcome = overdue ? .manual(.observationWindowExpired)
+                        : classifyRead(reply.status, refused: .unverifiable)
+                    if case .manual = outcome {
                         // A key without query access cannot prove event absence.
                         try await recordPass(lease, sql, round: round, stage: "quiet", check: "events", at: now,
                             person: nil, requestedAt: nil, providerVerifiedAt: nil, eventCount: nil, outcome: "unverifiable")
@@ -239,10 +308,10 @@ enum PostHogErasureService {
                 case .invalid:
                     try await recordPass(lease, sql, round: round, stage: "quiet", check: "events", at: now,
                         person: nil, requestedAt: nil, providerVerifiedAt: nil, eventCount: nil, outcome: "unverifiable")
-                    return .manual
+                    return .manual(.unverifiable)
                 case .cached:
                     // A cached answer could predate late data; ask again later.
-                    return overdue ? .manual : .retry
+                    return overdue ? .manual(.observationWindowExpired) : .retry
                 case .count(let count) where count > 0:
                     return try await lateData(lease, round: round, phase: phase, check: "events",
                                               eventCount: count, now: now, on: db)
@@ -263,13 +332,13 @@ enum PostHogErasureService {
                 }
             case "quiet_events_absent":
                 guard let quietUntil = try receipt.decode(column: "quiet_until", as: Date?.self),
-                      now >= quietUntil else { return .manual }
+                      now >= quietUntil else { return .manual(.receiptInconsistent) }
                 let overdue = now.timeIntervalSince(quietUntil) >= observationWindow
                 let reply: Reply
                 do { reply = try await transport(.GET, URI(string: base + "?distinct_id=" + opaque), headers, nil) }
-                catch { return overdue ? .manual : .retry }
-                guard reply.status == 200 else { return overdue ? .manual : classifyRead(reply.status) }
-                guard let results = list(reply.body) else { return .manual }
+                catch { return overdue ? .manual(.observationWindowExpired) : .retry }
+                guard reply.status == 200 else { return overdue ? .manual(.observationWindowExpired) : classifyRead(reply.status) }
+                guard let results = list(reply.body) else { return .manual(.responseInvalid) }
                 guard results.isEmpty else {
                     return try await lateData(lease, round: round, phase: phase, check: "profile",
                                               eventCount: nil, now: now, on: db)
@@ -288,28 +357,40 @@ enum PostHogErasureService {
                     return .completed
                 }
             case "reresolving":
-                guard round < maximumRounds else { return .manual }
+                guard round < maximumRounds else { return .manual(.roundsExhausted) }
                 let quietUntil = try receipt.decode(column: "quiet_until", as: Date?.self)
                 let overdue = quietUntil.map { now.timeIntervalSince($0) >= observationWindow } ?? true
                 let reply: Reply
                 do { reply = try await transport(.GET, URI(string: base + "?distinct_id=" + opaque), headers, nil) }
-                catch { return overdue ? .manual : .retry }
-                guard reply.status == 200 else { return overdue ? .manual : classifyRead(reply.status) }
+                catch { return overdue ? .manual(.observationWindowExpired) : .retry }
+                guard reply.status == 200 else { return overdue ? .manual(.observationWindowExpired) : classifyRead(reply.status) }
+                guard let results = list(reply.body) else { return .manual(.responseInvalid) }
                 // Late events without a resolvable profile have no supported
                 // person-deletion path; an alias-expanded profile is never ours to delete.
-                guard let next = matchedPerson(reply.body, distinctID: opaque) else { return .manual }
-                guard try await sql.raw("""
-                    UPDATE measurement_posthog_erasure_receipts SET round=round+1,phase='resolved',person_uuid=\(bind:next),
-                        resolved_at=\(bind:now),requested_at=NULL,queue_acknowledged_at=NULL,provider_created_at=NULL,
-                        events_verified_at=NULL,profile_absent_at=NULL,in_flight_until=NULL,quiet_until=NULL
-                    WHERE job_id=\(bind:jobID) AND phase='reresolving' AND round<\(bind:maximumRounds) AND EXISTS (
-                      SELECT 1 FROM measurement_erasure_jobs j WHERE j.id=\(bind:jobID)
-                        AND j.lease_token=\(bind:leaseToken) AND j.state='leased' AND j.lease_expires_at>\(bind:now))
-                    RETURNING job_id
-                    """).first() != nil else { return .retry }
-                return .pending
+                guard let next = matchedPerson(reply.body, distinctID: opaque) else {
+                    try await recordPass(lease, sql, round: round, stage: "reresolve", check: "profile", at: now,
+                        person: nil, requestedAt: nil, providerVerifiedAt: nil, eventCount: nil,
+                        outcome: results.isEmpty ? "absent" : "present")
+                    return .manual(results.isEmpty ? .profilelessLateEvents : .profileUnresolved)
+                }
+                return try await db.transaction { tx -> Outcome in
+                    let txSQL = try VerifiedIdentityService.sql(tx)
+                    guard try await txSQL.raw("""
+                        UPDATE measurement_posthog_erasure_receipts SET round=round+1,phase='resolved',person_uuid=\(bind:next),
+                            resolved_at=\(bind:now),requested_at=NULL,queue_acknowledged_at=NULL,provider_created_at=NULL,
+                            events_verified_at=NULL,profile_absent_at=NULL,in_flight_until=NULL,quiet_until=NULL
+                        WHERE job_id=\(bind:jobID) AND phase='reresolving' AND round<\(bind:maximumRounds) AND EXISTS (
+                          SELECT 1 FROM measurement_erasure_jobs j WHERE j.id=\(bind:jobID)
+                            AND j.lease_token=\(bind:leaseToken) AND j.state='leased' AND j.lease_expires_at>\(bind:now))
+                        RETURNING job_id
+                        """).first() != nil else { return .retry }
+                    // The observation that starts the next round belongs to this round.
+                    try await recordPass(lease, txSQL, round: round, stage: "reresolve", check: "profile", at: now,
+                        person: next, requestedAt: nil, providerVerifiedAt: nil, eventCount: nil, outcome: "present")
+                    return .pending
+                }
             default:
-                return .manual
+                return .manual(.receiptInconsistent)
             }
         } catch { return .retry }
     }
@@ -334,20 +415,20 @@ enum PostHogErasureService {
             }
             try await recordPass(lease, sql, round: round, stage: "quiet", check: check, at: now,
                 person: nil, requestedAt: nil, providerVerifiedAt: nil, eventCount: eventCount, outcome: "present")
-            return another ? .pending : .manual
+            return another ? .pending : .manual(.roundsExhausted)
         }
     }
 
     private static func recordPass(_ lease: Lease, _ sql: SQLDatabase, round: Int, stage: String, check: String,
                                    at checkedAt: Date, person: UUID?, requestedAt: Date?, providerVerifiedAt: Date?,
-                                   eventCount: Int?, outcome: String) async throws {
+                                   providerCreatedAt: Date? = nil, eventCount: Int?, outcome: String) async throws {
         try await sql.raw("""
             INSERT INTO measurement_posthog_erasure_passes(job_id,sequence,round,stage,check_kind,checked_at,
-                person_uuid,requested_at,provider_verified_at,event_count,outcome)
+                person_uuid,requested_at,provider_verified_at,provider_created_at,event_count,outcome)
             SELECT r.job_id,COALESCE((SELECT MAX(p.sequence) FROM measurement_posthog_erasure_passes p
                      WHERE p.job_id=r.job_id),0)+1,
                    \(bind:round),\(bind:stage),\(bind:check),\(bind:checkedAt),\(bind:person),\(bind:requestedAt),
-                   \(bind:providerVerifiedAt),\(bind:eventCount),\(bind:outcome)
+                   \(bind:providerVerifiedAt),\(bind:providerCreatedAt),\(bind:eventCount),\(bind:outcome)
             FROM measurement_posthog_erasure_receipts r JOIN measurement_erasure_jobs j ON j.id=r.job_id
             WHERE r.job_id=\(bind:lease.job) AND j.lease_token=\(bind:lease.token) AND j.state='leased'
             """).run()
@@ -362,8 +443,18 @@ enum PostHogErasureService {
             """).run()
     }
 
-    private static func classifyRead(_ status: Int) -> Outcome {
-        [408, 425, 429].contains(status) || (500...599).contains(status) ? .retry : .manual
+    private static func classifyRead(_ status: Int, refused: ManualReason = .requestRefused) -> Outcome {
+        [408, 425, 429].contains(status) || (500...599).contains(status) ? .retry : .manual(refused)
+    }
+
+    /// Called by the erasure worker in the same transaction that moves the job to
+    /// `manual_required`, so the receipt and the job always carry the same reason.
+    /// A job escalated before any receipt existed keeps its reason on the job only.
+    static func recordManual(jobID: UUID, reason: ManualReason, at date: Date, on sql: SQLDatabase) async throws {
+        try await sql.raw("""
+            UPDATE measurement_posthog_erasure_receipts SET manual_reason=\(bind:reason.rawValue),manual_at=\(bind:date)
+            WHERE job_id=\(bind:jobID)
+            """).run()
     }
 
     private static func object(_ data: Data) -> [String: Any]? {
@@ -391,15 +482,27 @@ enum PostHogErasureService {
               let errors = object["deletion_errors"] as? [Any], errors.isEmpty else { return false }
         return true
     }
-    enum DeletionStatus: Equatable { case invalid, pending, verified(created: Date, verified: Date) }
+    enum DeletionStatus: Equatable {
+        case invalid, pending
+        /// The single row for this person was created before this round's request.
+        case stale(created: Date, verified: Date?)
+        case verified(created: Date, verified: Date)
+    }
     static func deletionStatus(_ data: Data, person: UUID, requestedAt: Date, now: Date) -> DeletionStatus {
         guard let rows = list(data) else { return .invalid }
         guard !rows.isEmpty else { return .pending }
         guard rows.count == 1, let uuid = rows[0]["person_uuid"] as? String,
               UUID(uuidString: uuid) == person,
               let text = rows[0]["created_at"] as? String, let created = date(text),
-              created >= requestedAt.addingTimeInterval(-5), created <= now.addingTimeInterval(300),
+              created <= now.addingTimeInterval(300),
               let status = rows[0]["status"] as? String else { return .invalid }
+        // PostHog's (deletion_type, key) uniqueness: a re-issued deletion for the same
+        // person UUID returns the original row. It is evidence of the earlier request
+        // only, whatever its status says.
+        if created < requestedAt.addingTimeInterval(-5) {
+            let verified = (rows[0]["delete_verified_at"] as? String).flatMap { date($0) }
+            return .stale(created: created, verified: verified)
+        }
         if status == "pending", rows[0]["delete_verified_at"] is NSNull { return .pending }
         guard status == "completed", let verifiedText = rows[0]["delete_verified_at"] as? String,
               let verified = date(verifiedText), verified >= created,

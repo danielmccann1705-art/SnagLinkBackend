@@ -43,7 +43,15 @@ final class PostHogErasureContractTests: XCTestCase {
         XCTAssertEqual(PostHogErasureService.deletionStatus(try data(["results": []]),
             person: person, requestedAt: now, now: now), .pending)
         XCTAssertEqual(try status(["person_uuid": UUID().uuidString]), .invalid)
-        XCTAssertEqual(try status(["created_at": ISO8601DateFormatter().string(from: now.addingTimeInterval(-60))]), .invalid)
+        // A row created before this round's request is the earlier request's receipt.
+        let earlier = ISO8601DateFormatter().string(from: now.addingTimeInterval(-60))
+        if case .stale(let created, let verified) = try status(["created_at": earlier]) {
+            XCTAssertLessThan(created, now.addingTimeInterval(-5))
+            XCTAssertNotNil(verified)
+        } else { XCTFail("Expected a stale receipt") }
+        if case .stale(_, let verified) = try status(["created_at": earlier, "status": "pending", "delete_verified_at": NSNull()]) {
+            XCTAssertNil(verified)
+        } else { XCTFail("A pending earlier row is stale too") }
         XCTAssertEqual(try status(["delete_verified_at": NSNull()]), .invalid)
         XCTAssertEqual(try status(["status": "pending", "delete_verified_at": NSNull()]), .pending)
         if case .verified = try status([:]) {} else { XCTFail("Expected explicit verified receipt") }
@@ -72,6 +80,28 @@ final class PostHogErasureContractTests: XCTestCase {
         XCTAssertFalse(PostHogErasureService.Configuration(projectID: "123", apiKey: key, ingestionLagWindow: .nan).valid)
         XCTAssertTrue(PostHogErasureService.Configuration(projectID: "123", apiKey: key).valid)
         XCTAssertEqual(PostHogErasureService.Configuration(projectID: "123", apiKey: key).ingestionLagWindow, 86_400)
+    }
+
+    /// Durable reason spellings, written out by hand: POSTHOG-MANUAL-REMEDIATION.md
+    /// and the receipt check are keyed by them.
+    func testManualReasonSpellingsArePinned() {
+        let pinned: [PostHogErasureService.ManualReason: String] = [
+            .staleReceipt: "posthog_stale_receipt",
+            .profilelessLateEvents: "posthog_profileless_late_events",
+            .unverifiable: "posthog_unverifiable",
+            .roundsExhausted: "posthog_rounds_exhausted",
+            .profileUnresolved: "posthog_profile_unresolved",
+            .responseInvalid: "posthog_response_invalid",
+            .requestRefused: "posthog_request_refused",
+            .observationWindowExpired: "posthog_observation_window_expired",
+            .receiptInconsistent: "posthog_receipt_inconsistent",
+            .subjectIneligible: "posthog_subject_ineligible",
+            .configuration: "provider_configuration_required",
+        ]
+        for (reason, spelling) in pinned { XCTAssertEqual(reason.rawValue, spelling) }
+        XCTAssertEqual(pinned.count, PostHogErasureService.ManualReason.allCases.count,
+                       "a reason was added or removed without being written down here")
+        XCTAssertEqual(Set(pinned.values).count, pinned.count)
     }
 
     func testConfigCannotRedirectProjectOrIncludeMalformedCredential() {
@@ -176,6 +206,10 @@ final class PostHogErasureTests: XCTestCase {
     private func jobState() async throws -> String {
         try await sql.raw("SELECT state FROM measurement_erasure_jobs WHERE id=\(bind:job)").first()!.decode(column: "state", as: String.self)
     }
+    private func lastErrorKind() async throws -> String? {
+        try await sql.raw("SELECT last_error_kind FROM measurement_erasure_jobs WHERE id=\(bind:job)").first()!
+            .decode(column: "last_error_kind", as: String?.self)
+    }
 
     func testProfilelessExposureRequiresManualHandlingAndIsNeverErasedBy202() async throws {
         let recorder = PostHogErasureRecorder([try reply(["results": [], "next": NSNull()])])
@@ -183,6 +217,7 @@ final class PostHogErasureTests: XCTestCase {
         let counts = try await runDue(); XCTAssertEqual(counts.manualRequired, 1); XCTAssertEqual(counts.completed, 0)
         let calls = await recorder.calls(); XCTAssertEqual(calls.map(\.method), ["GET"])
         let state = try await jobState(); XCTAssertEqual(state, "manual_required")
+        let reason = try await lastErrorKind(); XCTAssertEqual(reason, "posthog_profile_unresolved")
     }
 
     func testAcceptedDeleteNeedsVerifiedEventsAndAbsentProfileAcrossRestart() async throws {
@@ -259,6 +294,9 @@ final class PostHogErasureTests: XCTestCase {
         _ = try await runDue(); _ = try await runDue()
         let empty = try await runDue(); XCTAssertEqual(empty.pending, 1); XCTAssertEqual(empty.completed, 0)
         let malformed = try await runDue(); XCTAssertEqual(malformed.manualRequired, 1); XCTAssertEqual(malformed.completed, 0)
+        let reason = try await lastErrorKind(); XCTAssertEqual(reason, "posthog_response_invalid")
+        let manual = try await sql.raw("SELECT manual_reason FROM measurement_posthog_erasure_receipts WHERE job_id=\(bind:job)").first()
+        XCTAssertEqual(try manual?.decode(column: "manual_reason", as: String?.self), "posthog_response_invalid")
     }
 
     func testProjectChangeCannotRedirectPersistedDeletionReceipt() async throws {
@@ -268,6 +306,7 @@ final class PostHogErasureTests: XCTestCase {
         app.storage[PostHogErasureService.ConfigurationKey.self] = .init(projectID: "999", apiKey: config.apiKey)
         let counts = try await runDue(); XCTAssertEqual(counts.manualRequired, 1)
         let calls = await recorder.calls(); XCTAssertEqual(calls.count, 1)
+        let reason = try await lastErrorKind(); XCTAssertEqual(reason, "provider_configuration_required")
     }
 
     func testMissingStatusAfterSevenDaysEscalatesWithoutLosingReceiptOrRepeatingDelete() async throws {
@@ -284,6 +323,7 @@ final class PostHogErasureTests: XCTestCase {
         XCTAssertEqual(try receipt?.decode(column: "phase", as: String.self), "submitting")
         XCTAssertEqual(try receipt?.decode(column: "person_uuid", as: UUID.self), person)
         let calls = await recorder.calls(); XCTAssertEqual(calls.filter { $0.method == "POST" }.count, 1)
+        let reason = try await lastErrorKind(); XCTAssertEqual(reason, "posthog_observation_window_expired")
     }
 
     func testAuthenticationFailureCannotCompleteOrEraseReceipt() async throws {
@@ -296,6 +336,7 @@ final class PostHogErasureTests: XCTestCase {
         let later = try await runDue()
         XCTAssertEqual(later.completed, 0); XCTAssertEqual(later.pending, 0); XCTAssertEqual(later.manualRequired, 0)
         let calls = await recorder.calls(); XCTAssertEqual(calls.count, 2, "manual_required cannot automatically re-enter the worker")
+        let reason = try await lastErrorKind(); XCTAssertEqual(reason, "posthog_request_refused")
     }
 }
 
