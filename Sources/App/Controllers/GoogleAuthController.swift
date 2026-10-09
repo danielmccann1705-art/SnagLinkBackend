@@ -77,17 +77,22 @@ struct GoogleAuthController: RouteCollection {
         guard input.verifier == nil, (32...128).contains(input.challengeToken.utf8.count), let binding = RequestCredentialCookie.value(Self.bindingCookie(for: input.challengeToken), on: req) else { throw contextError() }
         let context = try await GoogleIdentityChallengeService.context(input.challengeToken, purpose: .signIn, surface: .web, binding: binding, platform: platform, provider: provider, on: req.db)
         let proof = try await GoogleIdentityVerifier.verify(input.identityToken, surface: .web, nonceHash: context.nonceHash, challengeCreatedAt: context.createdAt, config: provider, on: req)
+        let application = req.application
         let result = try await req.db.transaction { db in
             _ = try await GoogleIdentityChallengeService.consume(input.challengeToken, purpose: .signIn, surface: .web, binding: binding, platform: platform, provider: provider, on: db)
             let resolution = try await GoogleIdentityService.resolveOutcome(proof, on: db)
             let session = try await BrowserSessionService.create(for: resolution.user, config: platform, on: db)
-            return (resolution, session)
+            // Optional portal sign-in funnel candidate for exactly this new session.
+            let signIn = await ProductFunnelMeasurement.signInCandidate(account: resolution.user, sessionID: session.principal.sessionID,
+                provider: .google, surface: .web, app: application, on: db)
+            return (resolution, session, signIn)
         }
         let response = Response(status: .ok)
         try response.content.encode(try await BrowserAuthController().response(for: result.0.user, csrf: result.1.principal.csrfToken, on: req.db))
         response.cookies[BrowserSessionService.cookieName] = BrowserSessionService.cookie(result.1.token, maxAge: Int(BrowserSessionService.lifetime))
         response.cookies[Self.bindingCookie(for: input.challengeToken)] = BrowserSessionService.cookie("", maxAge: 0)
         response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        await ProductFunnelMeasurement.record(result.2, app: application, on: req.db)
         return response
     }
 
@@ -120,17 +125,21 @@ struct GoogleAuthController: RouteCollection {
         let proof = try await GoogleIdentityVerifier.verify(input.identityToken, surface: .ios, nonceHash: context.nonceHash, challengeCreatedAt: context.createdAt, config: provider, on: req)
         let measurement = input.measurementContext?.value
         let application = req.application
-        let resolution = try await req.db.transaction { db in
+        let sessionID = UUID()
+        let (resolution, signIn) = try await req.db.transaction { db in
             let challenge = try await GoogleIdentityChallengeService.consume(input.challengeToken, purpose: .signIn, surface: .ios, binding: verifier, platform: platform, provider: provider, on: db)
             let resolution = try await GoogleIdentityService.resolveOutcome(proof, on: db)
             // Never throws and never changes the authentication result.
             await SignupIntentService.settle(.googleChallenge(challenge.id), context: measurement,
                                              resolution: resolution, app: application, on: db)
-            return resolution
+            let signIn = await ProductFunnelMeasurement.signInCandidate(account: resolution.user, sessionID: sessionID,
+                provider: .google, surface: .ios, app: application, on: db)
+            return (resolution, signIn)
         }
         let response = Response(status: .ok)
-        try response.content.encode(AuthController().issueAuthResponse(for: resolution, on: req))
+        try response.content.encode(AuthController().issueAuthResponse(for: resolution, sessionID: sessionID, on: req))
         response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        await ProductFunnelMeasurement.record(signIn, app: application, on: req.db)
         return response
     }
 

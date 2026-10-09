@@ -75,18 +75,26 @@ struct AppleWebAuthController: RouteCollection {
             throw AppleWebIdentityService.exchangeUnavailable()
         }
         let session: (token: String, principal: BrowserPrincipal)
+        let signIn: MeasurementRelayService.OutcomeCandidate?
+        let application = req.application
         do {
             let proof = try await AppleWebIdentityService.verify(tokens.idToken, context: context, configuration: provider, req: req)
-            session = try await VerifiedIdentityService.transactionRetryingIdentityRace(on: req.db) { db in
+            let outcome = try await VerifiedIdentityService.transactionRetryingIdentityRace(on: req.db) { db in
                 // Front-channel user/name JSON is not identity proof and is ignored.
                 let resolution = try await AppleWebIdentityService.resolveOutcome(proof, name: nil, on: db)
                 let user = resolution.user
                 if proof.emailVerified, let email = proof.email {
                     _ = try await VerifiedIdentityService.adoptProviderVerifiedEmail(email, to: user.requireID(), on: db)
                 }
-                try await AppleWebCredentialEscrowService.adopt(held, userID: user.requireID(), app: req.application, on: db)
-                return try await BrowserSessionService.create(for: user, config: platform, on: db)
+                try await AppleWebCredentialEscrowService.adopt(held, userID: user.requireID(), app: application, on: db)
+                let created = try await BrowserSessionService.create(for: user, config: platform, on: db)
+                // Optional portal sign-in funnel candidate for exactly this new session.
+                let candidate = await ProductFunnelMeasurement.signInCandidate(account: user, sessionID: created.principal.sessionID,
+                    provider: .apple, surface: .web, app: application, on: db)
+                return (created, candidate)
             }
+            session = outcome.0
+            signIn = outcome.1
         } catch {
             // If this update fails, the existing durable hold expires and the
             // maintenance worker still discovers and revokes the credential.
@@ -98,6 +106,7 @@ struct AppleWebAuthController: RouteCollection {
         response.headers.replaceOrAdd(name: .location, value: "/")
         response.cookies[BrowserSessionService.cookieName] = BrowserSessionService.cookie(session.token, maxAge: Int(BrowserSessionService.lifetime))
         response.cookies[Self.bindingCookie(for: input.state)] = Self.challengeCookie("", maxAge: 0)
+        await ProductFunnelMeasurement.record(signIn, app: application, on: req.db)
         return response
     }
     private func settings(_ req: Request) throws -> (PlatformConfiguration, AppleWebConfiguration) {

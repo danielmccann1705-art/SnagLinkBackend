@@ -392,7 +392,11 @@ final class MeasurementPrivacyTests: XCTestCase {
         let subject = try XCTUnwrap(subjectRow?.decode(column: "id", as: UUID.self))
 
         let withdrawalRequest = UUID()
-        let withdrawn = try await put("productAnalytics", requestID: withdrawalRequest, expected: revision, decision: "withdrawn")
+        // One occurrence time for the request and its exact replay: a fresh Date() for
+        // the replay changed the body whenever a second boundary passed between calls.
+        let withdrawnAt = Date()
+        let withdrawn = try await put("productAnalytics", requestID: withdrawalRequest, expected: revision, decision: "withdrawn",
+                                      occurredAt: withdrawnAt)
         XCTAssertEqual(withdrawn.status, .ok, withdrawn.body.string)
         let state = try permission("productAnalytics", in: withdrawn)
         XCTAssertEqual(state["decision"] as? String, "withdrawn")
@@ -410,8 +414,9 @@ final class MeasurementPrivacyTests: XCTestCase {
         XCTAssertEqual(try jobs[0].decode(column: "destination", as: String.self), "posthog")
         XCTAssertEqual(try jobs[0].decode(column: "state", as: String.self), "completed")
 
-        let replay = try await put("productAnalytics", requestID: withdrawalRequest, expected: revision, decision: "withdrawn")
-        XCTAssertEqual(replay.status, .ok)
+        let replay = try await put("productAnalytics", requestID: withdrawalRequest, expected: revision, decision: "withdrawn",
+                                   occurredAt: withdrawnAt)
+        XCTAssertEqual(replay.status, .ok, replay.body.string)
         let erasureCount = try await sql.raw("SELECT count(*) AS n FROM measurement_erasure_jobs WHERE subject_id=\(bind:subject)").first()!.decode(column: "n", as: Int.self)
         XCTAssertEqual(erasureCount, 1)
 
@@ -1040,6 +1045,118 @@ final class MeasurementPrivacyTests: XCTestCase {
             """).first()!.decode(column: "n", as: Int.self)
         XCTAssertEqual(providerRefunds, 2, "both authenticated provider deliveries remain audit evidence")
         XCTAssertEqual(refundJobs, 1, "one economic refund may have only one canonical outbound fact")
+    }
+
+    /// Pro funnel (FUNNELS-OCT9.md): restore is never a new paid product event.
+    func testRevenueCatRestoreAndRestoreDiscoveredHistoryNeverBecomeANewPaidProductEvent() async throws {
+        app.storage[RevenueCatMeasurementService.ConfigurationKey.self] = .init(
+            authorization: "Bearer synthetic-webhook-secret", appID: "synthetic-rc-app")
+        try await enable("productAnalyticsEnabled")
+        _ = try await put("productAnalytics", decision: "granted")
+        // Consent long predates every purchase below, so only the restore rule decides.
+        try await sql.raw("""
+            UPDATE measurement_permission_current SET updated_at=updated_at - INTERVAL '90 days'
+            WHERE account_id=\(bind:userID) AND purpose='productAnalytics'
+            """).run()
+
+        // Restore and transfer deliveries are unsupported provider types: no fact at all.
+        for type in ["RESTORE", "TRANSFER"] {
+            let refused = try await webhook(revenueCatBody(transaction: "restore-\(type.lowercased())", type: type))
+            XCTAssertEqual(refused.status, .badRequest, type)
+        }
+        // A store transaction RevenueCat first learns about during a restore arrives as
+        // INITIAL_PURCHASE with its original purchase time: kept as money, never relayed new.
+        let now = Date()
+        let historic = try await webhook(revenueCatBody(transaction: "restore-discovered", eventTimestamp: now,
+                                                        purchasedAt: now.addingTimeInterval(-30 * 86_400)))
+        XCTAssertEqual(historic.status, .ok)
+        let historicTrial = try await webhook(revenueCatBody(transaction: "restore-discovered-trial", eventTimestamp: now,
+                                                             purchasedAt: now.addingTimeInterval(-30 * 86_400), price: 0))
+        XCTAssertEqual(historicTrial.status, .ok)
+        // A genuine new purchase relays once, and the same transaction reported again under
+        // another provider event ID (for example after a restore on another device) adds nothing.
+        let purchasedAt = now.addingTimeInterval(-60)
+        let fresh = try await webhook(revenueCatBody(transaction: "fresh-purchase", eventTimestamp: now, purchasedAt: purchasedAt))
+        XCTAssertEqual(fresh.status, .ok)
+        let reported = try await webhook(revenueCatBody(transaction: "fresh-purchase", eventID: UUID().uuidString,
+                                                        eventTimestamp: now, purchasedAt: purchasedAt))
+        XCTAssertEqual(reported.status, .ok)
+
+        let charges = try await sql.raw("SELECT count(*) AS n FROM measurement_revenuecat_events WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
+        XCTAssertEqual(charges, 2, "the money ledger keeps the restore-discovered charge and one fresh charge")
+        let relayed = try await sql.raw("""
+            SELECT payload->>'event' AS event,payload->>'lifecycleKind' AS kind FROM measurement_dispatch_jobs
+            WHERE account_id=\(bind:userID) AND destination='posthog'
+            """).all()
+        XCTAssertEqual(relayed.count, 1)
+        XCTAssertEqual(try relayed.first?.decode(column: "event", as: String.self), "subscription_payment")
+        XCTAssertEqual(try relayed.first?.decode(column: "kind", as: String.self), "initial_purchase")
+        XCTAssertTrue(RevenueCatMeasurementService.newPurchaseLag <= 3 * 86_400)
+    }
+
+    /// Pro funnel: refund, cancellation notice and expiry each map to exactly one bounded
+    /// product event under provider replay, and dispatch still re-checks permission.
+    func testRevenueCatRefundCancellationAndExpiryEachMapToOneBoundedProductEvent() async throws {
+        app.storage[RevenueCatMeasurementService.ConfigurationKey.self] = .init(
+            authorization: "Bearer synthetic-webhook-secret", appID: "synthetic-rc-app")
+        app.storage[MeasurementDispatchService.ConfigurationKey.self] = .init(
+            postHogProjectKey: "phc_synthetic", postHogEnvironment: .sandbox,
+            singularURL: nil, singularAPIKey: nil, linkedInAccessToken: nil,
+            linkedInSignupRule: nil, linkedInSubscriptionRule: nil, linkedInEnvironment: nil)
+        let recorder = MeasurementHTTPRecorder()
+        app.storage[MeasurementDispatchService.TransportKey.self] = recorder.transport
+        try await enable("productAnalyticsEnabled")
+        let grant = try await put("productAnalytics", decision: "granted")
+        let revision = try uuid(try permission("productAnalytics", in: grant)["revision"])
+        let purchasedAt = Date().addingTimeInterval(1)
+        let bodies = [
+            try revenueCatBody(transaction: "lifecycle-once", eventID: "lifecycle-charge", eventTimestamp: Date().addingTimeInterval(2),
+                               purchasedAt: purchasedAt),
+            try revenueCatBody(transaction: "lifecycle-once", type: "CANCELLATION", eventID: "lifecycle-refund",
+                               eventTimestamp: Date().addingTimeInterval(3), purchasedAt: purchasedAt, price: -14.99,
+                               cancellationReason: "CUSTOMER_SUPPORT"),
+            try revenueCatBody(transaction: "lifecycle-notices", type: "CANCELLATION", eventID: "lifecycle-cancel",
+                               eventTimestamp: Date().addingTimeInterval(4), purchasedAt: purchasedAt, cancellationReason: "UNSUBSCRIBE"),
+            try revenueCatBody(transaction: "lifecycle-notices", type: "EXPIRATION", eventID: "lifecycle-expiry",
+                               eventTimestamp: Date().addingTimeInterval(5), purchasedAt: purchasedAt, price: 0,
+                               expirationReason: "UNSUBSCRIBE")
+        ]
+        for body in bodies + bodies {
+            let response = try await webhook(body)
+            XCTAssertEqual(response.status, .ok, response.body.string)
+        }
+        let rows = try await sql.raw("""
+            SELECT payload->>'event' AS event,payload::text AS payload FROM measurement_dispatch_jobs
+            WHERE account_id=\(bind:userID) AND destination='posthog' ORDER BY payload->>'event'
+            """).all()
+        let events = try rows.map { try $0.decode(column: "event", as: String.self) }
+        XCTAssertEqual(events, ["subscription_cancellation_notice", "subscription_expiration_notice",
+                                "subscription_payment", "subscription_refund"])
+        for row in rows {
+            let payload = try row.decode(column: "payload", as: String.self)
+            let keys = Set(try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any]).keys)
+            XCTAssertTrue(keys.isSubset(of: ["event", "occurredAt", "currency", "amount", "lifecycleKind", "reason"]), payload)
+            for forbidden in ["lifecycle-once", "lifecycle-notices", "lifecycle-charge", "must-never-be-stored",
+                              "com.snaglist.pro", userID.uuidString, userID.uuidString.lowercased()] {
+                XCTAssertFalse(payload.contains(forbidden), payload)
+            }
+        }
+        // Product analytics never grants or changes an entitlement.
+        let tierRow = try await sql.raw("""
+            SELECT subscription_tier,subscription_verified_until FROM users WHERE id=\(bind:userID)
+            """).first()
+        let tier = try XCTUnwrap(tierRow)
+        XCTAssertEqual(try tier.decode(column: "subscription_tier", as: String.self), SubscriptionTier.free.rawValue)
+        XCTAssertNil(try tier.decode(column: "subscription_verified_until", as: Date?.self))
+
+        let withdrawn = try await put("productAnalytics", expected: revision, decision: "withdrawn")
+        XCTAssertEqual(withdrawn.status, .ok, withdrawn.body.string)
+        _ = await MeasurementDispatchService.run(app: app, on: app.db)
+        let calls = await recorder.calls()
+        XCTAssertTrue(calls.isEmpty, "withdrawal before dispatch suppresses every queued lifecycle event")
+        let states = try await sql.raw("SELECT DISTINCT state FROM measurement_dispatch_jobs WHERE account_id=\(bind:userID)").all()
+            .map { try $0.decode(column: "state", as: String.self) }
+        XCTAssertEqual(states, ["suppressed"])
     }
 
     func testRevenueCatRefundMustMatchChargeCurrencyAndAmountAndConflictStaysQuarantined() async throws {

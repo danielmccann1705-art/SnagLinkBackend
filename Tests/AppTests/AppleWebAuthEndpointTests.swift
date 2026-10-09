@@ -126,6 +126,58 @@ final class AppleWebAuthEndpointTests: XCTestCase {
         assertPrivateFailure(try await callback(started), status: .gone)
         XCTAssertEqual(fixture.exchangeCount, 1)
     }
+    /// Portal Apple sign-in is a `sign_in_succeeded{provider=apple,surface=web}` only for an
+    /// account whose product permission predates the issued session (FUNNELS-OCT9.md).
+    func testPortalAppleSignInRecordsOneWebSignInOnlyWithPriorProductPermission() async throws {
+        let subject = "funnel-web-apple-" + UUID().uuidString
+        let account = try await app.db.transaction { db in
+            try await VerifiedIdentityService.resolveApple(subject: subject, email: nil, name: "Synthetic portal manager", on: db)
+        }
+        let accountID = try account.requireID()
+        let sql = try VerifiedIdentityService.sql(app.db)
+        func signIns() async throws -> [String] {
+            try await sql.raw("""
+                SELECT (properties->>'provider') || '/' || (properties->>'surface') AS value,
+                       (SELECT count(*) FROM jsonb_object_keys(properties)) AS keys
+                FROM measurement_product_events
+                WHERE account_id=\(bind:accountID) AND event_name='sign_in_succeeded' ORDER BY occurred_at
+                """).all().map { "\(try $0.decode(column: "value", as: String.self)):\(try $0.decode(column: "keys", as: Int.self))" }
+        }
+        try await FeatureFlag.query(on: app.db).filter(\.$key == "productAnalyticsEnabled").delete()
+        try await FeatureFlag(key: "productAnalyticsEnabled", enabled: true).save(on: app.db)
+        do {
+            let unconsented = try await start()
+            fixture.configure(token: try token(unconsented, subject: subject))
+            let before = try await callback(unconsented)
+            XCTAssertEqual(before.status, .seeOther, before.body.string)
+            let none = try await signIns()
+            XCTAssertTrue(none.isEmpty, "no permission existed when that portal session was issued")
+
+            let bearer = try app.jwt.signers.sign(UserJWTPayload(subject: .init(value: accountID.uuidString),
+                expiration: .init(value: Date().addingTimeInterval(3600)), userId: accountID))
+            var granted: XCTHTTPResponse!
+            try await app.test(.PUT, "api/v2/measurement/permissions/productAnalytics", beforeRequest: { req in
+                req.headers.bearerAuthorization = .init(token: bearer)
+                try req.content.encode(["requestId": UUID().uuidString, "decision": "granted",
+                                        "occurredAt": ISO8601DateFormatter().string(from: Date())])
+            }, afterResponse: { response async in granted = response })
+            XCTAssertEqual(granted.status, .ok, granted.body.string)
+
+            let consented = try await start()
+            fixture.configure(token: try token(consented, subject: subject))
+            let after = try await callback(consented)
+            XCTAssertEqual(after.status, .seeOther, after.body.string)
+            let sessionCookie = try XCTUnwrap(after.headers["set-cookie"].first { $0.hasPrefix(BrowserSessionService.cookieName + "=") })
+            try await app.test(.GET, "api/v2/auth/session", beforeRequest: {
+                $0.headers.add(name: "Cookie", value: sessionCookie.components(separatedBy: ";")[0])
+            }, afterResponse: { result async in XCTAssertEqual(result.status, .ok) })
+            let recorded = try await signIns()
+            XCTAssertEqual(recorded, ["apple/web:2"], "one event for the issued session; restoring it adds none")
+        }
+        try? await sql.raw("DELETE FROM measurement_dispatch_jobs WHERE account_id=\(bind:accountID)").run()
+        try? await sql.raw("DELETE FROM measurement_product_events WHERE account_id=\(bind:accountID)").run()
+        try? await FeatureFlag.query(on: app.db).filter(\.$key == "productAnalyticsEnabled").delete()
+    }
     func testUnknownExpiredAndWrongStateNeverExchangeCode() async throws {
         let started = try await start()
         let unknown = Started(state: String(repeating: "x", count: 43), nonce: started.nonce,

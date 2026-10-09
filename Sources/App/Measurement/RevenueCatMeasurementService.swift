@@ -130,12 +130,14 @@ enum RevenueCatMeasurementService {
                                                              purchasedAt: fact.purchasedAt, on: sql) {
                 if let chargeID, chargeDispatchEligible,
                    let currency = fact.currency, let amount = fact.monetaryDelta {
-                    let payload = try canonicalJSON(["event": "subscription_payment", "occurredAt": iso(fact.eventGeneratedAt),
-                                                     "currency": currency, "amount": amount,
-                                                     "lifecycleKind": fact.kind.rawValue])
-                    try await enqueue(destination: "posthog", sourceKind: "revenueCatLifecycle", sourceID: chargeID,
-                                      accountID: fact.accountID, permission: permission, installationID: nil,
-                                      payload: payload, now: now, on: sql)
+                    if relaysAsNewPurchase(fact) {
+                        let payload = try canonicalJSON(["event": "subscription_payment", "occurredAt": iso(fact.eventGeneratedAt),
+                                                         "currency": currency, "amount": amount,
+                                                         "lifecycleKind": fact.kind.rawValue])
+                        try await enqueue(destination: "posthog", sourceKind: "revenueCatLifecycle", sourceID: chargeID,
+                                          accountID: fact.accountID, permission: permission, installationID: nil,
+                                          payload: payload, now: now, on: sql)
+                    }
                     try await enqueueResolvedAdjustments(accountID: fact.accountID, chargeKeyHash: fact.chargeKeyHash,
                                                          now: now, on: sql)
                 } else if [.refund, .refundReversal].contains(fact.effect), lifecycleResolution == "resolved" {
@@ -144,7 +146,8 @@ enum RevenueCatMeasurementService {
                     // also handles reversal-before-refund arrival order.
                     try await enqueueResolvedAdjustments(accountID: fact.accountID, chargeKeyHash: fact.chargeKeyHash,
                                                          now: now, on: sql)
-                } else if fact.isResolved, fact.effect != .charge, lifecycleResolution == "resolved" {
+                } else if fact.isResolved, fact.effect != .charge, lifecycleResolution == "resolved",
+                          relaysAsNewPurchase(fact) {
                     let payload = try lifecyclePayload(fact)
                     try await enqueue(destination: "posthog", sourceKind: "revenueCatEvent", sourceID: lifecycleID,
                                       accountID: fact.accountID, permission: permission, installationID: nil,
@@ -160,6 +163,21 @@ enum RevenueCatMeasurementService {
     private struct Permission {
         let subjectID: UUID
         let revision: UUID
+    }
+
+    /// How far an initial purchase may precede its provider event and still be relayed to
+    /// product analytics as a new purchase.
+    static let newPurchaseLag: TimeInterval = 72 * 3_600
+
+    /// Restore is never new money. A restore or transfer arrives as an unsupported type
+    /// and is refused by the normalizer; a restore on another app account reuses a charge
+    /// key that already exists. The remaining path is a store transaction RevenueCat
+    /// first learns about during a restore, which it reports as INITIAL_PURCHASE with the
+    /// original, older purchase time. Such a fact stays in the money ledger but is not
+    /// relayed to product analytics as `subscription_payment`/`subscription_zero_value`
+    /// with `lifecycleKind=initial_purchase`.
+    static func relaysAsNewPurchase(_ fact: RevenueCatLifecycleFact) -> Bool {
+        fact.kind != .initialPurchase || fact.purchasedAt >= fact.eventGeneratedAt.addingTimeInterval(-newPurchaseLag)
     }
 
     private struct LinkedInPurchaseAuthority {

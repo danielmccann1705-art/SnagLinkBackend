@@ -46,17 +46,22 @@ struct BrowserAuthController: RouteCollection {
         guard let binding = RequestCredentialCookie.value(BrowserSessionService.bindingCookieName, on: req) else {
             throw Abort(.conflict, reason: "Return to the browser that requested this link, or request a new link here", identifier: "verification_context_mismatch")
         }
+        let application = req.application
         let result = try await req.db.transaction { db in
             let challenge = try await IdentityChallengeService.consume(input.token, purpose: .browserSignIn, binding: binding, targetUserID: nil, config: config, on: db)
             let resolution = try await VerifiedIdentityService.resolveEmailOutcome(challenge.email, name: challenge.requestedName, on: db)
             let session = try await BrowserSessionService.create(for: resolution.user, config: config, on: db)
-            return (resolution, session)
+            // Optional portal sign-in funnel candidate for exactly this new session.
+            let signIn = await ProductFunnelMeasurement.signInCandidate(account: resolution.user, sessionID: session.principal.sessionID,
+                provider: .email, surface: .web, app: application, on: db)
+            return (resolution, session, signIn)
         }
         let response = Response(status: .ok)
         try response.content.encode(try await self.response(for: result.0.user, csrf: result.1.principal.csrfToken, on: req.db))
         response.cookies[BrowserSessionService.cookieName] = BrowserSessionService.cookie(result.1.token, maxAge: Int(BrowserSessionService.lifetime))
         response.cookies[BrowserSessionService.bindingCookieName] = BrowserSessionService.cookie("", maxAge: 0)
         response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        await ProductFunnelMeasurement.record(result.2, app: application, on: req.db)
         return response
     }
 

@@ -200,6 +200,8 @@ public func configure(_ app: Application,
         app.migrations.add(CreateMeasurementSignupIntents())
         // Optional pre-auth Apple Ads evidence slot, linked only at new-account adoption.
         app.migrations.add(AddSignupAppleEvidenceSlot())
+        // Server-issued sign-in and failure funnel events carry no client installation.
+        app.migrations.add(AllowServerProductEventsWithoutInstallation())
 
         try await app.autoMigrate()
     } else {

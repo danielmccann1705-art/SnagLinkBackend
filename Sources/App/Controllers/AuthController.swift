@@ -48,9 +48,12 @@ struct AuthController: RouteCollection {
         let issuedAt = appleToken.issuedAt.value
         let measurement = Self.isNative(req) ? input.measurementContext?.value : nil
         let application = req.application
+        // Product funnel: this request issues a new native app session (never a restore).
+        let surface: ProductFunnelMeasurement.SignInSurface? = Self.isNative(req) ? .ios : nil
+        let sessionID = UUID()
         // One transaction for the account and its identities; a race the unique constraints
         // caught is retried once against the winner (F21, concurrent first sign-ins).
-        let resolution = try await VerifiedIdentityService.transactionRetryingIdentityRace(on: req.db) { db in
+        let (resolution, signIn) = try await VerifiedIdentityService.transactionRetryingIdentityRace(on: req.db) { db in
             let resolution = try await VerifiedIdentityService.resolveAppleOutcome(subject: appleUserId, email: email, emailVerified: emailVerified,
                                                                       name: input.firstName, on: db)
             // The same adoption the web Apple path performs. Without it a person who
@@ -64,7 +67,10 @@ struct AuthController: RouteCollection {
             // Never throws and never changes the authentication result.
             await SignupIntentService.settle(.apple(verifiedNonce: verifiedNonce, issuedAt: issuedAt),
                                              context: measurement, resolution: resolution, app: application, on: db)
-            return resolution
+            // Optional, tried-lock only; never throws and never changes the result.
+            let signIn = await ProductFunnelMeasurement.signInCandidate(account: resolution.user, sessionID: sessionID,
+                provider: .apple, surface: surface, app: application, on: db)
+            return (resolution, signIn)
         }
 
         // The app has always sent the authorization code; until now the server dropped
@@ -73,7 +79,9 @@ struct AuthController: RouteCollection {
         // provision a credential — but it is recorded so the gap is visible.
         await storeRevocationCredential(input: input, user: resolution.user, configuration: configuration, on: req)
 
-        return try issueAuthResponse(for: resolution, on: req)
+        let response = try issueAuthResponse(for: resolution, sessionID: sessionID, on: req)
+        await ProductFunnelMeasurement.record(signIn, app: application, on: req.db)
+        return response
     }
 
     /// Best-effort. Absent configuration, an absent code and an Apple refusal are all
@@ -178,7 +186,9 @@ struct AuthController: RouteCollection {
         // Present only when the exact pending request context survived on this device.
         let measurement = Self.isNative(req) ? input.measurementContext?.value : nil
         let application = req.application
-        let resolution = try await req.db.transaction { db -> VerifiedIdentityService.Resolution in
+        let surface: ProductFunnelMeasurement.SignInSurface? = Self.isNative(req) ? .ios : nil
+        let sessionID = UUID()
+        let (resolution, signIn) = try await req.db.transaction { db -> (VerifiedIdentityService.Resolution, MeasurementRelayService.OutcomeCandidate?) in
             guard let sql = db as? SQLDatabase else { throw Abort(.serviceUnavailable) }
             // Serialize consumption across processes, not only within one Worker.
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "signin-token:" + tokenHash), 0))").run()
@@ -204,10 +214,14 @@ struct AuthController: RouteCollection {
             // Another device, or a lost local context, consumes a bound intent import-free.
             await SignupIntentService.settle(.emailToken(try authToken.requireID()), context: measurement,
                                              resolution: resolution, app: application, on: db)
-            return resolution
+            let signIn = await ProductFunnelMeasurement.signInCandidate(account: resolution.user, sessionID: sessionID,
+                provider: .email, surface: surface, app: application, on: db)
+            return (resolution, signIn)
         }
 
-        return try issueAuthResponse(for: resolution, on: req)
+        let response = try issueAuthResponse(for: resolution, sessionID: sessionID, on: req)
+        await ProductFunnelMeasurement.record(signIn, app: application, on: req.db)
+        return response
     }
 
     // MARK: - Sign out on this device
@@ -269,7 +283,8 @@ struct AuthController: RouteCollection {
     /// Builds the standard authenticated session response (30-day JWT), shared by all
     /// auth methods so they stay shape-compatible. Each token names its own session
     /// (`jti`), so signing out on one device ends that session alone.
-    func issueAuthResponse(for resolution: VerifiedIdentityService.Resolution, on req: Request) throws -> AuthResponse {
+    func issueAuthResponse(for resolution: VerifiedIdentityService.Resolution, sessionID: UUID = UUID(),
+                           on req: Request) throws -> AuthResponse {
         let user = resolution.user
         let jwtPayload = UserJWTPayload(
             subject: SubjectClaim(value: user.id!.uuidString),
@@ -277,8 +292,9 @@ struct AuthController: RouteCollection {
             userId: user.id!,
             authVersion: user.authVersion,
             authenticatedAt: Date(),
-            // A new session every time: this is what one device signs out.
-            sessionID: UUID()
+            // A new session every time: this is what one device signs out. The caller may
+            // pass the ID it already used for the optional `sign_in_succeeded` candidate.
+            sessionID: sessionID
         )
         let token = try req.jwt.sign(jwtPayload)
 

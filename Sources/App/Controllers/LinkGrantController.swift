@@ -36,9 +36,28 @@ struct LinkGrantController: RouteCollection {
             return try await self.activationResponse(id, projectID: projectID, app: req.application, on: db)
         }
     }
+    /// `contractor_link_create_failed`: any refusal of an authenticated, decoded canonical
+    /// v2 create step (prepare or activate) is classified into a fixed reason and offered
+    /// to the actor's own optional product measurement. No project, snag, recipient, PIN
+    /// or token data leaves this controller; the error response is unchanged.
+    private func measuringCreateFailure<T>(_ req: Request, actor: UUID, operationID: UUID,
+                                           _ body: () async throws -> T) async throws -> T {
+        let receivedAt = Date()
+        do { return try await body() }
+        catch {
+            await ProductFunnelMeasurement.contractorLinkCreateFailed(error, accountID: actor, operationID: operationID,
+                                                                      receivedAt: receivedAt, app: req.application, on: req.db)
+            throw error
+        }
+    }
     @Sendable func prepare(req: Request) async throws -> LinkGrantResponse {
         let projectID = try Self.id("projectId", req), actor = try req.requireAuthenticatedUserId()
         let body = try req.content.decode(LinkPrepareCommand.self)
+        return try await measuringCreateFailure(req, actor: actor, operationID: body.mutation.operationId) {
+            try await self.performPrepare(req, projectID: projectID, actor: actor, body: body)
+        }
+    }
+    private func performPrepare(_ req: Request, projectID: UUID, actor: UUID, body: LinkPrepareCommand) async throws -> LinkGrantResponse {
         try LinkGrantService.validate(body)
         _ = try LinkGrantTokenService.keys(req.application)
         let hashes = try LinkGrantTokenService.requestHashes(body, route: "POST:\(req.url.path)", app: req.application), hash = hashes[0]
@@ -66,7 +85,13 @@ struct LinkGrantController: RouteCollection {
     }
     @Sendable func activate(req: Request) async throws -> LinkActivationResponse {
         let projectID = try Self.id("projectId", req), id = try Self.id("grantId", req), actor = try req.requireAuthenticatedUserId()
-        let body = try req.content.decode(LinkRevisionCommand.self), hash = try PlatformMutationService.requestHash(body, route: "POST:\(req.url.path)")
+        let body = try req.content.decode(LinkRevisionCommand.self)
+        return try await measuringCreateFailure(req, actor: actor, operationID: body.mutation.operationId) {
+            try await self.performActivate(req, projectID: projectID, id: id, actor: actor, body: body)
+        }
+    }
+    private func performActivate(_ req: Request, projectID: UUID, id: UUID, actor: UUID, body: LinkRevisionCommand) async throws -> LinkActivationResponse {
+        let hash = try PlatformMutationService.requestHash(body, route: "POST:\(req.url.path)")
         return try await req.db.transaction { db in
             try await PlatformMutationService.lock(actorID: actor, mutation: body.mutation, on: db)
             let (project, _) = try await ProjectAccessService.require(.share, projectID: projectID, actorID: actor, on: db)

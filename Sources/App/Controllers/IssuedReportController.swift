@@ -28,21 +28,36 @@ struct IssuedReportController: RouteCollection {
     }
     /// Idempotent by `mutation.operationId`, exactly like snag commands: a retry with
     /// the same body returns the same report; a reused id with a different body is 409.
+    /// Marks a failure that happened after the actor's `.review` right was confirmed and
+    /// the operation was found to be new: the only failures `report_failed` counts.
+    private struct GenuineIssueFailure: Error { let underlying: Error }
+
     @Sendable func issue(req: Request) async throws -> IssuedReportResponse {
+        let receivedAt = Date()
         let projectID = try id("projectId", req), actorID = try req.requireAuthenticatedUserId()
         let body = try req.content.decode(ReportIssueCommand.self)
         let hash = try PlatformMutationService.requestHash(body, route: "\(req.method):\(req.url.path)")
-        let applied = try await req.db.transaction { db -> (IssuedReportResponse, MeasurementRelayService.OutcomeCandidate?) in
-            try await PlatformMutationService.lock(actorID: actorID, mutation: body.mutation, on: db)
-            let (project, _) = try await ProjectAccessService.require(.review, projectID: projectID, actorID: actorID, on: db)
-            if let old = try await PlatformMutationService.replay(IssuedReportResponse.self, actorID: actorID, mutation: body.mutation, hash: hash, on: db) { return (old, nil) }
-            let result = try await IssuedReportService.issue(body, project: project, actorID: actorID, on: db)
-            let occurredAt = try await PlatformMutationService.record(result, actorID: actorID, workspaceID: result.workspaceId, mutation: body.mutation, hash: hash, on: db)
-            let candidate = await MeasurementRelayService.outcomeCandidate(
-                accountID: actorID, operationID: body.mutation.operationId,
-                installationID: body.mutation.deviceId, event: .reportIssued,
-                occurredAt: occurredAt, on: db)
-            return (result, candidate)
+        let applied: (IssuedReportResponse, MeasurementRelayService.OutcomeCandidate?)
+        do {
+            applied = try await req.db.transaction { db -> (IssuedReportResponse, MeasurementRelayService.OutcomeCandidate?) in
+                try await PlatformMutationService.lock(actorID: actorID, mutation: body.mutation, on: db)
+                let (project, _) = try await ProjectAccessService.require(.review, projectID: projectID, actorID: actorID, on: db)
+                if let old = try await PlatformMutationService.replay(IssuedReportResponse.self, actorID: actorID, mutation: body.mutation, hash: hash, on: db) { return (old, nil) }
+                do {
+                    let result = try await IssuedReportService.issue(body, project: project, actorID: actorID, on: db)
+                    let occurredAt = try await PlatformMutationService.record(result, actorID: actorID, workspaceID: result.workspaceId, mutation: body.mutation, hash: hash, on: db)
+                    let candidate = await MeasurementRelayService.outcomeCandidate(
+                        accountID: actorID, operationID: body.mutation.operationId,
+                        installationID: body.mutation.deviceId, event: .reportIssued,
+                        occurredAt: occurredAt, on: db)
+                    return (result, candidate)
+                } catch { throw GenuineIssueFailure(underlying: error) }
+            }
+        } catch let failure as GenuineIssueFailure {
+            // The issue transaction has rolled back. The response is the original error.
+            await ProductFunnelMeasurement.reportFailed(failure.underlying, accountID: actorID,
+                operationID: body.mutation.operationId, receivedAt: receivedAt, app: req.application, on: req.db)
+            throw failure.underlying
         }
         if let candidate = applied.1 {
             await MeasurementRelayService.recordOutcome(

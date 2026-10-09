@@ -137,11 +137,37 @@ enum MeasurementCredentialCipher {
 }
 
 enum MeasurementRelayService {
-    enum ServerOutcome: String, Sendable {
+    enum ServerOutcome: String, Sendable, CaseIterable {
         case completionSubmitted = "completion_submitted"
         case completionAccepted = "completion_accepted"
         case completionRejected = "completion_rejected"
         case reportIssued = "report_issued"
+        /// A new account session was issued (`ProductFunnelMeasurement`). Never a
+        /// restored session, a bearer reuse or an account-link verification.
+        case signInSucceeded = "sign_in_succeeded"
+        /// An authenticated canonical v2 Contractor-link prepare/activate attempt failed.
+        case contractorLinkCreateFailed = "contractor_link_create_failed"
+        /// A genuine authorised, non-replayed v2 report issue attempt failed.
+        case reportFailed = "report_failed"
+    }
+
+    /// The exact provider property vocabulary of each server outcome. Anything else
+    /// (identifiers, free text, recipient or token data) makes the candidate absent.
+    static func permits(_ event: ServerOutcome, properties p: [String: String]) -> Bool {
+        switch event {
+        case .completionSubmitted, .completionAccepted, .completionRejected, .reportIssued:
+            return p.isEmpty
+        case .signInSucceeded:
+            return Set(p.keys) == ["provider", "surface"]
+                && ProductFunnelMeasurement.SignInProvider(rawValue: p["provider"] ?? "") != nil
+                && ProductFunnelMeasurement.SignInSurface(rawValue: p["surface"] ?? "") != nil
+        case .contractorLinkCreateFailed:
+            return Set(p.keys) == ["reason"]
+                && ProductFunnelMeasurement.ContractorLinkFailure(rawValue: p["reason"] ?? "") != nil
+        case .reportFailed:
+            return Set(p.keys) == ["reason"]
+                && ProductFunnelMeasurement.ReportFailure(rawValue: p["reason"] ?? "") != nil
+        }
     }
 
     /// Transient authority captured only for a newly committed business mutation.
@@ -149,8 +175,10 @@ enum MeasurementRelayService {
     struct OutcomeCandidate: Sendable {
         let accountID: UUID
         let operationID: UUID
-        let installationID: UUID
+        /// Ledger-only. Server-issued sessions and failures carry no installation.
+        let installationID: UUID?
         let event: ServerOutcome
+        let properties: [String: String]
         let occurredAt: Date
         fileprivate let consentRevision: UUID
         fileprivate let subjectID: UUID
@@ -298,9 +326,12 @@ enum MeasurementRelayService {
     /// Called inside the genuine new-mutation transaction, after its durable receipt
     /// was written. The purpose lock makes this an exact snapshot of the grant which
     /// covered the operation. A replay never reaches this call.
-    static func outcomeCandidate(accountID: UUID, operationID: UUID, installationID: UUID,
-                                 event: ServerOutcome, occurredAt: Date,
+    static func outcomeCandidate(accountID: UUID, operationID: UUID, installationID: UUID?,
+                                 event: ServerOutcome, properties: [String: String] = [:],
+                                 occurredAt: Date,
+                                 beforeLookup: (@Sendable (SQLDatabase) async throws -> Void)? = nil,
                                  on db: Database) async -> OutcomeCandidate? {
+        guard permits(event, properties: properties) else { return nil }
         guard let sql = try? VerifiedIdentityService.sql(db) else { return nil }
         do {
             try await sql.raw("SAVEPOINT optional_measurement_candidate").run()
@@ -311,6 +342,9 @@ enum MeasurementRelayService {
                 try await sql.raw("RELEASE SAVEPOINT optional_measurement_candidate").run()
                 return nil
             }
+            // Test seam only (`ProductFunnelMeasurement.HookKey`): a real SQL failure here
+            // must roll back this savepoint alone.
+            if let beforeLookup { try await beforeLookup(sql) }
             let flags = try await FeatureFlagService.resolve(on: db)
             guard flags["productAnalyticsEnabled"] == true else {
                 try await sql.raw("RELEASE SAVEPOINT optional_measurement_candidate").run()
@@ -331,7 +365,7 @@ enum MeasurementRelayService {
             let candidate: OutcomeCandidate?
             if let row {
                 candidate = .init(accountID: accountID, operationID: operationID,
-                    installationID: installationID, event: event, occurredAt: occurredAt,
+                    installationID: installationID, event: event, properties: properties, occurredAt: occurredAt,
                     consentRevision: try row.decode(column: "revision", as: UUID.self),
                     subjectID: try row.decode(column: "subject_id", as: UUID.self))
             } else { candidate = nil }
@@ -361,11 +395,18 @@ enum MeasurementRelayService {
         let accountID = candidate.accountID
         let eventID = outcomeEventID(environment: environment, accountID: accountID,
                                      event: candidate.event, operationID: candidate.operationID)
-        let bodyHash = SHA256Hasher.hash(token: ["server-outcome-v1", environment,
+        guard permits(candidate.event, properties: candidate.properties) else { return }
+        var hashed = ["server-outcome-v1", environment,
             accountID.uuidString.lowercased(), candidate.event.rawValue,
-            candidate.operationID.uuidString.lowercased(), candidate.installationID.uuidString.lowercased(),
+            candidate.operationID.uuidString.lowercased(), candidate.installationID?.uuidString.lowercased() ?? "none",
             candidate.consentRevision.uuidString.lowercased(),
-            candidate.subjectID.uuidString.lowercased()].joined(separator: "|"))
+            candidate.subjectID.uuidString.lowercased()]
+        // Unchanged for the original empty-property outcomes.
+        if !candidate.properties.isEmpty {
+            hashed.append(candidate.properties.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "&"))
+        }
+        let bodyHash = SHA256Hasher.hash(token: hashed.joined(separator: "|"))
+        let properties = try canonicalJSON(candidate.properties)
         try await db.transaction { tx in
             let sql = try VerifiedIdentityService.sql(tx)
             guard let account = try await sql.raw("""
@@ -406,10 +447,11 @@ enum MeasurementRelayService {
                      schema_version,event_name,properties,body_hash)
                 VALUES (\(bind:accountID),\(bind:eventID),\(bind:candidate.installationID),'productAnalytics',
                         \(bind:candidate.consentRevision),\(bind:candidate.subjectID),\(bind:candidate.occurredAt),\(bind:receivedAt),1,
-                        \(bind:candidate.event.rawValue),'{}'::jsonb,\(bind:bodyHash))
+                        \(bind:candidate.event.rawValue),CAST(\(bind:properties) AS JSONB),\(bind:bodyHash))
                 """).run()
             let payload = try canonicalJSON(["event": candidate.event.rawValue,
-                "occurredAt": ISO8601DateFormatter().string(from: candidate.occurredAt)])
+                "occurredAt": ISO8601DateFormatter().string(from: candidate.occurredAt)]
+                .merging(candidate.properties) { first, _ in first })
             try await sql.raw("""
                 INSERT INTO measurement_dispatch_jobs
                     (id,destination,source_kind,source_id,account_id,subject_id,consent_revision,state,available_at,payload,created_at)
