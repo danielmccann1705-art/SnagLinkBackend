@@ -268,7 +268,8 @@ final class MeasurementPrivacyTests: XCTestCase {
         let expected = [
             ("productAnalyticsEnabled", "FEATURE_PRODUCT_ANALYTICS_ENABLED"),
             ("crossCompanyAdsEnabled", "FEATURE_CROSS_COMPANY_ADS_ENABLED"),
-            ("linkedInConversionsEnabled", "FEATURE_LINKEDIN_CONVERSIONS_ENABLED")
+            ("linkedInConversionsEnabled", "FEATURE_LINKEDIN_CONVERSIONS_ENABLED"),
+            ("portalProductAnalyticsEnabled", "FEATURE_PORTAL_PRODUCT_ANALYTICS_ENABLED")
         ]
         for (key, variable) in expected {
             let entry = try XCTUnwrap(FeatureFlagService.registry.first { $0.key == key })
@@ -631,7 +632,7 @@ final class MeasurementPrivacyTests: XCTestCase {
         let candidate = try await app.db.transaction { db in
             await MeasurementRelayService.outcomeCandidate(
                 accountID: self.userID, operationID: UUID(), installationID: UUID(),
-                event: .completionSubmitted, occurredAt: occurredAt, on: db)
+                event: .completionSubmitted, occurredAt: occurredAt, surface: .app, on: db)
         }
         XCTAssertNotNil(candidate)
 
@@ -667,7 +668,7 @@ final class MeasurementPrivacyTests: XCTestCase {
         let candidate = try await app.db.transaction { db in
             await MeasurementRelayService.outcomeCandidate(
                 accountID: self.userID, operationID: UUID(), installationID: UUID(),
-                event: .reportIssued, occurredAt: Date().addingTimeInterval(1), on: db)
+                event: .reportIssued, occurredAt: Date().addingTimeInterval(1), surface: .app, on: db)
         }
         let elapsed = started.duration(to: clock.now)
         await barrier.release()
@@ -684,7 +685,7 @@ final class MeasurementPrivacyTests: XCTestCase {
         let candidate = try await app.db.transaction { db in
             await MeasurementRelayService.outcomeCandidate(
                 accountID: self.userID, operationID: UUID(), installationID: UUID(),
-                event: .reportIssued, occurredAt: Date().addingTimeInterval(1), on: db)
+                event: .reportIssued, occurredAt: Date().addingTimeInterval(1), surface: .app, on: db)
         }
         let barrier = MeasurementTransactionGate()
         let key = "measurement-permission:\(userID.uuidString):productAnalytics"
@@ -722,7 +723,7 @@ final class MeasurementPrivacyTests: XCTestCase {
             try await transactionSQL.raw("ALTER TABLE measurement_permission_current RENAME TO measurement_permission_current_hidden").run()
             let candidate = await MeasurementRelayService.outcomeCandidate(
                 accountID: self.userID, operationID: UUID(), installationID: UUID(),
-                event: .completionAccepted, occurredAt: Date().addingTimeInterval(1), on: db)
+                event: .completionAccepted, occurredAt: Date().addingTimeInterval(1), surface: .app, on: db)
             XCTAssertNil(candidate)
             try await transactionSQL.raw("ALTER TABLE measurement_permission_current_hidden RENAME TO measurement_permission_current").run()
         }

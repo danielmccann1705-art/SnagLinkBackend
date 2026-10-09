@@ -214,6 +214,9 @@ public func configure(_ app: Application,
         // PostHog manual escalation reasons, stale-receipt pass evidence and the closing
         // record a person writes through `posthog-erasure-resolve` (POSTHOG-MANUAL-REMEDIATION.md).
         app.migrations.add(AddPostHogErasureManualResolution())
+        // One final optional-measurement notice: the version on every consent revision, the
+        // surface of each product event (portal gating), and finite signup tombstone retention.
+        app.migrations.add(AddMeasurementNoticeVersions())
         app.asyncCommands.use(PostHogErasureResolveCommand(), as: "posthog-erasure-resolve")
 
         try await app.autoMigrate()

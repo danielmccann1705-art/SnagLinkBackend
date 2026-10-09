@@ -90,10 +90,10 @@ final class SignupIntentTests: XCTestCase {
     }
 
     private func issue(_ provider: String, product: Bool = true, apple: Bool = false, cross: Bool = false,
-                       installation: UUID = UUID(), att: String = "authorized",
+                       installation: UUID = UUID(), att: String = "authorized", notice: String = MeasurementNotice.current,
                        file: StaticString = #filePath, line: UInt = #line) async throws -> Issued {
         var body: [String: Any] = ["provider": provider, "installationId": installation.uuidString,
-                                   "noticeVersion": "signup-measurement-v1",
+                                   "noticeVersion": notice,
                                    "choices": ["productAnalytics": product, "appleAds": apple, "crossCompanyAds": cross]]
         if cross { body["attStatus"] = att; body["attObservedAt"] = date() }
         let response = try await request(.POST, "api/v2/measurement/signup-intents", object: body)
@@ -887,12 +887,168 @@ final class SignupIntentTests: XCTestCase {
         XCTAssertNotNil(try row.decode(column: "scrubbed_at", as: Date?.self))
         let linked = try await facts(auth.user.id)
         XCTAssertEqual(linked, 0)
-        let tombstones = try await count("SELECT count(*) AS n FROM measurement_signup_facts WHERE intent_id=\(bind:intent.id) AND account_id IS NULL AND scrubbed_at IS NOT NULL")
-        XCTAssertEqual(tombstones, 1)
+        let kept = try await count("SELECT count(*) AS n FROM measurement_signup_facts WHERE intent_id=\(bind:intent.id)")
+        XCTAssertEqual(kept, 0, "the per-account deduplication record goes with the account")
         let dispatch = try await count("SELECT count(*) AS n FROM measurement_dispatch_jobs WHERE account_id=\(bind:auth.user.id)")
         XCTAssertEqual(dispatch, 0)
         let cancel = try await request(.POST, "api/v2/measurement/signup-intents/\(intent.id)/cancel", object: ["capability": intent.capability])
         XCTAssertEqual(cancel.status, .notFound, "a scrubbed capability no longer resolves")
+        // The intent's tombstone is pruned on the ordinary schedule, 30 days after scrubbing.
+        _ = try await SignupIntentService.cleanup(now: Date().addingTimeInterval(29 * 86_400), on: app.db)
+        let early = try await count("SELECT count(*) AS n FROM measurement_signup_intents WHERE id=\(bind:intent.id)")
+        XCTAssertEqual(early, 1)
+        _ = try await SignupIntentService.cleanup(now: Date().addingTimeInterval(31 * 86_400), on: app.db)
+        let pruned = try await count("SELECT count(*) AS n FROM measurement_signup_intents WHERE id=\(bind:intent.id)")
+        XCTAssertEqual(pruned, 0)
+    }
+
+    // MARK: - Final notice and finite tombstones (FINAL-PRIVACY-NOTICE-2.0.1.md)
+
+    /// Every adopted revision records the notice its intent was issued under: the current notice
+    /// and the historical draft each keep exactly their own coverage. The Singular alternative and
+    /// unknown versions are refused before anything is written.
+    func testAdoptionRecordsTheIntentsNoticeOnEveryRevisionAndRefusesOthers() async throws {
+        try await enable("productAnalyticsEnabled")
+        for notice in [MeasurementNotice.current, MeasurementNotice.signupDraft] {
+            let intent = try await issue("apple", apple: true, notice: notice)
+            let auth = try signedIn(try await apple(try appleToken(subject: "signup-notice-\(UUID())", nonce: intent.nonce),
+                                                    context: context(intent)), new: true)
+            let recorded = try await sql.raw("""
+                SELECT purpose,notice_version FROM measurement_consent_events WHERE account_id=\(bind:auth.user.id) ORDER BY purpose
+                """).all().map { "\(try $0.decode(column: "purpose", as: String.self))=\(try $0.decode(column: "notice_version", as: String?.self) ?? "nil")" }
+            XCTAssertEqual(recorded, ["appleAds=\(notice)", "productAnalytics=\(notice)"])
+            let read = try await request(.GET, "api/v2/measurement/permissions", bearer: auth.token)
+            let product = try XCTUnwrap((try json(read)["permissions"] as? [[String: Any]])?.first { $0["purpose"] as? String == "productAnalytics" })
+            XCTAssertEqual(product["noticeVersion"] as? String, notice)
+            XCTAssertEqual(product["coversPortal"] as? Bool, notice == MeasurementNotice.current,
+                           "only the current notice covers the web portal; the draft stays app-only")
+        }
+        for notice in [MeasurementNotice.singularAlternative, "measurement-notice-2026-10c"] {
+            let refused = try await request(.POST, "api/v2/measurement/signup-intents", object: [
+                "provider": "google", "installationId": UUID().uuidString, "noticeVersion": notice,
+                "choices": ["productAnalytics": true, "appleAds": false, "crossCompanyAds": false]])
+            XCTAssertEqual(refused.status, .badRequest, refused.body.string)
+            XCTAssertTrue(refused.body.string.contains("measurement_notice_invalid"))
+        }
+        let stored = try await count("SELECT count(*) AS n FROM measurement_signup_intents WHERE notice_version IN ('measurement-notice-2026-10b-singular','measurement-notice-2026-10c')")
+        XCTAssertEqual(stored, 0)
+    }
+
+    private static let tombstoneFields: Set<String> = [
+        "id", "provider", "surface", "environment", "notice_version", "binding_kind", "state", "consumed_reason",
+        "received_at", "expires_at", "bound_at", "consumed_at", "cancelled_at", "scrubbed_at", "signup_fact_id"]
+
+    private func present(_ intent: UUID) async throws -> Set<String> {
+        let text = try await XCTUnwrapAsync(try await sql.raw("""
+            SELECT row_to_json(i)::text AS j FROM measurement_signup_intents i WHERE id=\(bind:intent)
+            """).first()).decode(column: "j", as: String.self)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        return Set(object.filter { !($0.value is NSNull) }.keys)
+    }
+
+    /// Unused, expired, cancelled and settled intents: the full row only while it is live or inside
+    /// the 7-day cancellation window, then exactly the documented tombstone fields, then nothing
+    /// 30 days after scrubbing. The live account's fact stays as its deduplication record.
+    func testTombstonesKeepOnlyTheDocumentedFieldsAndArePrunedThirtyDaysAfterScrubbing() async throws {
+        let unused = try await issue("google")
+        try await sql.raw("""
+            UPDATE measurement_signup_intents SET received_at=received_at-interval '1 hour',
+                expires_at=now()-interval '1 minute' WHERE id=\(bind:unused.id)
+            """).run()
+        let cancelled = try await issue("email")
+        let cancel = try await request(.POST, "api/v2/measurement/signup-intents/\(cancelled.id)/cancel",
+                                       object: ["capability": cancelled.capability])
+        XCTAssertEqual(cancel.status, .ok, cancel.body.string)
+        let settled = try await issue("apple", apple: true)
+        let auth = try signedIn(try await apple(try appleToken(subject: "signup-tombstone-\(UUID())", nonce: settled.nonce),
+                                                context: context(settled)), new: true)
+        let subject = "signup-tombstone-existing-\(UUID())"
+        _ = try signedIn(try await googleVerify(try await googleChallenge(), subject: subject), new: true)
+        let existing = try await issue("google")
+        let challenge = try await googleChallenge(binding(existing))
+        _ = try signedIn(try await googleVerify(challenge, subject: subject, context: context(existing)), new: false)
+        let existingState = try await state(existing.id)
+        XCTAssertEqual(existingState.state, "consumed_existing")
+
+        _ = try await SignupIntentService.cleanup(on: app.db)
+        let expired = try await state(unused.id)
+        XCTAssertEqual(expired.state, "expired")
+        let unusedFields = try await present(unused.id)
+        XCTAssertTrue(unusedFields.isSubset(of: Self.tombstoneFields), "unused tombstone kept \(unusedFields.subtracting(Self.tombstoneFields))")
+        // Inside the 7-day window the settled and cancelled rows keep what late cancellation needs.
+        let live = try await present(settled.id)
+        XCTAssertTrue(live.isSuperset(of: ["capability_hash", "account_id", "installation_id", "product_revision", "apple_revision"]))
+        let cancelledLive = try await present(cancelled.id)
+        XCTAssertTrue(cancelledLive.contains("capability_hash"))
+
+        try await sql.raw("""
+            UPDATE measurement_signup_intents SET consumed_at=consumed_at-interval '8 days'
+            WHERE id IN (\(bind:settled.id),\(bind:existing.id))
+            """).run()
+        try await sql.raw("""
+            UPDATE measurement_signup_intents SET cancelled_at=cancelled_at-interval '8 days' WHERE id=\(bind:cancelled.id)
+            """).run()
+        _ = try await SignupIntentService.cleanup(on: app.db)
+        for intent in [unused.id, cancelled.id, settled.id, existing.id] {
+            let fields = try await present(intent)
+            XCTAssertTrue(fields.isSubset(of: Self.tombstoneFields), "\(intent) kept \(fields.subtracting(Self.tombstoneFields))")
+            XCTAssertTrue(fields.contains("scrubbed_at"))
+        }
+        let settledState = try await state(settled.id)
+        XCTAssertEqual(settledState.state, "consumed_new")
+        let factBefore = try await facts(auth.user.id)
+        XCTAssertEqual(factBefore, 1, "the per-account fact remains the deduplication record while the account lives")
+
+        _ = try await SignupIntentService.cleanup(now: Date().addingTimeInterval(29 * 86_400), on: app.db)
+        let within = try await count("SELECT count(*) AS n FROM measurement_signup_intents WHERE id IN (\(bind:unused.id),\(bind:cancelled.id),\(bind:settled.id),\(bind:existing.id))")
+        XCTAssertEqual(within, 4)
+        _ = try await SignupIntentService.cleanup(now: Date().addingTimeInterval(31 * 86_400), on: app.db)
+        let after = try await count("SELECT count(*) AS n FROM measurement_signup_intents WHERE id IN (\(bind:unused.id),\(bind:cancelled.id),\(bind:settled.id),\(bind:existing.id))")
+        XCTAssertEqual(after, 0, "no tombstone is kept indefinitely")
+        let factAfter = try await facts(auth.user.id)
+        XCTAssertEqual(factAfter, 1, "pruning the intent never removes a live account's fact")
+        // The fact no longer needs its intent row, and the pruned intent can never be adopted again.
+        let replay = try await apple(try appleToken(subject: "signup-tombstone-replay-\(UUID())", nonce: settled.nonce),
+                                     context: context(settled))
+        let replayAuth = try signedIn(replay, new: true)
+        let replayFacts = try await count("SELECT count(*) AS n FROM measurement_signup_facts WHERE intent_id=\(bind:settled.id)")
+        XCTAssertEqual(replayFacts, 1)
+        let newFacts = try await facts(replayAuth.user.id)
+        XCTAssertEqual(newFacts, 0, "a pruned intent adopts nothing")
+    }
+
+    /// The hourly maintenance pass runs the same pruning, and facts an earlier image left behind for
+    /// deleted accounts (account join already cleared) are removed.
+    func testTheScheduledMaintenancePassPrunesOldTombstonesAndOrphanedFacts() async throws {
+        let old = try await issue("google")
+        try await sql.raw("""
+            UPDATE measurement_signup_intents SET state='expired',capability_hash=NULL,installation_id=NULL,
+                product_analytics=NULL,apple_ads=NULL,cross_company_ads=NULL,
+                received_at=now()-interval '40 days',expires_at=now()-interval '39 days',scrubbed_at=now()-interval '31 days'
+            WHERE id=\(bind:old.id)
+            """).run()
+        let recent = try await issue("google")
+        try await sql.raw("""
+            UPDATE measurement_signup_intents SET state='expired',capability_hash=NULL,installation_id=NULL,
+                product_analytics=NULL,apple_ads=NULL,cross_company_ads=NULL,
+                received_at=now()-interval '10 days',expires_at=now()-interval '9 days',scrubbed_at=now()-interval '9 days'
+            WHERE id=\(bind:recent.id)
+            """).run()
+        let orphan = UUID()
+        try await sql.raw("""
+            INSERT INTO measurement_signup_facts(id,account_id,intent_id,provider,environment,occurred_at,product_eligible,
+                linkedin_eligible,created_at,withdrawn_at,scrubbed_at)
+            VALUES (\(bind:orphan),NULL,\(bind:UUID()),'email','local',now()-interval '2 days',true,false,now()-interval '2 days',
+                    now()-interval '1 day',now()-interval '1 day')
+            """).run()
+        let removed = try await CleanupService.runCleanup(app: app, trigger: .test)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(removed?.measurementSignupIntents), 2)
+        let oldLeft = try await count("SELECT count(*) AS n FROM measurement_signup_intents WHERE id=\(bind:old.id)")
+        XCTAssertEqual(oldLeft, 0)
+        let recentLeft = try await count("SELECT count(*) AS n FROM measurement_signup_intents WHERE id=\(bind:recent.id)")
+        XCTAssertEqual(recentLeft, 1, "a tombstone younger than 30 days is kept")
+        let orphanLeft = try await count("SELECT count(*) AS n FROM measurement_signup_facts WHERE id=\(bind:orphan)")
+        XCTAssertEqual(orphanLeft, 0)
     }
 
     func testRetentionReducesUnclaimedAndSettledIntentsToTombstones() async throws {

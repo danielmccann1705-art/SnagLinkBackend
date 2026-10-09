@@ -49,14 +49,15 @@ struct IssuedReportController: RouteCollection {
                     let candidate = await MeasurementRelayService.outcomeCandidate(
                         accountID: actorID, operationID: body.mutation.operationId,
                         installationID: body.mutation.deviceId, event: .reportIssued,
-                        occurredAt: occurredAt, on: db)
+                        occurredAt: occurredAt, surface: MeasurementSurface(req), on: db)
                     return (result, candidate)
                 } catch { throw GenuineIssueFailure(underlying: error) }
             }
         } catch let failure as GenuineIssueFailure {
             // The issue transaction has rolled back. The response is the original error.
             await ProductFunnelMeasurement.reportFailed(failure.underlying, accountID: actorID,
-                operationID: body.mutation.operationId, receivedAt: receivedAt, app: req.application, on: req.db)
+                operationID: body.mutation.operationId, receivedAt: receivedAt, surface: MeasurementSurface(req),
+                app: req.application, on: req.db)
             throw failure.underlying
         }
         if let candidate = applied.1 {

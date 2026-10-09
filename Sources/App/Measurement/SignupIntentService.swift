@@ -141,14 +141,19 @@ struct SignupIntentCancelResponse: Content, Sendable {
 /// Only the identity branch that inserted a `users` row can adopt it; everything
 /// optional happens inside one savepoint and never decides the authentication result.
 enum SignupIntentService {
-    /// Exact notice texts the native consent screen may present. A new notice text
-    /// needs a new version here before any client may send it.
-    static let acceptedNoticeVersions: Set<String> = ["signup-measurement-v1"]
+    /// Exact notice texts the native consent screen may present (`MeasurementNotice`). A new
+    /// notice text needs a new version there before any client may send it. Each adopted
+    /// revision records the intent's version, so its coverage is exactly that notice's.
+    static let acceptedNoticeVersions: Set<String> = MeasurementNotice.signupIssueAccepted
     static let socialLifetime: TimeInterval = 600
     static let emailLifetime: TimeInterval = 900
     /// How long a settled intent keeps its capability for late cancellation before it
-    /// is reduced to a tombstone. Later changes use the ordinary account settings flow.
+    /// is reduced to a tombstone. This is an internal credential window only: the person can
+    /// change or withdraw every choice at any time through the ordinary settings flow.
     static let settledCancellationWindow: TimeInterval = 7 * 86_400
+    /// How long a tombstone (an unused, expired, cancelled or settled intent reduced to the fields
+    /// listed at `scrubAssignments`) is kept after it was scrubbed, then deleted outright.
+    static let tombstoneRetention: TimeInterval = 30 * 86_400
     static let futureSkew: TimeInterval = 300
 
     enum Proof: Sendable {
@@ -321,7 +326,8 @@ enum SignupIntentService {
         // optional block is abandoned rather than making authentication wait.
         guard let row = try await sql.raw("""
             SELECT state,provider,environment,expires_at,received_at,capability_hash,binding_kind,binding_id,
-                   apple_nonce_hash,installation_id,product_analytics,apple_ads,cross_company_ads,apple_slot_reference
+                   apple_nonce_hash,installation_id,product_analytics,apple_ads,cross_company_ads,apple_slot_reference,
+                   notice_version
             FROM measurement_signup_intents WHERE id=\(bind:intentID) FOR UPDATE NOWAIT
             """).first() else { return .none }
         guard try row.decode(column: "state", as: String.self) == "bound" else { return .none }
@@ -370,6 +376,7 @@ enum SignupIntentService {
         let wantsProduct = try row.decode(column: "product_analytics", as: Bool.self)
         let wantsApple = try row.decode(column: "apple_ads", as: Bool.self)
         let wantsCross = try row.decode(column: "cross_company_ads", as: Bool.self)
+        let noticeVersion = try row.decode(column: "notice_version", as: String.self)
         // Cross-company needs fresh authorised ATT from the very installation that made
         // the choice. Anything else suppresses that purpose only.
         var crossATT: Date?
@@ -416,7 +423,7 @@ enum SignupIntentService {
                 installationID: purpose == .crossCompanyAds ? installationID : nil,
                 attStatus: purpose == .crossCompanyAds ? .authorized : nil,
                 attAssertedAt: purpose == .crossCompanyAds ? crossATT : nil,
-                now: now, on: db)
+                noticeVersion: noticeVersion, now: now, on: db)
             switch purpose {
             case .productAnalytics: (productRevision, productSubject) = (written.revision, written.subjectID)
             case .appleAds: appleRevision = written.revision
@@ -647,14 +654,24 @@ enum SignupIntentService {
 
     // MARK: Retention and deletion
 
+    /// What a tombstone keeps: `id` (a random server-generated UUID, derived from nothing about the
+    /// person, device or account), `provider`, `surface`, `environment`, `notice_version`, `state`,
+    /// `consumed_reason`, `binding_kind`, `received_at`, `expires_at`, `bound_at`, `consumed_at`,
+    /// `cancelled_at`, `scrubbed_at` and `signup_fact_id`. Everything that could link it to a person,
+    /// an installation, an account, a choice, a provider challenge or a credential is cleared here.
+    /// The tombstone is deleted `tombstoneRetention` after `scrubbed_at`.
     private static let scrubAssignments = """
         capability_hash=NULL,installation_id=NULL,product_analytics=NULL,apple_ads=NULL,cross_company_ads=NULL,
         att_status=NULL,att_observed_at=NULL,apple_nonce_hash=NULL,binding_id=NULL,account_id=NULL,
         product_revision=NULL,apple_revision=NULL,cross_revision=NULL,apple_slot_reference=NULL,apple_slot_reserved_at=NULL
         """
 
-    /// Scheduled retention: unclaimed expired intents become `expired` tombstones and
-    /// settled intents lose their capability and joins after the cancellation window.
+    /// Scheduled retention (the hourly maintenance pass): unclaimed expired intents become
+    /// `expired` tombstones; settled intents lose their capability and joins after the
+    /// cancellation window; every tombstone is deleted `tombstoneRetention` after it was
+    /// scrubbed. Signup facts whose account was already deleted (rows scrubbed by an earlier
+    /// image) are deleted too. Nothing here is kept indefinitely: only the per-account fact of a
+    /// live account remains, and account deletion removes it.
     static func cleanup(now: Date = Date(), limit: Int = 5_000, on db: Database) async throws -> Int {
         let sql = try VerifiedIdentityService.sql(db)
         let bounded = max(0, min(limit, 50_000))
@@ -681,7 +698,24 @@ enum SignupIntentService {
                 FROM due WHERE i.id=due.id RETURNING 1)
             SELECT count(*) AS total FROM changed
             """).first()?.decode(column: "total", as: Int.self) ?? 0
-        return expired + settled + slots
+        let pruned = try await sql.raw("""
+            WITH due AS (
+                SELECT id FROM measurement_signup_intents
+                WHERE scrubbed_at IS NOT NULL AND scrubbed_at<=\(bind:now.addingTimeInterval(-tombstoneRetention))
+                ORDER BY scrubbed_at LIMIT \(bind:bounded) FOR UPDATE SKIP LOCKED),
+            gone AS (
+                DELETE FROM measurement_signup_intents i USING due WHERE i.id=due.id RETURNING 1)
+            SELECT count(*) AS total FROM gone
+            """).first()?.decode(column: "total", as: Int.self) ?? 0
+        let orphaned = try await sql.raw("""
+            WITH due AS (
+                SELECT id FROM measurement_signup_facts WHERE account_id IS NULL
+                LIMIT \(bind:bounded) FOR UPDATE SKIP LOCKED),
+            gone AS (
+                DELETE FROM measurement_signup_facts f USING due WHERE f.id=due.id RETURNING 1)
+            SELECT count(*) AS total FROM gone
+            """).first()?.decode(column: "total", as: Int.self) ?? 0
+        return expired + settled + pruned + orphaned + slots
     }
 
     /// Called from `MeasurementPrivacyService.eraseAccount`, which already holds the
@@ -696,11 +730,9 @@ enum SignupIntentService {
             UPDATE measurement_signup_intents SET \(unsafeRaw: scrubAssignments),scrubbed_at=COALESCE(scrubbed_at,\(bind:now))
             WHERE account_id=\(bind:accountID)
             """).run()
-        try await sql.raw("""
-            UPDATE measurement_signup_facts SET account_id=NULL,withdrawn_at=COALESCE(withdrawn_at,\(bind:now)),
-                scrubbed_at=COALESCE(scrubbed_at,\(bind:now))
-            WHERE account_id=\(bind:accountID)
-            """).run()
+        // The per-account fact is the deduplication record for a live account only; it goes with
+        // the account. Its outbox rows were removed by the caller after exposure capture.
+        try await sql.raw("DELETE FROM measurement_signup_facts WHERE account_id=\(bind:accountID)").run()
     }
 
     // MARK: Helpers

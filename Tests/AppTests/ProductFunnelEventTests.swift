@@ -18,7 +18,8 @@ final class ProductFunnelEventTests: XCTestCase {
     private var intents: [UUID] = []
     private var accounts: Set<UUID> = []
     private var sql: SQLDatabase { try! VerifiedIdentityService.sql(app.db) }
-    private static let flags = ["productAnalyticsEnabled", "crossCompanyAdsEnabled", "linkedInConversionsEnabled", "adMeasurementEnabled"]
+    private static let flags = ["productAnalyticsEnabled", "crossCompanyAdsEnabled", "linkedInConversionsEnabled", "adMeasurementEnabled",
+                                "portalProductAnalyticsEnabled"]
 
     override func setUp() async throws {
         try XCTSkipIf(Environment.get("DATABASE_URL") == nil, "Disposable PostgreSQL required")
@@ -192,10 +193,27 @@ final class ProductFunnelEventTests: XCTestCase {
             expiration: .init(value: Date().addingTimeInterval(3600)), userId: id))
     }
 
-    private func grant(_ bearer: String, file: StaticString = #filePath, line: UInt = #line) async throws {
-        let response = try await request(.PUT, "api/v2/measurement/permissions/productAnalytics", object: [
-            "requestId": UUID().uuidString, "decision": "granted", "occurredAt": date()], bearer: bearer)
+    /// Grants under the current notice by default; `notice: nil` stands for a client that sends none.
+    private func grant(_ bearer: String, notice: String? = MeasurementNotice.current, expected: UUID? = nil,
+                       file: StaticString = #filePath, line: UInt = #line) async throws {
+        var body: [String: Any] = ["requestId": UUID().uuidString, "decision": "granted", "occurredAt": date()]
+        if let notice { body["noticeVersion"] = notice }
+        if let expected { body["expectedRevision"] = expected.uuidString }
+        let response = try await request(.PUT, "api/v2/measurement/permissions/productAnalytics", object: body, bearer: bearer)
         XCTAssertEqual(response.status, .ok, response.body.string, file: file, line: line)
+    }
+
+    private func productRevision(_ account: UUID) async throws -> UUID {
+        try await sql.raw("""
+            SELECT revision FROM measurement_permission_current WHERE account_id=\(bind:account) AND purpose='productAnalytics'
+            """).first()!.decode(column: "revision", as: UUID.self)
+    }
+
+    private func surfaces(_ account: UUID, _ name: String) async throws -> [String] {
+        try await sql.raw("""
+            SELECT surface FROM measurement_product_events WHERE account_id=\(bind:account) AND event_name=\(bind:name)
+            ORDER BY received_at
+            """).all().map { try $0.decode(column: "surface", as: String?.self) ?? "nil" }
     }
 
     private func withdraw(_ account: UUID, bearer: String) async throws {
@@ -297,7 +315,7 @@ final class ProductFunnelEventTests: XCTestCase {
     // MARK: - 1. Sign-in: one bounded event per issued session, native and portal
 
     func testEachNativeAndPortalSessionRecordsOneBoundedSignInOnlyAfterPermission() async throws {
-        try await enable("productAnalyticsEnabled")
+        try await enable("productAnalyticsEnabled", "portalProductAnalyticsEnabled")
         // Email: native app session, then a portal session for the same account.
         let email = address()
         let first = try signedIn(try await nativeEmail(email), new: true)
@@ -544,7 +562,7 @@ final class ProductFunnelEventTests: XCTestCase {
     // MARK: - 6. Restored sessions and bearer reuse
 
     func testRestoredSessionsBearerReuseAndBrowserCallsToNativeRoutesRecordNothing() async throws {
-        try await enable("productAnalyticsEnabled")
+        try await enable("productAnalyticsEnabled", "portalProductAnalyticsEnabled")
         let email = address()
         let account = try signedIn(try await nativeEmail(email), new: true)
         try await grant(account.token)
@@ -636,7 +654,7 @@ final class ProductFunnelEventTests: XCTestCase {
         let refused = try await app.db.transaction { db in
             await MeasurementRelayService.outcomeCandidate(accountID: account.user.id, operationID: UUID(), installationID: nil,
                 event: .reportFailed, properties: ["reason": "invalid_request", "title": "Synthetic report"],
-                occurredAt: Date().addingTimeInterval(1), on: db)
+                occurredAt: Date().addingTimeInterval(1), surface: .app, on: db)
         }
         XCTAssertNil(refused)
 
@@ -789,7 +807,7 @@ final class ProductFunnelEventTests: XCTestCase {
     // MARK: - 10. Portal-originated outcomes use the acting account's own permission
 
     func testPortalOriginatedOutcomeUsesOnlyTheActingAccountsOwnPermission() async throws {
-        try await enable("productAnalyticsEnabled")
+        try await enable("productAnalyticsEnabled", "portalProductAnalyticsEnabled")
         let owner = try await manager(), ownerID = try owner.requireID()
         let envelope = try await project(owner, company: true)
         _ = try await snag(owner, project: envelope)
@@ -823,6 +841,136 @@ final class ProductFunnelEventTests: XCTestCase {
         XCTAssertEqual(queued.count, 1)
         XCTAssertFalse(queued[0].contains(portalDevice.uuidString.lowercased()))
         XCTAssertFalse(queued[0].contains(portalDevice.uuidString))
+        let reviewerSurfaces = try await surfaces(reviewerID, "report_issued")
+        XCTAssertEqual(reviewerSurfaces, ["web"])
+    }
+
+    // MARK: - 11. Portal rule (FINAL-PRIVACY-NOTICE-2.0.1.md)
+
+    /// Web `sign_in_succeeded` counts only while the portal switch is on and only for a product
+    /// grant recorded under a portal-covering notice. A grant from a client that sent no notice,
+    /// or one adopted under the pre-auth draft, keeps exactly its app coverage. A regrant under the
+    /// current notice covers the portal from then on and reconstructs nothing earlier.
+    func testPortalSignInsCountOnlyUnderAPortalCoveringGrantWhileThePortalSwitchIsOn() async throws {
+        try await enable("productAnalyticsEnabled")
+        let email = address()
+        let current = try signedIn(try await nativeEmail(email), new: true)
+        try await grant(current.token)
+        _ = try portalSession(try await webEmail(email))
+        try signedIn(try await nativeEmail(email), new: false)
+        let switchedOff = try await events(current.user.id)
+        XCTAssertEqual(switchedOff.map(\.properties), [signIn("email", "ios")], "the portal switch is off by default")
+        try await enable("portalProductAnalyticsEnabled")
+        _ = try portalSession(try await webEmail(email))
+        let switchedOn = try await events(current.user.id)
+        XCTAssertEqual(switchedOn.map(\.properties), [signIn("email", "ios"), signIn("email", "web")])
+        let currentSurfaces = try await surfaces(current.user.id, "sign_in_succeeded")
+        XCTAssertEqual(currentSurfaces, ["app", "web"])
+
+        // No notice sent: app only, never broadened, even with the switch on.
+        let legacyEmail = address()
+        let legacy = try signedIn(try await nativeEmail(legacyEmail), new: true)
+        try await grant(legacy.token, notice: nil)
+        _ = try portalSession(try await webEmail(legacyEmail))
+        try signedIn(try await nativeEmail(legacyEmail), new: false)
+        let legacyEvents = try await events(legacy.user.id)
+        XCTAssertEqual(legacyEvents.map(\.properties), [signIn("email", "ios")])
+
+        // Adopted under the pre-auth draft: app only.
+        let installation = UUID()
+        let issue = try await request(.POST, "api/v2/measurement/signup-intents", object: [
+            "provider": "google", "installationId": installation.uuidString, "noticeVersion": MeasurementNotice.signupDraft,
+            "choices": ["productAnalytics": true, "appleAds": false, "crossCompanyAds": false]])
+        XCTAssertEqual(issue.status, .created, issue.body.string)
+        let issued = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(issue.body.readableBytesView)) as? [String: Any])
+        let intentID = try XCTUnwrap(UUID(uuidString: try XCTUnwrap(issued["intentId"] as? String)))
+        intents.append(intentID)
+        let binding: [String: Any] = ["intentId": intentID.uuidString, "capability": try XCTUnwrap(issued["capability"] as? String)]
+        let draftSubject = "funnel-draft-\(UUID())"
+        let draft = try signedIn(try await nativeGoogle(subject: draftSubject, binding: binding, context: binding), new: true)
+        _ = try portalSession(try await webGoogle(subject: draftSubject))
+        let draftEvents = try await events(draft.user.id)
+        XCTAssertEqual(draftEvents.map(\.properties), [signIn("google", "ios")], "the draft never covered the portal")
+
+        // A fresh choice under the current notice covers the portal from now on; nothing is backfilled.
+        try await grant(legacy.token, expected: try await productRevision(legacy.user.id))
+        _ = try portalSession(try await webEmail(legacyEmail))
+        let regranted = try await events(legacy.user.id)
+        XCTAssertEqual(regranted.map(\.properties), [signIn("email", "ios"), signIn("email", "web")])
+    }
+
+    /// Portal-originated outcomes (and failures) follow the acting account's own coverage: never
+    /// a teammate's, a company's or the project owner's.
+    func testPortalOutcomesFollowTheActingAccountsOwnPortalCoverage() async throws {
+        try await enable("productAnalyticsEnabled")
+        let owner = try await manager(), ownerID = try owner.requireID()
+        let envelope = try await project(owner, company: true)
+        _ = try await snag(owner, project: envelope)
+        let reviewer = try await manager("Synthetic portal reviewer"), reviewerID = try reviewer.requireID()
+        try await join(reviewer, owner: owner, project: envelope, role: "manager")
+        try await grant(try jwt(owner))
+        try await grant(try jwt(reviewer), notice: nil)
+        let ownerSession = try await BrowserSessionService.create(for: owner, config: platform, on: app.db)
+        let reviewerSession = try await BrowserSessionService.create(for: reviewer, config: platform, on: app.db)
+        func portal(_ session: (token: String, principal: BrowserPrincipal), _ body: [String: Any]) async throws -> XCTHTTPResponse {
+            try await request(.POST, reports(envelope), object: body, origin: platform.origin,
+                              cookie: BrowserSessionService.cookieName + "=" + session.token, csrf: session.principal.csrfToken)
+        }
+        let good: () -> [String: Any] = { ["mutation": self.metadata(), "scope": [:] as [String: Any]] }
+
+        // Portal switch off: the owner's portal action is not counted; the same action in the app is.
+        let offPortal = try await portal(ownerSession, good())
+        XCTAssertEqual(offPortal.status, .ok, offPortal.body.string)
+        let offApp = try await request(.POST, reports(envelope), object: good(), bearer: try jwt(owner))
+        XCTAssertEqual(offApp.status, .ok, offApp.body.string)
+        let ownerOff = try await surfaces(ownerID, "report_issued")
+        XCTAssertEqual(ownerOff, ["app"])
+
+        try await enable("portalProductAnalyticsEnabled")
+        let onPortal = try await portal(ownerSession, good())
+        XCTAssertEqual(onPortal.status, .ok, onPortal.body.string)
+        let reviewerPortal = try await portal(reviewerSession, good())
+        XCTAssertEqual(reviewerPortal.status, .ok, reviewerPortal.body.string)
+        let reviewerApp = try await request(.POST, reports(envelope), object: good(), bearer: try jwt(reviewer))
+        XCTAssertEqual(reviewerApp.status, .ok, reviewerApp.body.string)
+        let longTitle = String(repeating: "Synthetic-title ", count: 10)
+        let ownerFailure = try await portal(ownerSession, ["mutation": metadata(), "title": longTitle, "scope": [:] as [String: Any]])
+        XCTAssertEqual(ownerFailure.status, .badRequest)
+        let reviewerFailure = try await portal(reviewerSession, ["mutation": metadata(), "title": longTitle, "scope": [:] as [String: Any]])
+        XCTAssertEqual(reviewerFailure.status, .badRequest)
+
+        let ownerIssued = try await surfaces(ownerID, "report_issued")
+        XCTAssertEqual(ownerIssued, ["app", "web"])
+        let reviewerIssued = try await surfaces(reviewerID, "report_issued")
+        XCTAssertEqual(reviewerIssued, ["app"], "the reviewer's app-only grant never covers the portal, and the owner's is never borrowed")
+        let ownerFailed = try await surfaces(ownerID, "report_failed")
+        XCTAssertEqual(ownerFailed, ["web"])
+        let reviewerFailed = try await surfaces(reviewerID, "report_failed")
+        XCTAssertTrue(reviewerFailed.isEmpty)
+        let ownerPayloads = try await payloads(ownerID, "report_issued")
+        XCTAssertTrue(try ownerPayloads.allSatisfy { try keys($0) == ["event", "occurredAt"] }, "the surface is ledger-only")
+    }
+
+    /// The portal rule is re-checked at dispatch: turning the portal switch off before delivery
+    /// suppresses queued portal events and leaves app events untouched.
+    func testQueuedPortalEventsAreSuppressedWhenThePortalSwitchGoesOffBeforeDispatch() async throws {
+        try await enable("productAnalyticsEnabled", "portalProductAnalyticsEnabled")
+        let recorder = FunnelHTTPRecorder()
+        configureDelivery(recorder)
+        let email = address()
+        let account = try signedIn(try await nativeEmail(email), new: true)
+        try await grant(account.token)
+        try signedIn(try await nativeEmail(email), new: false)
+        _ = try portalSession(try await webEmail(email))
+        let queued = try await events(account.user.id)
+        XCTAssertEqual(queued.map(\.properties), [signIn("email", "ios"), signIn("email", "web")])
+        try await disable("portalProductAnalyticsEnabled")
+        _ = await MeasurementDispatchService.run(app: app, on: app.db)
+        let states = try await jobStates(account.user.id, "sign_in_succeeded")
+        XCTAssertEqual(states, ["delivered", "suppressed"])
+        let sent = await recorder.calls().filter { $0.body.contains("sign_in_succeeded") }
+        XCTAssertEqual(sent.count, 1)
+        XCTAssertTrue(sent.allSatisfy { $0.body.contains("\"surface\":\"ios\"") })
     }
 }
 

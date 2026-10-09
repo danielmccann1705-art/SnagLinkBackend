@@ -127,7 +127,9 @@ final class AppleWebAuthEndpointTests: XCTestCase {
         XCTAssertEqual(fixture.exchangeCount, 1)
     }
     /// Portal Apple sign-in is a `sign_in_succeeded{provider=apple,surface=web}` only for an
-    /// account whose product permission predates the issued session (FUNNELS-OCT9.md).
+    /// account whose product permission predates the issued session (FUNNELS-OCT9.md), was
+    /// recorded under a portal-covering notice, and while the portal switch is on
+    /// (FINAL-PRIVACY-NOTICE-2.0.1.md).
     func testPortalAppleSignInRecordsOneWebSignInOnlyWithPriorProductPermission() async throws {
         let subject = "funnel-web-apple-" + UUID().uuidString
         let account = try await app.db.transaction { db in
@@ -143,8 +145,10 @@ final class AppleWebAuthEndpointTests: XCTestCase {
                 WHERE account_id=\(bind:accountID) AND event_name='sign_in_succeeded' ORDER BY occurred_at
                 """).all().map { "\(try $0.decode(column: "value", as: String.self)):\(try $0.decode(column: "keys", as: Int.self))" }
         }
-        try await FeatureFlag.query(on: app.db).filter(\.$key == "productAnalyticsEnabled").delete()
-        try await FeatureFlag(key: "productAnalyticsEnabled", enabled: true).save(on: app.db)
+        for key in ["productAnalyticsEnabled", "portalProductAnalyticsEnabled"] {
+            try await FeatureFlag.query(on: app.db).filter(\.$key == key).delete()
+            try await FeatureFlag(key: key, enabled: true).save(on: app.db)
+        }
         do {
             let unconsented = try await start()
             fixture.configure(token: try token(unconsented, subject: subject))
@@ -159,7 +163,8 @@ final class AppleWebAuthEndpointTests: XCTestCase {
             try await app.test(.PUT, "api/v2/measurement/permissions/productAnalytics", beforeRequest: { req in
                 req.headers.bearerAuthorization = .init(token: bearer)
                 try req.content.encode(["requestId": UUID().uuidString, "decision": "granted",
-                                        "occurredAt": ISO8601DateFormatter().string(from: Date())])
+                                        "occurredAt": ISO8601DateFormatter().string(from: Date()),
+                                        "noticeVersion": MeasurementNotice.current])
             }, afterResponse: { response async in granted = response })
             XCTAssertEqual(granted.status, .ok, granted.body.string)
 
@@ -176,7 +181,7 @@ final class AppleWebAuthEndpointTests: XCTestCase {
         }
         try? await sql.raw("DELETE FROM measurement_dispatch_jobs WHERE account_id=\(bind:accountID)").run()
         try? await sql.raw("DELETE FROM measurement_product_events WHERE account_id=\(bind:accountID)").run()
-        try? await FeatureFlag.query(on: app.db).filter(\.$key == "productAnalyticsEnabled").delete()
+        try? await FeatureFlag.query(on: app.db).filter(\.$key ~~ ["productAnalyticsEnabled", "portalProductAnalyticsEnabled"]).delete()
     }
     func testUnknownExpiredAndWrongStateNeverExchangeCode() async throws {
         let started = try await start()

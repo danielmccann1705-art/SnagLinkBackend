@@ -46,7 +46,8 @@ struct LinkGrantController: RouteCollection {
         do { return try await body() }
         catch {
             await ProductFunnelMeasurement.contractorLinkCreateFailed(error, accountID: actor, operationID: operationID,
-                                                                      receivedAt: receivedAt, app: req.application, on: req.db)
+                                                                      receivedAt: receivedAt, surface: MeasurementSurface(req),
+                                                                      app: req.application, on: req.db)
             throw error
         }
     }

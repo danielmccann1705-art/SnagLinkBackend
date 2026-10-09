@@ -22,6 +22,10 @@ struct MeasurementPermissionUpdate: Content, Sendable, Equatable {
     let installationId: UUID?
     let attStatus: MeasurementATTStatus?
     let attAssertedAt: Date?
+    /// The exact notice the person saw (`MeasurementNotice.settingsAccepted`). Optional so that a
+    /// client which sends none keeps working; its revision is recorded with no version and covers
+    /// only what the earlier wording covered (the app), never the portal.
+    let noticeVersion: String?
 
     private struct Key: CodingKey, Hashable {
         let stringValue: String
@@ -33,7 +37,7 @@ struct MeasurementPermissionUpdate: Content, Sendable, Equatable {
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: Key.self)
         let allowed: Set<String> = ["requestId", "expectedRevision", "decision", "occurredAt",
-                                    "installationId", "attStatus", "attAssertedAt"]
+                                    "installationId", "attStatus", "attAssertedAt", "noticeVersion"]
         guard values.allKeys.allSatisfy({ allowed.contains($0.stringValue) }) else {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown measurement permission field"))
         }
@@ -45,6 +49,7 @@ struct MeasurementPermissionUpdate: Content, Sendable, Equatable {
         installationId = try values.decodeIfPresent(UUID.self, forKey: key("installationId"))
         attStatus = try values.decodeIfPresent(MeasurementATTStatus.self, forKey: key("attStatus"))
         attAssertedAt = try values.decodeIfPresent(Date.self, forKey: key("attAssertedAt"))
+        noticeVersion = try values.decodeIfPresent(String.self, forKey: key("noticeVersion"))
     }
 }
 
@@ -81,6 +86,12 @@ struct MeasurementPermissionResponse: Content, Sendable {
     let attExpiresAt: Date?
     let erasurePending: Bool
     let activation: MeasurementActivation
+    /// The notice the current revision was recorded under; nil for an undecided purpose or a
+    /// revision from a client that sent none (additive, FINAL-PRIVACY-NOTICE-2.0.1.md).
+    let noticeVersion: String?
+    /// Product analytics only: the current grant covers the person's own actions in the web portal.
+    /// False for every other purpose and for a grant recorded under an app-only notice.
+    let coversPortal: Bool
 }
 
 struct MeasurementPermissionsEnvelope: Content, Sendable {
@@ -118,7 +129,12 @@ enum MeasurementPrivacyService {
         return try await readSnapshot(accountID: accountID, installationID: installationID, now: now, on: db)
     }
 
+    /// `surface` is where the request came from. The web portal (a cookie session) may view every
+    /// choice, withdraw any of them, and turn on only product analytics, under the current notice;
+    /// Apple Ads and other adverts depend on the iPhone (its Apple token, its tracking permission)
+    /// and can be turned on only in the app (FINAL-PRIVACY-NOTICE-2.0.1.md, portal server rules).
     static func update(accountID: UUID, purpose: MeasurementPurpose, input: MeasurementPermissionUpdate,
+                       surface: MeasurementSurface = .app,
                        now: Date = Date(), on db: Database) async throws -> MeasurementPermissionsEnvelope {
         return try await db.transaction { transaction in
             try await lockActiveAccount(accountID, on: transaction)
@@ -126,7 +142,7 @@ enum MeasurementPrivacyService {
             let sql = try VerifiedIdentityService.sql(transaction)
 
             if let replay = try await sql.raw("""
-                SELECT purpose,expected_revision,decision,occurred_at,installation_id,att_status,att_asserted_at
+                SELECT purpose,expected_revision,decision,occurred_at,installation_id,att_status,att_asserted_at,notice_version
                 FROM measurement_consent_events WHERE account_id=\(bind:accountID) AND request_id=\(bind:input.requestId)
                 """).first() {
                 guard try identical(input, purpose: purpose, row: replay) else {
@@ -136,6 +152,14 @@ enum MeasurementPrivacyService {
             }
 
             try validate(input, purpose: purpose, now: now)
+            if surface == .web && input.decision == .granted {
+                guard purpose == .productAnalytics else {
+                    throw Abort(.forbidden, reason: "Turn this choice on in the Snaglist iPhone app", identifier: "measurement_app_only")
+                }
+                guard input.noticeVersion == MeasurementNotice.current else {
+                    throw Abort(.badRequest, reason: "Use a current measurement notice", identifier: "measurement_notice_invalid")
+                }
+            }
 
             let current = try await sql.raw("""
                 SELECT revision,subject_id FROM measurement_permission_current
@@ -152,7 +176,7 @@ enum MeasurementPrivacyService {
                 currentSubjectID: try current?.decode(column: "subject_id", as: UUID?.self),
                 decision: input.decision, occurredAt: input.occurredAt,
                 installationID: input.installationId, attStatus: input.attStatus,
-                attAssertedAt: input.attAssertedAt, now: now, on: transaction)
+                attAssertedAt: input.attAssertedAt, noticeVersion: input.noticeVersion, now: now, on: transaction)
             return try await readSnapshot(accountID: accountID, installationID: input.installationId, now: now, on: transaction)
         }
     }
@@ -166,7 +190,7 @@ enum MeasurementPrivacyService {
                                             expectedRevision: UUID?, currentSubjectID: UUID?,
                                             decision: MeasurementDecision, occurredAt: Date,
                                             installationID: UUID?, attStatus: MeasurementATTStatus?,
-                                            attAssertedAt: Date?, now: Date,
+                                            attAssertedAt: Date?, noticeVersion: String? = nil, now: Date,
                                             on transaction: Database) async throws -> (revision: UUID, subjectID: UUID?) {
         let sql = try VerifiedIdentityService.sql(transaction)
         let revision = UUID()
@@ -174,10 +198,11 @@ enum MeasurementPrivacyService {
         try await sql.raw("""
             INSERT INTO measurement_consent_events
                 (id,request_id,account_id,purpose,expected_revision,decision,occurred_at,received_at,
-                 installation_id,att_status,att_asserted_at,att_expires_at)
+                 installation_id,att_status,att_asserted_at,att_expires_at,notice_version)
             VALUES (\(bind:revision),\(bind:requestID),\(bind:accountID),\(bind:purpose.rawValue),
                     \(bind:expectedRevision),\(bind:decision.rawValue),\(bind:occurredAt),\(bind:now),
-                    \(bind:installationID),\(bind:attStatus?.rawValue),\(bind:attAssertedAt),\(bind:attExpiry))
+                    \(bind:installationID),\(bind:attStatus?.rawValue),\(bind:attAssertedAt),\(bind:attExpiry),
+                    \(bind:noticeVersion))
             """).run()
 
         var subjectID = currentSubjectID
@@ -280,8 +305,8 @@ enum MeasurementPrivacyService {
         // Erasure exposure was captured above, so the delivery ledger no longer
         // needs to retain an account/source join back to economic facts.
         try await sql.raw("DELETE FROM measurement_dispatch_jobs WHERE account_id=\(bind:accountID)").run()
-        // Pre-auth signup intents and the canonical signup fact keep only their
-        // deduplication tombstones; their account, installation and revision joins go.
+        // Pre-auth signup intents keep only their tombstone fields (pruned on schedule); the
+        // per-account signup fact, the deduplication record of a live account, is deleted.
         try await SignupIntentService.eraseAccount(accountID, now: now, on: sql)
         try await sql.raw("UPDATE measurement_revenuecat_lifecycle_events SET account_id=NULL WHERE account_id=\(bind:accountID)").run()
         try await sql.raw("UPDATE measurement_revenuecat_adjustments SET account_id=NULL WHERE account_id=\(bind:accountID)").run()
@@ -292,6 +317,11 @@ enum MeasurementPrivacyService {
     }
 
     private static func validate(_ input: MeasurementPermissionUpdate, purpose: MeasurementPurpose, now: Date) throws {
+        // Only the current notice is recorded through settings. The pre-auth draft, the Singular
+        // alternative and anything unknown are refused rather than recorded as broader coverage.
+        if let version = input.noticeVersion, !MeasurementNotice.settingsAccepted.contains(version) {
+            throw Abort(.badRequest, reason: "Use a current measurement notice", identifier: "measurement_notice_invalid")
+        }
         let maximumAge = input.decision == .granted ? clientClaimMaximumAge : clientAuditMaximumAge
         guard input.occurredAt <= now.addingTimeInterval(clientFutureSkew),
               input.occurredAt >= now.addingTimeInterval(-maximumAge) else {
@@ -319,7 +349,8 @@ enum MeasurementPrivacyService {
             same(row.decode(column: "occurred_at", as: Date.self), input.occurredAt) &&
             row.decode(column: "installation_id", as: UUID?.self) == input.installationId &&
             row.decode(column: "att_status", as: String?.self) == input.attStatus?.rawValue &&
-            same(row.decode(column: "att_asserted_at", as: Date?.self), input.attAssertedAt)
+            same(row.decode(column: "att_asserted_at", as: Date?.self), input.attAssertedAt) &&
+            row.decode(column: "notice_version", as: String?.self) == input.noticeVersion
     }
 
     static func createSubject(accountID: UUID, purpose: MeasurementPurpose, now: Date, on sql: SQLDatabase) async throws -> UUID {
@@ -432,6 +463,7 @@ enum MeasurementPrivacyService {
         let sql = try VerifiedIdentityService.sql(db)
         let rows = try await sql.raw("""
             SELECT c.purpose,c.revision,c.decision,c.updated_at,s.opaque_subject,choice.att_status AS choice_att_status,
+                   choice.notice_version AS choice_notice_version,
                    EXISTS(SELECT 1 FROM measurement_erasure_jobs e JOIN measurement_subjects es ON es.id=e.subject_id
                           WHERE e.account_id=c.account_id AND es.purpose=c.purpose AND e.state<>'completed') AS erasure_pending
             FROM measurement_permission_current c
@@ -454,7 +486,7 @@ enum MeasurementPrivacyService {
             guard let row = current[purpose.rawValue] else {
                 return .init(purpose: purpose, revision: nil, decision: "undecided", effective: false, subjectId: nil,
                              updatedAt: nil, attStatus: nil, attAssertedAt: nil, attExpiresAt: nil, erasurePending: false,
-                             activation: .notChosen)
+                             activation: .notChosen, noticeVersion: nil, coversPortal: false)
             }
             let revision = try row.decode(column: "revision", as: UUID.self)
             let decision = try row.decode(column: "decision", as: String.self)
@@ -475,6 +507,7 @@ enum MeasurementPrivacyService {
                 }
             }
             let opaque = try row.decode(column: "opaque_subject", as: UUID?.self)
+            let notice = try row.decode(column: "choice_notice_version", as: String?.self)
             let hasRequiredSubject = purpose == .appleAds || opaque != nil
             let granted = decision == MeasurementDecision.granted.rawValue
             let effective = granted && attEffective && !erasure && hasRequiredSubject
@@ -488,7 +521,8 @@ enum MeasurementPrivacyService {
                          subjectId: purpose == .crossCompanyAds && effective ? opaque : nil,
                          updatedAt: try row.decode(column: "updated_at", as: Date.self),
                          attStatus: status, attAssertedAt: asserted, attExpiresAt: expires, erasurePending: erasure,
-                         activation: activation)
+                         activation: activation, noticeVersion: notice,
+                         coversPortal: purpose == .productAnalytics && granted && MeasurementNotice.coversPortal(notice))
         }
         return .init(permissions: permissions)
     }

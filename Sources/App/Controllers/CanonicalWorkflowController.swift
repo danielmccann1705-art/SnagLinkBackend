@@ -67,7 +67,7 @@ struct CanonicalWorkflowController: RouteCollection {
             let candidate = await MeasurementRelayService.outcomeCandidate(
                 accountID: actorID, operationID: command.mutation.operationId,
                 installationID: command.mutation.deviceId, event: event,
-                occurredAt: occurredAt, on: db)
+                occurredAt: occurredAt, surface: MeasurementSurface(req), on: db)
             return (response, candidate)
         }
         if let candidate = applied.1 {

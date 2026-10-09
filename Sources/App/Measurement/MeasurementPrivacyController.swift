@@ -22,7 +22,7 @@ struct MeasurementPrivacyController: RouteCollection {
         do { body = try req.content.decode(MeasurementPermissionUpdate.self) }
         catch { throw Abort(.badRequest, reason: "Use a valid measurement permission request", identifier: "measurement_request_invalid") }
         return try await MeasurementPrivacyService.update(accountID: req.requireAuthenticatedUserId(), purpose: purpose,
-                                                            input: body, on: req.db)
+                                                            input: body, surface: MeasurementSurface(req), on: req.db)
     }
 
     private func installationID(_ req: Request) throws -> UUID? {

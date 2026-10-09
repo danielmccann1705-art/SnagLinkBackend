@@ -12,7 +12,11 @@ import FluentSQL
 enum ProductFunnelMeasurement {
     enum SignInProvider: String, CaseIterable, Sendable { case apple, google, email }
     /// `ios`: the native app's bearer session. `web`: the portal's cookie session.
-    enum SignInSurface: String, CaseIterable, Sendable { case ios, web }
+    enum SignInSurface: String, CaseIterable, Sendable {
+        case ios, web
+        /// A portal session follows the portal rule (`MeasurementRelayService.outcomeCandidate`).
+        var measurementSurface: MeasurementSurface { self == .web ? .web : .app }
+    }
 
     /// Fixed reasons for a failed authenticated canonical v2 Contractor-link create
     /// (`links/prepare` or `links/:id/activate`). Derived from the refused status only.
@@ -67,7 +71,7 @@ enum ProductFunnelMeasurement {
         return await MeasurementRelayService.outcomeCandidate(
             accountID: accountID, operationID: sessionID, installationID: nil,
             event: .signInSucceeded, properties: ["provider": provider.rawValue, "surface": surface.rawValue],
-            occurredAt: Date(), beforeLookup: hook(.signIn, app), on: db)
+            occurredAt: Date(), surface: surface.measurementSurface, beforeLookup: hook(.signIn, app), on: db)
     }
 
     /// Call only once the session credential exists: the signed bearer token, or the
@@ -81,17 +85,17 @@ enum ProductFunnelMeasurement {
     // MARK: - Failures
 
     static func contractorLinkCreateFailed(_ error: Error, accountID: UUID, operationID: UUID, receivedAt: Date,
-                                           app: Application, on db: Database) async {
+                                           surface: MeasurementSurface, app: Application, on db: Database) async {
         // A retry of an operation that was already applied is not a failed create.
         guard (error as? Abort)?.identifier != "already_applied_refresh_required" else { return }
         await failure(.contractorLinkCreateFailed, reason: contractorLinkReason(error).rawValue, accountID: accountID,
-                      operationID: operationID, receivedAt: receivedAt, app: app, on: db)
+                      operationID: operationID, receivedAt: receivedAt, surface: surface, app: app, on: db)
     }
 
     static func reportFailed(_ error: Error, accountID: UUID, operationID: UUID, receivedAt: Date,
-                             app: Application, on db: Database) async {
+                             surface: MeasurementSurface, app: Application, on db: Database) async {
         await failure(.reportFailed, reason: reportReason(error).rawValue, accountID: accountID,
-                      operationID: operationID, receivedAt: receivedAt, app: app, on: db)
+                      operationID: operationID, receivedAt: receivedAt, surface: surface, app: app, on: db)
     }
 
     /// The business transaction has already rolled back, so the candidate is captured in
@@ -99,13 +103,15 @@ enum ProductFunnelMeasurement {
     /// derived from the client operation ID: retrying the same failed operation records
     /// at most one failure. The occurrence time is the original request receipt time.
     private static func failure(_ event: MeasurementRelayService.ServerOutcome, reason: String, accountID: UUID,
-                                operationID: UUID, receivedAt: Date, app: Application, on db: Database) async {
+                                operationID: UUID, receivedAt: Date, surface: MeasurementSurface,
+                                app: Application, on db: Database) async {
         let candidate: MeasurementRelayService.OutcomeCandidate?
         do {
             candidate = try await db.transaction { tx in
                 await MeasurementRelayService.outcomeCandidate(
                     accountID: accountID, operationID: operationID, installationID: nil, event: event,
-                    properties: ["reason": reason], occurredAt: receivedAt, beforeLookup: hook(.failure, app), on: tx)
+                    properties: ["reason": reason], occurredAt: receivedAt, surface: surface,
+                    beforeLookup: hook(.failure, app), on: tx)
             }
         } catch { return }
         await record(candidate, app: app, on: db)

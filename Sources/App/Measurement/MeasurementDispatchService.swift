@@ -195,6 +195,22 @@ enum MeasurementDispatchService {
             }
             let sourceKind = try row.decode(column: "source_kind", as: String.self)
             let sourceID = try row.decode(column: "source_id", as: UUID.self)
+            if destination == "posthog", sourceKind == "productEvent" {
+                // Portal rule, re-checked before delivery: an event a portal session caused is sent
+                // only while the portal switch is on and only under a portal-covering revision.
+                // Client uploads and rows written before surfaces were recorded are native (NULL).
+                let ledger = try await sql.raw("""
+                    SELECT surface FROM measurement_product_events WHERE account_id=\(bind:accountID) AND event_id=\(bind:sourceID)
+                    """).first()
+                if try ledger?.decode(column: "surface", as: String?.self) == MeasurementSurface.web.rawValue {
+                    guard flags["portalProductAnalyticsEnabled"] == true,
+                          try await sql.raw("""
+                            SELECT 1 FROM measurement_permission_current c WHERE c.account_id=\(bind:accountID)
+                              AND c.purpose='productAnalytics' AND c.revision=\(bind:revision)
+                              AND \(unsafeRaw: MeasurementNotice.revisionCoversPortal("c"))
+                            """).first() != nil else { return .suppressed }
+                }
+            }
             guard let payloadText = try row.decode(column: "payload_text", as: String?.self),
                   let payloadData = payloadText.data(using: .utf8),
                   var payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: String] else { return .suppressed }

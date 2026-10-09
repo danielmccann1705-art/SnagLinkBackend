@@ -180,6 +180,8 @@ enum MeasurementRelayService {
         let event: ServerOutcome
         let properties: [String: String]
         let occurredAt: Date
+        /// The surface whose session caused the event. `web` events follow the portal rule.
+        let surface: MeasurementSurface
         fileprivate let consentRevision: UUID
         fileprivate let subjectID: UUID
     }
@@ -342,9 +344,15 @@ enum MeasurementRelayService {
     /// Called inside the genuine new-mutation transaction, after its durable receipt
     /// was written. The purpose lock makes this an exact snapshot of the grant which
     /// covered the operation. A replay never reaches this call.
+    ///
+    /// Portal rule (FINAL-PRIVACY-NOTICE-2.0.1.md): an event caused by a portal session
+    /// (`surface == .web`) is a candidate only while `portalProductAnalyticsEnabled` is on and
+    /// only if the acting account's own effective product revision was recorded under a
+    /// portal-covering notice. An app-only grant (an earlier notice, or none) keeps exactly its
+    /// app coverage. Only the acting account's own permission is ever read.
     static func outcomeCandidate(accountID: UUID, operationID: UUID, installationID: UUID?,
                                  event: ServerOutcome, properties: [String: String] = [:],
-                                 occurredAt: Date,
+                                 occurredAt: Date, surface: MeasurementSurface,
                                  beforeLookup: (@Sendable (SQLDatabase) async throws -> Void)? = nil,
                                  on db: Database) async -> OutcomeCandidate? {
         guard permits(event, properties: properties) else { return nil }
@@ -362,7 +370,8 @@ enum MeasurementRelayService {
             // must roll back this savepoint alone.
             if let beforeLookup { try await beforeLookup(sql) }
             let flags = try await FeatureFlagService.resolve(on: db)
-            guard flags["productAnalyticsEnabled"] == true else {
+            guard flags["productAnalyticsEnabled"] == true,
+                  surface == .app || flags["portalProductAnalyticsEnabled"] == true else {
                 try await sql.raw("RELEASE SAVEPOINT optional_measurement_candidate").run()
                 return nil
             }
@@ -376,12 +385,14 @@ enum MeasurementRelayService {
                   AND NOT EXISTS(
                     SELECT 1 FROM measurement_erasure_jobs e
                     WHERE e.account_id=c.account_id AND e.subject_id=c.subject_id AND e.state<>'completed')
+                  AND (\(bind:surface == .app) OR \(unsafeRaw: MeasurementNotice.revisionCoversPortal("c")))
                 LIMIT 1
                 """).first()
             let candidate: OutcomeCandidate?
             if let row {
                 candidate = .init(accountID: accountID, operationID: operationID,
                     installationID: installationID, event: event, properties: properties, occurredAt: occurredAt,
+                    surface: surface,
                     consentRevision: try row.decode(column: "revision", as: UUID.self),
                     subjectID: try row.decode(column: "subject_id", as: UUID.self))
             } else { candidate = nil }
@@ -433,7 +444,8 @@ enum MeasurementRelayService {
                 SELECT pg_try_advisory_xact_lock(hashtextextended(\(bind:lockKey),0)) AS acquired
                 """).first(), try lock.decode(column: "acquired", as: Bool.self) else { return }
             let flags = try await FeatureFlagService.resolve(on: tx)
-            guard flags["productAnalyticsEnabled"] == true else { return }
+            guard flags["productAnalyticsEnabled"] == true,
+                  candidate.surface == .app || flags["portalProductAnalyticsEnabled"] == true else { return }
             if let existing = try await sql.raw("""
                 SELECT body_hash FROM measurement_product_events
                 WHERE account_id=\(bind:accountID) AND event_id=\(bind:eventID)
@@ -454,16 +466,18 @@ enum MeasurementRelayService {
                   AND NOT EXISTS(
                     SELECT 1 FROM measurement_erasure_jobs e
                     WHERE e.account_id=c.account_id AND e.subject_id=c.subject_id AND e.state<>'completed')
+                  AND (\(bind:candidate.surface == .app) OR \(unsafeRaw: MeasurementNotice.revisionCoversPortal("c")))
                 LIMIT 1
                 """).first() != nil else { return }
             let receivedAt = Date()
             try await sql.raw("""
                 INSERT INTO measurement_product_events
                     (account_id,event_id,installation_id,purpose,consent_revision,subject_id,occurred_at,received_at,
-                     schema_version,event_name,properties,body_hash)
+                     schema_version,event_name,properties,body_hash,surface)
                 VALUES (\(bind:accountID),\(bind:eventID),\(bind:candidate.installationID),'productAnalytics',
                         \(bind:candidate.consentRevision),\(bind:candidate.subjectID),\(bind:candidate.occurredAt),\(bind:receivedAt),1,
-                        \(bind:candidate.event.rawValue),CAST(\(bind:properties) AS JSONB),\(bind:bodyHash))
+                        \(bind:candidate.event.rawValue),CAST(\(bind:properties) AS JSONB),\(bind:bodyHash),
+                        \(bind:candidate.surface.rawValue))
                 """).run()
             let payload = try canonicalJSON(["event": candidate.event.rawValue,
                 "occurredAt": ISO8601DateFormatter().string(from: candidate.occurredAt)]
