@@ -216,6 +216,7 @@ func routes(_ app: Application) throws {
     try app.register(collection: AdMeasurementController())
     try app.register(collection: MeasurementPrivacyController())
     try app.register(collection: MeasurementRelayController())
+    try app.register(collection: SignupIntentController())
     try app.register(collection: RevenueCatMeasurementController())
 }
 

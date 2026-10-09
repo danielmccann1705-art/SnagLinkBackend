@@ -45,6 +45,8 @@ struct CleanupService {
         var measurementErasure: MeasurementErasureService.Counts? = nil
         /// Expired purchase-origin capabilities. Acquisition tombstones are retained.
         var measurementPurchaseIntents: Int? = nil
+        /// Expired or settled signup intents reduced to tombstones. Optional for the same reason.
+        var measurementSignupIntents: Int? = nil
         /// The container's own numbers at the end of the pass (wave 3): CPU limit and use,
         /// memory, the database pool and round trips. Numbers only; optional for the same
         /// reason as the fields above, and never able to fail the pass.
@@ -158,6 +160,7 @@ struct CleanupService {
         removed.measurementDispatch = await MeasurementDispatchService.run(app: app, on: db)
         removed.measurementErasure = await MeasurementErasureService.run(app: app, on: db)
         removed.measurementPurchaseIntents = try await PurchaseOriginService.cleanup(on: db)
+        removed.measurementSignupIntents = try await SignupIntentService.cleanup(on: db)
         removed.accountDeletionJobs = try await AccountDeletionWorker.run(app: app, on: db, transactionMode: .maintenanceConnection,
                                                                           budget: budget)
         try await SnagDeletionService.cleanupFiles(app: app, on: db)

@@ -42,6 +42,12 @@ struct AuthController: RouteCollection {
         let email = appleToken.email
 
         let emailVerified = appleToken.emailVerified?.value == true
+        // Optional signup measurement is proven only by the nonce inside the token that
+        // passed signature, issuer, audience and expiry verification above.
+        let verifiedNonce = appleToken.nonce
+        let issuedAt = appleToken.issuedAt.value
+        let measurement = Self.isNative(req) ? input.measurementContext?.value : nil
+        let application = req.application
         // One transaction for the account and its identities; a race the unique constraints
         // caught is retried once against the winner (F21, concurrent first sign-ins).
         let resolution = try await VerifiedIdentityService.transactionRetryingIdentityRace(on: req.db) { db in
@@ -55,6 +61,9 @@ struct AuthController: RouteCollection {
             if emailVerified, let email, !email.isEmpty {
                 _ = try await VerifiedIdentityService.adoptProviderVerifiedEmail(email, to: resolution.user.requireID(), on: db)
             }
+            // Never throws and never changes the authentication result.
+            await SignupIntentService.settle(.apple(verifiedNonce: verifiedNonce, issuedAt: issuedAt),
+                                             context: measurement, resolution: resolution, app: application, on: db)
             return resolution
         }
 
@@ -119,7 +128,18 @@ struct AuthController: RouteCollection {
             requestedName: input.name?.trimmingCharacters(in: .whitespacesAndNewlines),
             requestingIP: IPAddressExtractor.extract(from: req)
         )
-        try await authToken.save(on: req.db)
+        // An optional native measurement intent is bound to this exact token row in the
+        // same transaction, before any mail leaves. The local capability never enters
+        // the email. A failed binding sends the same mail and the same 204, unmeasured.
+        let measurement = Self.isNative(req) ? input.measurementContext?.value : nil
+        let application = req.application
+        try await req.db.transaction { db in
+            try await authToken.save(on: db)
+            if let measurement {
+                await SignupIntentService.bind(measurement, to: .emailToken(id: try authToken.requireID(), expiresAt: authToken.expiresAt),
+                                               app: application, on: db)
+            }
+        }
 
         let linkURL = "\(Self.magicLinkBaseURL)/auth/\(rawToken)"
 
@@ -155,6 +175,9 @@ struct AuthController: RouteCollection {
         }
 
         let tokenHash = SHA256Hasher.hash(token: rawToken)
+        // Present only when the exact pending request context survived on this device.
+        let measurement = Self.isNative(req) ? input.measurementContext?.value : nil
+        let application = req.application
         let resolution = try await req.db.transaction { db -> VerifiedIdentityService.Resolution in
             guard let sql = db as? SQLDatabase else { throw Abort(.serviceUnavailable) }
             // Serialize consumption across processes, not only within one Worker.
@@ -177,7 +200,11 @@ struct AuthController: RouteCollection {
             authToken.consumedAt = Date()
             try await authToken.save(on: db)
 
-            return try await VerifiedIdentityService.resolveEmailOutcome(authToken.email, name: authToken.requestedName, on: db)
+            let resolution = try await VerifiedIdentityService.resolveEmailOutcome(authToken.email, name: authToken.requestedName, on: db)
+            // Another device, or a lost local context, consumes a bound intent import-free.
+            await SignupIntentService.settle(.emailToken(try authToken.requireID()), context: measurement,
+                                             resolution: resolution, app: application, on: db)
+            return resolution
         }
 
         return try issueAuthResponse(for: resolution, on: req)
@@ -228,6 +255,12 @@ struct AuthController: RouteCollection {
         Environment.get("MAGIC_LINK_BASE_URL") ?? "https://snaglist.dev"
     }
 
+    /// Native app requests carry no browser fetch metadata. Measurement context from a
+    /// browser is ignored: web flows keep their own cookie-bound challenges.
+    static func isNative(_ req: Request) -> Bool {
+        req.headers["Origin"].isEmpty && req.headers["Sec-Fetch-Site"].isEmpty
+    }
+
     /// Short, non-reversible-in-practice correlation id for logs.
     private static func emailHash(_ email: String) -> String {
         String(SHA256Hasher.hash(token: email).prefix(12))
@@ -273,15 +306,21 @@ struct AppleSignInRequest: Content {
     let authorizationCode: String?
     let firstName: String?
     let lastName: String?
+    /// Optional signup measurement (`SignupMeasurementContext`); malformed means absent.
+    let measurementContext: OptionalSignupMeasurementContext?
 }
 
 struct MagicLinkRequestBody: Content {
     let email: String
     let name: String?
+    /// Optional `{intentId, capability}` bound to the issued token row; malformed means absent.
+    let measurementContext: OptionalSignupBindingContext?
 }
 
 struct MagicLinkVerifyBody: Content {
     let token: String
+    /// Optional signup measurement (`SignupMeasurementContext`); malformed means absent.
+    let measurementContext: OptionalSignupMeasurementContext?
 }
 
 struct AuthResponse: Content {

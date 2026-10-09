@@ -105,69 +105,91 @@ enum MeasurementPrivacyService {
                 throw Abort(.conflict, reason: "Measurement permission changed. Refresh before saving", identifier: "measurement_revision_conflict")
             }
 
-            let revision = UUID()
-            let attExpiry = input.attAssertedAt == nil ? nil : now.addingTimeInterval(attLifetime)
-            try await sql.raw("""
-                INSERT INTO measurement_consent_events
-                    (id,request_id,account_id,purpose,expected_revision,decision,occurred_at,received_at,
-                     installation_id,att_status,att_asserted_at,att_expires_at)
-                VALUES (\(bind:revision),\(bind:input.requestId),\(bind:accountID),\(bind:purpose.rawValue),
-                        \(bind:input.expectedRevision),\(bind:input.decision.rawValue),\(bind:input.occurredAt),\(bind:now),
-                        \(bind:input.installationId),\(bind:input.attStatus?.rawValue),\(bind:input.attAssertedAt),\(bind:attExpiry))
-                """).run()
-
-            var subjectID = try current?.decode(column: "subject_id", as: UUID?.self)
-            if input.decision == .granted {
-                let mayCreate = purpose == .productAnalytics || (purpose == .crossCompanyAds && input.attStatus == .authorized)
-                if mayCreate && subjectID == nil {
-                    let erasurePending = try await sql.raw("""
-                        SELECT 1 FROM measurement_erasure_jobs e JOIN measurement_subjects s ON s.id=e.subject_id
-                        WHERE e.account_id=\(bind:accountID) AND s.purpose=\(bind:purpose.rawValue) AND e.state<>'completed' LIMIT 1
-                        """).first() != nil
-                    if !erasurePending {
-                        subjectID = try await createSubject(accountID: accountID, purpose: purpose, now: now, on: sql)
-                    }
-                }
-            } else {
-                let revoked = try await revokeSubjects(accountID: accountID, purpose: purpose, accountDeletionJobID: nil, now: now, on: sql)
-                if purpose == .crossCompanyAds {
-                    try await sql.raw("DELETE FROM measurement_att_assertions WHERE account_id=\(bind:accountID)").run()
-                }
-                if purpose == .appleAds {
-                    try await ApplePurchaseOriginService.revoke(accountID: accountID, now: now, on: sql)
-                    _ = try await AdAttributionStore.eraseAccount(accountID, on: transaction)
-                }
-                if revoked { subjectID = nil }
-            }
-
-            if purpose == .crossCompanyAds, input.decision == .granted,
-               let installationID = input.installationId, let status = input.attStatus,
-               let assertedAt = input.attAssertedAt, let attExpiry {
-                let continuityStartedAt: Date? = status == .authorized ? now : nil
-                let continuityID: UUID? = status == .authorized ? UUID() : nil
-                try await sql.raw("""
-                    INSERT INTO measurement_att_assertions
-                        (account_id,installation_id,purpose,consent_revision,status,asserted_at,received_at,expires_at,
-                         continuity_started_at,continuity_id)
-                    VALUES (\(bind:accountID),\(bind:installationID),'crossCompanyAds',\(bind:revision),\(bind:status.rawValue),
-                            \(bind:assertedAt),\(bind:now),\(bind:attExpiry),
-                            \(bind:continuityStartedAt),\(bind:continuityID))
-                    ON CONFLICT (account_id,installation_id) DO UPDATE SET
-                        consent_revision=EXCLUDED.consent_revision,status=EXCLUDED.status,asserted_at=EXCLUDED.asserted_at,
-                        received_at=EXCLUDED.received_at,expires_at=EXCLUDED.expires_at,
-                        continuity_started_at=EXCLUDED.continuity_started_at,
-                        continuity_id=EXCLUDED.continuity_id
-                    """).run()
-            }
-
-            try await sql.raw("""
-                INSERT INTO measurement_permission_current(account_id,purpose,revision,decision,subject_id,updated_at)
-                VALUES (\(bind:accountID),\(bind:purpose.rawValue),\(bind:revision),\(bind:input.decision.rawValue),\(bind:subjectID),\(bind:now))
-                ON CONFLICT (account_id,purpose) DO UPDATE SET revision=EXCLUDED.revision,decision=EXCLUDED.decision,
-                    subject_id=EXCLUDED.subject_id,updated_at=EXCLUDED.updated_at
-                """).run()
+            _ = try await recordDecisionInTransaction(
+                accountID: accountID, purpose: purpose, requestID: input.requestId,
+                expectedRevision: input.expectedRevision,
+                currentSubjectID: try current?.decode(column: "subject_id", as: UUID?.self),
+                decision: input.decision, occurredAt: input.occurredAt,
+                installationID: input.installationId, attStatus: input.attStatus,
+                attAssertedAt: input.attAssertedAt, now: now, on: transaction)
             return try await readSnapshot(accountID: accountID, installationID: input.installationId, now: now, on: transaction)
         }
+    }
+
+    /// Transaction-internal consent write shared by the settings route and new-account
+    /// signup adoption. The caller owns the transaction, the active account row and this
+    /// purpose's barrier, has already validated the input and has read the current row
+    /// `FOR UPDATE`. It never opens a transaction of its own.
+    @discardableResult
+    static func recordDecisionInTransaction(accountID: UUID, purpose: MeasurementPurpose, requestID: UUID,
+                                            expectedRevision: UUID?, currentSubjectID: UUID?,
+                                            decision: MeasurementDecision, occurredAt: Date,
+                                            installationID: UUID?, attStatus: MeasurementATTStatus?,
+                                            attAssertedAt: Date?, now: Date,
+                                            on transaction: Database) async throws -> (revision: UUID, subjectID: UUID?) {
+        let sql = try VerifiedIdentityService.sql(transaction)
+        let revision = UUID()
+        let attExpiry = attAssertedAt == nil ? nil : now.addingTimeInterval(attLifetime)
+        try await sql.raw("""
+            INSERT INTO measurement_consent_events
+                (id,request_id,account_id,purpose,expected_revision,decision,occurred_at,received_at,
+                 installation_id,att_status,att_asserted_at,att_expires_at)
+            VALUES (\(bind:revision),\(bind:requestID),\(bind:accountID),\(bind:purpose.rawValue),
+                    \(bind:expectedRevision),\(bind:decision.rawValue),\(bind:occurredAt),\(bind:now),
+                    \(bind:installationID),\(bind:attStatus?.rawValue),\(bind:attAssertedAt),\(bind:attExpiry))
+            """).run()
+
+        var subjectID = currentSubjectID
+        if decision == .granted {
+            let mayCreate = purpose == .productAnalytics || (purpose == .crossCompanyAds && attStatus == .authorized)
+            if mayCreate && subjectID == nil {
+                let erasurePending = try await sql.raw("""
+                    SELECT 1 FROM measurement_erasure_jobs e JOIN measurement_subjects s ON s.id=e.subject_id
+                    WHERE e.account_id=\(bind:accountID) AND s.purpose=\(bind:purpose.rawValue) AND e.state<>'completed' LIMIT 1
+                    """).first() != nil
+                if !erasurePending {
+                    subjectID = try await createSubject(accountID: accountID, purpose: purpose, now: now, on: sql)
+                }
+            }
+        } else {
+            let revoked = try await revokeSubjects(accountID: accountID, purpose: purpose, accountDeletionJobID: nil, now: now, on: sql)
+            if purpose == .crossCompanyAds {
+                try await sql.raw("DELETE FROM measurement_att_assertions WHERE account_id=\(bind:accountID)").run()
+            }
+            if purpose == .appleAds {
+                try await ApplePurchaseOriginService.revoke(accountID: accountID, now: now, on: sql)
+                _ = try await AdAttributionStore.eraseAccount(accountID, on: transaction)
+            }
+            if revoked { subjectID = nil }
+        }
+
+        if purpose == .crossCompanyAds, decision == .granted,
+           let installationID, let status = attStatus,
+           let assertedAt = attAssertedAt, let attExpiry {
+            let continuityStartedAt: Date? = status == .authorized ? now : nil
+            let continuityID: UUID? = status == .authorized ? UUID() : nil
+            try await sql.raw("""
+                INSERT INTO measurement_att_assertions
+                    (account_id,installation_id,purpose,consent_revision,status,asserted_at,received_at,expires_at,
+                     continuity_started_at,continuity_id)
+                VALUES (\(bind:accountID),\(bind:installationID),'crossCompanyAds',\(bind:revision),\(bind:status.rawValue),
+                        \(bind:assertedAt),\(bind:now),\(bind:attExpiry),
+                        \(bind:continuityStartedAt),\(bind:continuityID))
+                ON CONFLICT (account_id,installation_id) DO UPDATE SET
+                    consent_revision=EXCLUDED.consent_revision,status=EXCLUDED.status,asserted_at=EXCLUDED.asserted_at,
+                    received_at=EXCLUDED.received_at,expires_at=EXCLUDED.expires_at,
+                    continuity_started_at=EXCLUDED.continuity_started_at,
+                    continuity_id=EXCLUDED.continuity_id
+                """).run()
+        }
+
+        try await sql.raw("""
+            INSERT INTO measurement_permission_current(account_id,purpose,revision,decision,subject_id,updated_at)
+            VALUES (\(bind:accountID),\(bind:purpose.rawValue),\(bind:revision),\(bind:decision.rawValue),\(bind:subjectID),\(bind:now))
+            ON CONFLICT (account_id,purpose) DO UPDATE SET revision=EXCLUDED.revision,decision=EXCLUDED.decision,
+                subject_id=EXCLUDED.subject_id,updated_at=EXCLUDED.updated_at
+            """).run()
+        return (revision, subjectID)
     }
 
     /// Called inside account deletion's transaction, before verified identities disappear.
@@ -217,6 +239,9 @@ enum MeasurementPrivacyService {
         // Erasure exposure was captured above, so the delivery ledger no longer
         // needs to retain an account/source join back to economic facts.
         try await sql.raw("DELETE FROM measurement_dispatch_jobs WHERE account_id=\(bind:accountID)").run()
+        // Pre-auth signup intents and the canonical signup fact keep only their
+        // deduplication tombstones; their account, installation and revision joins go.
+        try await SignupIntentService.eraseAccount(accountID, now: now, on: sql)
         try await sql.raw("UPDATE measurement_revenuecat_lifecycle_events SET account_id=NULL WHERE account_id=\(bind:accountID)").run()
         try await sql.raw("UPDATE measurement_revenuecat_adjustments SET account_id=NULL WHERE account_id=\(bind:accountID)").run()
         try await sql.raw("UPDATE measurement_revenuecat_events SET account_id=NULL WHERE account_id=\(bind:accountID)").run()

@@ -9,6 +9,9 @@ struct GoogleIdentityChallengeService {
     struct Issued: Sendable {
         let token: String
         let nonce: String
+        /// Server-side row identity and expiry, for binding an optional signup intent.
+        let id: UUID
+        let expiresAt: Date
     }
     struct Context: Sendable {
         let id: UUID
@@ -29,17 +32,17 @@ struct GoogleIdentityChallengeService {
         else { version = nil }
         let token = try SecureTokenGenerator.generate(byteCount: 32)
         let nonce = try SecureTokenGenerator.generate(byteCount: 32)
-        let now = Date()
+        let now = Date(), id = UUID()
         try await VerifiedIdentityService.sql(db).raw("""
             INSERT INTO google_identity_challenges
               (id, token_hash, nonce_hash, purpose, surface, target_user_id, target_auth_version, browser_session_id,
                binding_hash, environment, origin, web_client_id, ios_client_id, created_at, expires_at)
-            VALUES (\(bind: UUID()), \(bind: SHA256Hasher.hash(token: token)), \(bind: SHA256Hasher.hash(token: nonce)),
+            VALUES (\(bind: id), \(bind: SHA256Hasher.hash(token: token)), \(bind: SHA256Hasher.hash(token: nonce)),
                     \(bind: purpose.rawValue), \(bind: surface.rawValue), \(bind: targetUserID), \(bind: version), \(bind: browserSessionID),
                     \(bind: SHA256Hasher.hash(token: binding)), \(bind: platform.environment), \(bind: platform.origin),
                     \(bind: provider.webClientID), \(bind: provider.iosClientID), \(bind: now), \(bind: now.addingTimeInterval(lifetime)))
             """).run()
-        return Issued(token: token, nonce: nonce)
+        return Issued(token: token, nonce: nonce, id: id, expiresAt: now.addingTimeInterval(lifetime))
     }
 
     /// Read context before the provider verification network call. Recheck it

@@ -10,6 +10,8 @@ enum RateLimitAction: String {
     /// Email recognition lookups, keyed per IP. 10 per minute — prevents enumeration (B1).
     case emailRecognise = "email_recognise"
     case googleSignIn = "google_signin"
+    /// Native pre-auth signup measurement intents, keyed per environment and IP.
+    case signupIntent = "signup_intent"
 
     var limit: Int {
         switch self {
@@ -19,6 +21,7 @@ enum RateLimitAction: String {
         case .magicLinkRequest: return 3
         case .emailRecognise: return 10
         case .googleSignIn: return 20
+        case .signupIntent: return 20
         }
     }
 
@@ -30,6 +33,7 @@ enum RateLimitAction: String {
         case .magicLinkRequest: return 3600  // 1 hour
         case .emailRecognise: return 60      // 1 minute
         case .googleSignIn: return 600
+        case .signupIntent: return 600
         }
     }
 }

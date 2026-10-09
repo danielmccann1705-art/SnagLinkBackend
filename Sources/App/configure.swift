@@ -195,6 +195,9 @@ public func configure(_ app: Application,
         // Provider deletion receipts must exist before the PostHog erasure worker
         // can resume a submitted request across process restarts.
         app.migrations.add(CreatePostHogErasureReceipts())
+        // Optional pre-auth signup intents, one canonical signup fact per inserted
+        // account and the dedicated `signupFact` outbox source.
+        app.migrations.add(CreateMeasurementSignupIntents())
 
         try await app.autoMigrate()
     } else {

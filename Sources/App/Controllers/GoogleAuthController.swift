@@ -21,6 +21,13 @@ struct GoogleVerifyRequest: Content {
     let challengeToken: String
     let identityToken: String
     let verifier: String?
+    /// Native verify only (`SignupMeasurementContext`); ignored by web and account-link
+    /// verification. Malformed means absent.
+    let measurementContext: OptionalSignupMeasurementContext?
+}
+/// Optional body of the native challenge request: `{measurementContext: {intentId, capability}}`.
+struct GoogleNativeChallengeRequest: Content {
+    let measurementContext: OptionalSignupBindingContext?
 }
 struct GoogleConnectionResponse: Content { let connected: Bool }
 
@@ -89,7 +96,18 @@ struct GoogleAuthController: RouteCollection {
         let (platform, provider) = try settings(req)
         try await limit(req, platform: platform)
         let verifier = try SecureTokenGenerator.generate(byteCount: 32)
-        let issued = try await GoogleIdentityChallengeService.issue(purpose: .signIn, surface: .ios, binding: verifier, platform: platform, provider: provider, on: req.db)
+        // Optional: an absent, malformed or unusable intent leaves this challenge unbound.
+        let measurement = (try? req.content.decode(GoogleNativeChallengeRequest.self))?.measurementContext?.value
+        let application = req.application
+        let issued = try await req.db.transaction { db in
+            let issued = try await GoogleIdentityChallengeService.issue(purpose: .signIn, surface: .ios, binding: verifier, platform: platform, provider: provider, on: db)
+            // Bound atomically to this exact sign-in challenge. Account-link challenges never bind.
+            if let measurement {
+                await SignupIntentService.bind(measurement, to: .googleChallenge(id: issued.id, expiresAt: issued.expiresAt),
+                                               app: application, on: db)
+            }
+            return issued
+        }
         return try challengeResponse(issued, surface: .ios, verifier: verifier, provider: provider)
     }
 
@@ -100,9 +118,15 @@ struct GoogleAuthController: RouteCollection {
         guard let verifier = input.verifier else { throw contextError() }
         let context = try await GoogleIdentityChallengeService.context(input.challengeToken, purpose: .signIn, surface: .ios, binding: verifier, platform: platform, provider: provider, on: req.db)
         let proof = try await GoogleIdentityVerifier.verify(input.identityToken, surface: .ios, nonceHash: context.nonceHash, challengeCreatedAt: context.createdAt, config: provider, on: req)
+        let measurement = input.measurementContext?.value
+        let application = req.application
         let resolution = try await req.db.transaction { db in
-            _ = try await GoogleIdentityChallengeService.consume(input.challengeToken, purpose: .signIn, surface: .ios, binding: verifier, platform: platform, provider: provider, on: db)
-            return try await GoogleIdentityService.resolveOutcome(proof, on: db)
+            let challenge = try await GoogleIdentityChallengeService.consume(input.challengeToken, purpose: .signIn, surface: .ios, binding: verifier, platform: platform, provider: provider, on: db)
+            let resolution = try await GoogleIdentityService.resolveOutcome(proof, on: db)
+            // Never throws and never changes the authentication result.
+            await SignupIntentService.settle(.googleChallenge(challenge.id), context: measurement,
+                                             resolution: resolution, app: application, on: db)
+            return resolution
         }
         let response = Response(status: .ok)
         try response.content.encode(AuthController().issueAuthResponse(for: resolution, on: req))

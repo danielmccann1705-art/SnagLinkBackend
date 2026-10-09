@@ -177,6 +177,14 @@ enum MeasurementDispatchService {
             guard let payloadText = try row.decode(column: "payload_text", as: String?.self),
                   let payloadData = payloadText.data(using: .utf8),
                   let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: String] else { return .suppressed }
+            if sourceKind == "signupFact" {
+                // Dedicated signup source: frozen eligibility, unwithdrawn fact, exact
+                // revision, and for LinkedIn the same installation's uninterrupted ATT
+                // and an address verified no later than the signup.
+                guard try await SignupIntentService.dispatchIsEligible(
+                    factID: sourceID, destination: destination, accountID: accountID, revision: revision,
+                    installationID: installationID, payload: payload, now: gateNow, on: sql) else { return .suppressed }
+            }
             if destination == "linkedin" && sourceKind == "revenueCatLifecycle" {
                 guard let installationID, let verifiedEmailHash = payload["emailSha256"],
                       let continuityText = payload["attContinuityId"],
@@ -211,6 +219,10 @@ enum MeasurementDispatchService {
                 } else if sourceKind == "revenueCatEvent" {
                     guard let row = try await sql.raw("SELECT environment FROM measurement_revenuecat_lifecycle_events WHERE id=\(bind:sourceID) AND account_id=\(bind:accountID)").first(),
                           try row.decode(column: "environment", as: String.self) == configuredEnvironment.rawValue else { return .suppressed }
+                } else if sourceKind == "signupFact" {
+                    guard let row = try await sql.raw("SELECT environment FROM measurement_signup_facts WHERE id=\(bind:sourceID) AND account_id=\(bind:accountID)").first(),
+                          SignupIntentService.providerEnvironment(try row.decode(column: "environment", as: String.self)) == configuredEnvironment
+                    else { return .suppressed }
                 }
                 var properties = payload.reduce(into: [String: Any]()) { values, entry in
                     values[entry.key] = entry.value
@@ -252,21 +264,43 @@ enum MeasurementDispatchService {
                 var headers = jsonHeaders(); headers.bearerAuthorization = .init(token: key)
                 return classify(try await transport(URI(string: rawURL), headers, body))
             case "linkedin":
-                guard sourceKind == "revenueCatLifecycle", let token = config.linkedInAccessToken,
-                      let signup = config.linkedInSignupRule, let subscription = config.linkedInSubscriptionRule,
-                      let environment = config.linkedInEnvironment, validSecret(token),
-                      let source = try await sql.raw("""
-                        SELECT durable_key_hash,occurred_at,purchased_at,environment,currency_code,amount
-                        FROM measurement_revenuecat_events WHERE id=\(bind:sourceID) AND account_id=\(bind:accountID)
-                        """).first(),
-                      let emailHash = payload["emailSha256"] else { return .manual }
-                guard let factEnvironment = LinkedInConversion.Environment(rawValue: try source.decode(column: "environment", as: String.self)) else { return .suppressed }
-                let fact = LinkedInConversion.Fact.subscriptionPayment(accountID: accountID,
-                    occurredAt: try source.decode(column: "occurred_at", as: Date.self),
-                    purchasedAt: try source.decode(column: "purchased_at", as: Date.self), environment: factEnvironment,
-                    durableKeyHash: try source.decode(column: "durable_key_hash", as: String.self),
-                    currency: try source.decode(column: "currency_code", as: String.self),
-                    amount: try source.decode(column: "amount", as: String.self))
+                let fact: LinkedInConversion.Fact
+                let signup: String, subscription: String, token: String
+                let environment: LinkedInConversion.Environment, emailHash: String
+                if sourceKind == "signupFact" {
+                    // App sign-up rule, no value (LINKEDIN-INTEGRATION.md). Key derives from
+                    // account + environment, so a retry keeps the same LinkedIn event ID.
+                    guard let configuredToken = config.linkedInAccessToken, let signupRule = config.linkedInSignupRule,
+                          let configuredEnvironment = config.linkedInEnvironment, validSecret(configuredToken),
+                          let hash = payload["emailSha256"],
+                          let source = try await sql.raw("""
+                            SELECT occurred_at,environment FROM measurement_signup_facts
+                            WHERE id=\(bind:sourceID) AND account_id=\(bind:accountID) AND withdrawn_at IS NULL
+                            """).first() else { return .manual }
+                    fact = .accountCreated(accountID: accountID,
+                        occurredAt: try source.decode(column: "occurred_at", as: Date.self),
+                        environment: SignupIntentService.providerEnvironment(try source.decode(column: "environment", as: String.self)))
+                    signup = signupRule; subscription = config.linkedInSubscriptionRule ?? ""
+                    token = configuredToken; environment = configuredEnvironment; emailHash = hash
+                } else {
+                    guard sourceKind == "revenueCatLifecycle", let configuredToken = config.linkedInAccessToken,
+                          let signupRule = config.linkedInSignupRule, let subscriptionRule = config.linkedInSubscriptionRule,
+                          let configuredEnvironment = config.linkedInEnvironment, validSecret(configuredToken),
+                          let source = try await sql.raw("""
+                            SELECT durable_key_hash,occurred_at,purchased_at,environment,currency_code,amount
+                            FROM measurement_revenuecat_events WHERE id=\(bind:sourceID) AND account_id=\(bind:accountID)
+                            """).first(),
+                          let hash = payload["emailSha256"] else { return .manual }
+                    guard let factEnvironment = LinkedInConversion.Environment(rawValue: try source.decode(column: "environment", as: String.self)) else { return .suppressed }
+                    fact = .subscriptionPayment(accountID: accountID,
+                        occurredAt: try source.decode(column: "occurred_at", as: Date.self),
+                        purchasedAt: try source.decode(column: "purchased_at", as: Date.self), environment: factEnvironment,
+                        durableKeyHash: try source.decode(column: "durable_key_hash", as: String.self),
+                        currency: try source.decode(column: "currency_code", as: String.self),
+                        amount: try source.decode(column: "amount", as: String.self))
+                    signup = signupRule; subscription = subscriptionRule
+                    token = configuredToken; environment = configuredEnvironment; emailHash = hash
+                }
                 let permission = LinkedInConversion.Permission(accountID: accountID, revision: revision, allowed: true,
                     attAuthorised: true, grantedAt: Date.distantPast, checkedAt: now,
                     expiresAt: now.addingTimeInterval(MeasurementPrivacyService.attLifetime))
