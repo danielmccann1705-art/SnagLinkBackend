@@ -152,7 +152,10 @@ enum SignupIntentService {
     /// change or withdraw every choice at any time through the ordinary settings flow.
     static let settledCancellationWindow: TimeInterval = 7 * 86_400
     /// How long a tombstone (an unused, expired, cancelled or settled intent reduced to the fields
-    /// listed at `scrubAssignments`) is kept after it was scrubbed, then deleted outright.
+    /// listed at `scrubAssignments`) is kept after it was scrubbed, then deleted outright. A proposed
+    /// operational limit, not a statutory period. A settled intent is scrubbed only after
+    /// `settledCancellationWindow`, so its row exists for about 37 days after it settled, plus the
+    /// hourly maintenance scheduling.
     static let tombstoneRetention: TimeInterval = 30 * 86_400
     static let futureSkew: TimeInterval = 300
 
@@ -654,12 +657,32 @@ enum SignupIntentService {
 
     // MARK: Retention and deletion
 
-    /// What a tombstone keeps: `id` (a random server-generated UUID, derived from nothing about the
-    /// person, device or account), `provider`, `surface`, `environment`, `notice_version`, `state`,
-    /// `consumed_reason`, `binding_kind`, `received_at`, `expires_at`, `bound_at`, `consumed_at`,
-    /// `cancelled_at`, `scrubbed_at` and `signup_fact_id`. Everything that could link it to a person,
-    /// an installation, an account, a choice, a provider challenge or a credential is cleared here.
-    /// The tombstone is deleted `tombstoneRetention` after `scrubbed_at`.
+    /// What a tombstone keeps: `id` (a random server-generated UUID), `provider`, `surface`,
+    /// `environment`, `notice_version`, `state`, `consumed_reason`, `binding_kind`, `received_at`,
+    /// `expires_at`, `bound_at`, `consumed_at`, `cancelled_at`, `scrubbed_at` and `signup_fact_id`.
+    /// Cleared here: the capability, installation, the three choices, the ATT observation, the Apple
+    /// nonce, the provider binding, the account, the three revisions and the Apple slot.
+    ///
+    /// A tombstone is PSEUDONYMOUS, not anonymous (ASTRA-REVIEW-2026-10-09b.md, correction 1). With
+    /// other records we hold, it can still be joined to the account that adopted it:
+    /// - `signup_fact_id` -> `measurement_signup_facts.id`, and `measurement_signup_facts.intent_id`
+    ///   -> `id`; the fact carries `account_id`. Only a new-account signup has a fact, and only while
+    ///   the account exists (account deletion deletes the fact). Neither is cleared: a cancelled
+    ///   new-account intent needs `signup_fact_id` (CHECK on `consumed_reason='new_account'`), and
+    ///   the fact's unique `intent_id` is its per-intent deduplication key.
+    /// - `measurement_consent_events.request_id` is `derivedID("signup-consent-v1" or
+    ///   "signup-cancel-v1", id, purpose)`, and those revisions carry `account_id`. This outlives
+    ///   account deletion until `MeasurementConsentRetention` deletes the deleted account's revisions.
+    /// - Exact times: `received_at` is the adopted revisions' `occurred_at`, and `consumed_at` is the
+    ///   fact's `occurred_at` and the revisions' `received_at`.
+    /// `SignupIntentTests.testTombstoneJoinPathsAreTheListedOnesAndEndWithTheirRecords` shows each one.
+    ///
+    /// Purpose: diagnostic and abuse counts of issued, used, expired and cancelled sign-up choices per
+    /// provider and notice version (FINAL-PRIVACY-NOTICE-2.0.1.md, decision 5). Restricted: only this
+    /// service, `SignupAppleEvidenceService` and the rollback reconciliation (which looks only for rows
+    /// still carrying an account) read the table (`SignupTombstoneRestrictionTests`), no route returns
+    /// a tombstone (a scrubbed capability gets the uniform 404) and nothing exports it. Time-limited:
+    /// deleted `tombstoneRetention` after `scrubbed_at` by the hourly pass.
     private static let scrubAssignments = """
         capability_hash=NULL,installation_id=NULL,product_analytics=NULL,apple_ads=NULL,cross_company_ads=NULL,
         att_status=NULL,att_observed_at=NULL,apple_nonce_hash=NULL,binding_id=NULL,account_id=NULL,

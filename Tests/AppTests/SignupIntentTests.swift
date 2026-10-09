@@ -1074,6 +1074,90 @@ final class SignupIntentTests: XCTestCase {
         XCTAssertEqual(kept, 1, "the per-account fact remains the dedup record until deletion")
     }
 
+    // MARK: - Tombstones are pseudonymous (ASTRA-REVIEW-2026-10-09b.md, correction 1)
+
+    /// Starting from nothing but a settled tombstone, exactly these joins reach the account: (1) its
+    /// `signup_fact_id` to the fact, (2) the fact's `intent_id` back to it, (3) the consent revisions'
+    /// request IDs derived from its `id`, and (4) its exact times. (1) and (2) end when account deletion
+    /// deletes the fact; (3) and (4) end when the deleted account's receipts are removed; and nothing is
+    /// left to join once the tombstone itself is pruned. It is never claimed to be anonymous.
+    func testTombstoneJoinPathsAreTheListedOnesAndEndWithTheirRecords() async throws {
+        try await enable("productAnalyticsEnabled")
+        let intent = try await issue("apple", apple: true)
+        let auth = try signedIn(try await apple(try appleToken(subject: "signup-joins-\(UUID())", nonce: intent.nonce),
+                                                context: context(intent)), new: true)
+        let account = auth.user.id
+        let start = Date()
+        _ = try await SignupIntentService.cleanup(now: start.addingTimeInterval(8 * 86_400), on: app.db)
+        let fields = try await present(intent.id)
+        XCTAssertTrue(fields.isSubset(of: Self.tombstoneFields), "\(fields.subtracting(Self.tombstoneFields))")
+        XCTAssertFalse(fields.contains("account_id"))
+
+        let derived = MeasurementPurpose.allCases.flatMap { purpose in
+            ["signup-consent-v1", "signup-cancel-v1"].map { SignupIntentService.derivedID($0, intent.id, purpose.rawValue) }
+        }
+        func reach(_ query: SQLQueryString) async throws -> Set<UUID> {
+            let rows = try await sql.raw(query).all().map { try $0.decode(column: "account_id", as: UUID.self) }
+            return Set(rows)
+        }
+        func paths() async throws -> [String: Set<UUID>] {
+            let byFactID = try await reach("""
+                SELECT f.account_id FROM measurement_signup_intents i JOIN measurement_signup_facts f ON f.id=i.signup_fact_id
+                WHERE i.id=\(bind:intent.id) AND f.account_id IS NOT NULL
+                """)
+            let byIntentID = try await reach("""
+                SELECT f.account_id FROM measurement_signup_intents i JOIN measurement_signup_facts f ON f.intent_id=i.id
+                WHERE i.id=\(bind:intent.id) AND f.account_id IS NOT NULL
+                """)
+            let byDerivedRequest = try await reach("""
+                SELECT DISTINCT c.account_id FROM measurement_signup_intents i JOIN measurement_consent_events c
+                  ON c.request_id IN (\(binds: derived))
+                WHERE i.id=\(bind:intent.id)
+                """)
+            let byExactTimes = try await reach("""
+                SELECT DISTINCT c.account_id FROM measurement_signup_intents i JOIN measurement_consent_events c
+                  ON c.occurred_at=i.received_at AND c.received_at=i.consumed_at
+                WHERE i.id=\(bind:intent.id)
+                """)
+            return ["fact_by_signup_fact_id": byFactID, "fact_by_intent_id": byIntentID,
+                    "consent_by_derived_request_id": byDerivedRequest, "consent_by_exact_times": byExactTimes]
+        }
+        let live = try await paths()
+        XCTAssertEqual(live, ["fact_by_signup_fact_id": [account], "fact_by_intent_id": [account],
+                              "consent_by_derived_request_id": [account], "consent_by_exact_times": [account]],
+                       "while the account exists, every listed path reaches it")
+
+        let job = UUID()
+        try await sql.raw("""
+            INSERT INTO account_deletion_jobs(id,user_id,receipt_hash,requested_at,state,available_at,
+                database_cleanup_state,object_cleanup_state,apple_revocation_state)
+            VALUES(\(bind:job),\(bind:account),\(bind:SHA256Hasher.hash(token: "signup-joins-\(job)")),NOW(),'ready',NOW(),
+                   'pending','completed','not_applicable')
+            """).run()
+        try await app.db.transaction { tx in
+            let txSQL = try VerifiedIdentityService.sql(tx)
+            _ = try await txSQL.raw("SELECT id FROM users WHERE id=\(bind:account) FOR UPDATE").first()
+            try await MeasurementPrivacyService.eraseAccount(account, accountDeletionJobID: job, now: Date(), on: tx)
+            try await txSQL.raw("UPDATE users SET lifecycle_state='deleted',auth_version=auth_version+1 WHERE id=\(bind:account)").run()
+        }
+        let deleted = try await paths()
+        XCTAssertEqual(deleted, ["fact_by_signup_fact_id": [], "fact_by_intent_id": [],
+                                 "consent_by_derived_request_id": [account], "consent_by_exact_times": [account]],
+                       "deletion ends the fact paths; the consent receipts still reach the deleted account's row")
+
+        // Nothing was delivered, so provider erasure completed with the deletion: 30 days later the
+        // receipts go, before the tombstone's own pruning.
+        _ = try await MeasurementConsentRetention.cleanup(now: Date().addingTimeInterval(31 * 86_400), limit: 5_000, on: app.db)
+        let afterReceipts = try await paths()
+        XCTAssertEqual(afterReceipts, ["fact_by_signup_fact_id": [], "fact_by_intent_id": [],
+                                       "consent_by_derived_request_id": [], "consent_by_exact_times": []])
+        let tombstone = try await count("SELECT count(*) AS n FROM measurement_signup_intents WHERE id=\(bind:intent.id)")
+        XCTAssertEqual(tombstone, 1, "the tombstone itself is pruned 30 days after it was scrubbed")
+        _ = try await SignupIntentService.cleanup(now: start.addingTimeInterval(39 * 86_400), on: app.db)
+        let pruned = try await count("SELECT count(*) AS n FROM measurement_signup_intents WHERE id=\(bind:intent.id)")
+        XCTAssertEqual(pruned, 0, "a settled row lasts about 37 days from settlement plus scheduling")
+    }
+
     // MARK: - Destinations
 
     func testOutboxSchemaHasADedicatedSignupSourceAndHoldsSingular() async throws {
@@ -1316,5 +1400,24 @@ private actor SignupLockHolder {
     func waitForRelease() async {
         if released { return }
         await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+}
+
+/// Tombstones are restricted: only the signup services and the rollback reconciliation (which looks only
+/// for rows still carrying an account) read the intent table, so a new reader is a reviewed change.
+final class SignupTombstoneRestrictionTests: XCTestCase {
+    func testOnlyTheNamedSourcesReadSignupIntents() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/App")
+        var readers: Set<String> = []
+        for path in try FileManager.default.subpathsOfDirectory(atPath: root.path) where path.hasSuffix(".swift") {
+            let text = try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8)
+            if text.contains("measurement_signup_intents") { readers.insert(path) }
+        }
+        XCTAssertEqual(readers, [
+            "Measurement/SignupIntentService.swift", "Measurement/SignupAppleEvidenceService.swift",
+            "Measurement/MeasurementReconciliation.swift",
+            "Migrations/CreateMeasurementSignupIntents.swift", "Migrations/AddSignupAppleEvidenceSlot.swift",
+            "Migrations/AddMeasurementNoticeVersions.swift"])
     }
 }
