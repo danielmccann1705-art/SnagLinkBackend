@@ -255,6 +255,15 @@ final class MeasurementPrivacyTests: XCTestCase {
         return answer
     }
 
+    /// An unwitnessed initial purchase waits for the purchase-origin settle window before its
+    /// classification is frozen (ProductPurchaseOriginService); these tests are not about it.
+    private func elapsePurchaseOriginSettleWindow() async throws {
+        try await sql.raw("""
+            UPDATE measurement_dispatch_jobs SET available_at=NOW() - INTERVAL '1 second'
+            WHERE account_id=\(bind:userID) AND state='pending'
+            """).run()
+    }
+
     func testFlagsAreIndependentAndDefaultFalse() async throws {
         let expected = [
             ("productAnalyticsEnabled", "FEATURE_PRODUCT_ANALYTICS_ENABLED"),
@@ -825,6 +834,7 @@ final class MeasurementPrivacyTests: XCTestCase {
         XCTAssertFalse(durableText.contains("synthetic-transaction"))
         XCTAssertFalse(durableText.contains("must-never-be-stored"))
 
+        try await elapsePurchaseOriginSettleWindow()
         let counts = await MeasurementDispatchService.run(app: app, on: app.db)
         XCTAssertEqual(counts.delivered, 1)
         let calls = await recorder.calls()
@@ -1007,6 +1017,7 @@ final class MeasurementPrivacyTests: XCTestCase {
         XCTAssertEqual(refund.status, .ok)
         let destinations = try await sql.raw("SELECT destination FROM measurement_dispatch_jobs WHERE account_id=\(bind:userID) ORDER BY created_at").all()
         XCTAssertEqual(try destinations.map { try $0.decode(column: "destination", as: String.self) }, ["posthog", "posthog"])
+        try await elapsePurchaseOriginSettleWindow()
         let counts = await MeasurementDispatchService.run(app: app, on: app.db)
         XCTAssertEqual(counts.delivered, 2)
         let calls = await recorder.calls()
@@ -1047,13 +1058,21 @@ final class MeasurementPrivacyTests: XCTestCase {
         XCTAssertEqual(refundJobs, 1, "one economic refund may have only one canonical outbound fact")
     }
 
-    /// Pro funnel (FUNNELS-OCT9.md): restore is never a new paid product event.
-    func testRevenueCatRestoreAndRestoreDiscoveredHistoryNeverBecomeANewPaidProductEvent() async throws {
+    /// Pro funnel (FUNNELS-OCT9.md, corrected 9 October in PURCHASE-ORIGIN-OCT9.md): restore
+    /// history is kept once in the money ledger and is never presented as a confirmed new
+    /// purchase. Purchase age no longer decides anything; it is the `reportLag` label.
+    func testRevenueCatRestoreDiscoveredHistoryIsClassifiedNeverConfirmedAndCountedOnce() async throws {
         app.storage[RevenueCatMeasurementService.ConfigurationKey.self] = .init(
             authorization: "Bearer synthetic-webhook-secret", appID: "synthetic-rc-app")
+        app.storage[MeasurementDispatchService.ConfigurationKey.self] = .init(
+            postHogProjectKey: "phc_synthetic", postHogEnvironment: .sandbox,
+            singularURL: nil, singularAPIKey: nil, linkedInAccessToken: nil,
+            linkedInSignupRule: nil, linkedInSubscriptionRule: nil, linkedInEnvironment: nil)
+        let recorder = MeasurementHTTPRecorder()
+        app.storage[MeasurementDispatchService.TransportKey.self] = recorder.transport
         try await enable("productAnalyticsEnabled")
         _ = try await put("productAnalytics", decision: "granted")
-        // Consent long predates every purchase below, so only the restore rule decides.
+        // Consent long predates every purchase below, so only the classification decides.
         try await sql.raw("""
             UPDATE measurement_permission_current SET updated_at=updated_at - INTERVAL '90 days'
             WHERE account_id=\(bind:userID) AND purpose='productAnalytics'
@@ -1064,8 +1083,8 @@ final class MeasurementPrivacyTests: XCTestCase {
             let refused = try await webhook(revenueCatBody(transaction: "restore-\(type.lowercased())", type: type))
             XCTAssertEqual(refused.status, .badRequest, type)
         }
-        // A store transaction RevenueCat first learns about during a restore arrives as
-        // INITIAL_PURCHASE with its original purchase time: kept as money, never relayed new.
+        // A store transaction RevenueCat first reports with an old purchase time stays in the
+        // money ledger and reaches product analytics once, labelled, never as confirmed.
         let now = Date()
         let historic = try await webhook(revenueCatBody(transaction: "restore-discovered", eventTimestamp: now,
                                                         purchasedAt: now.addingTimeInterval(-30 * 86_400)))
@@ -1073,8 +1092,7 @@ final class MeasurementPrivacyTests: XCTestCase {
         let historicTrial = try await webhook(revenueCatBody(transaction: "restore-discovered-trial", eventTimestamp: now,
                                                              purchasedAt: now.addingTimeInterval(-30 * 86_400), price: 0))
         XCTAssertEqual(historicTrial.status, .ok)
-        // A genuine new purchase relays once, and the same transaction reported again under
-        // another provider event ID (for example after a restore on another device) adds nothing.
+        // The same transaction reported again under another provider event ID adds nothing.
         let purchasedAt = now.addingTimeInterval(-60)
         let fresh = try await webhook(revenueCatBody(transaction: "fresh-purchase", eventTimestamp: now, purchasedAt: purchasedAt))
         XCTAssertEqual(fresh.status, .ok)
@@ -1084,14 +1102,19 @@ final class MeasurementPrivacyTests: XCTestCase {
 
         let charges = try await sql.raw("SELECT count(*) AS n FROM measurement_revenuecat_events WHERE account_id=\(bind:userID)").first()!.decode(column: "n", as: Int.self)
         XCTAssertEqual(charges, 2, "the money ledger keeps the restore-discovered charge and one fresh charge")
-        let relayed = try await sql.raw("""
-            SELECT payload->>'event' AS event,payload->>'lifecycleKind' AS kind FROM measurement_dispatch_jobs
-            WHERE account_id=\(bind:userID) AND destination='posthog'
-            """).all()
-        XCTAssertEqual(relayed.count, 1)
-        XCTAssertEqual(try relayed.first?.decode(column: "event", as: String.self), "subscription_payment")
-        XCTAssertEqual(try relayed.first?.decode(column: "kind", as: String.self), "initial_purchase")
-        XCTAssertTrue(RevenueCatMeasurementService.newPurchaseLag <= 3 * 86_400)
+        try await elapsePurchaseOriginSettleWindow()
+        _ = await MeasurementDispatchService.run(app: app, on: app.db)
+        let relayed = try await recorder.calls().map { call -> [String: Any] in
+            let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(call.body.utf8)) as? [String: Any])
+            return try XCTUnwrap(body["properties"] as? [String: Any])
+        }
+        XCTAssertEqual(relayed.count, 3)
+        for properties in relayed {
+            XCTAssertEqual(properties["lifecycleKind"] as? String, "initial_purchase")
+            XCTAssertEqual(properties["purchaseOrigin"] as? String, "unknown_origin",
+                           "no product-purpose witness: unknown, never confirmed")
+        }
+        XCTAssertEqual(relayed.filter { $0["reportLag"] as? String == "over_72h" }.count, 2)
     }
 
     /// Pro funnel: refund, cancellation notice and expiry each map to exactly one bounded
@@ -1135,7 +1158,8 @@ final class MeasurementPrivacyTests: XCTestCase {
         for row in rows {
             let payload = try row.decode(column: "payload", as: String.self)
             let keys = Set(try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any]).keys)
-            XCTAssertTrue(keys.isSubset(of: ["event", "occurredAt", "currency", "amount", "lifecycleKind", "reason"]), payload)
+            XCTAssertTrue(keys.isSubset(of: ["event", "occurredAt", "currency", "amount", "lifecycleKind", "reason",
+                                             "reportLag", "purchaseOrigin"]), payload)
             for forbidden in ["lifecycle-once", "lifecycle-notices", "lifecycle-charge", "must-never-be-stored",
                               "com.snaglist.pro", userID.uuidString, userID.uuidString.lowercased()] {
                 XCTAssertFalse(payload.contains(forbidden), payload)
@@ -1431,6 +1455,7 @@ final class MeasurementPrivacyTests: XCTestCase {
         _ = try await put("productAnalytics", decision: "granted")
         let accepted = try await webhook(revenueCatBody(transaction: "environment-isolation"))
         XCTAssertEqual(accepted.status, .ok)
+        try await elapsePurchaseOriginSettleWindow()
         let counts = await MeasurementDispatchService.run(app: app, on: app.db)
         XCTAssertEqual(counts.suppressed, 1)
         let calls = await recorder.calls()

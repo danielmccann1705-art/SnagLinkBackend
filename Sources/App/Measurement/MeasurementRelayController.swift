@@ -14,6 +14,10 @@ struct MeasurementRelayController: RouteCollection {
                        use: prepareApplePurchaseIntent)
         measurement.on(.POST, "apple", "purchase-intents", ":intentId", "witness",
                        body: .collect(maxSize: "4kb"), use: acceptApplePurchaseWitness)
+        measurement.on(.POST, "product", "purchase-intents", body: .collect(maxSize: "4kb"),
+                       use: prepareProductPurchaseIntent)
+        measurement.on(.POST, "product", "purchase-intents", ":intentId", "witness",
+                       body: .collect(maxSize: "4kb"), use: acceptProductPurchaseWitness)
     }
 
     @Sendable func observeATT(req: Request) async throws -> MeasurementPermissionsEnvelope {
@@ -95,6 +99,34 @@ struct MeasurementRelayController: RouteCollection {
         guard result == .accepted else {
             throw Abort(.conflict, reason: "Apple purchase measurement evidence conflicts",
                         identifier: "apple_purchase_measurement_conflict")
+        }
+        return Response(status: .accepted)
+    }
+
+    /// Product-purpose purchase evidence (`ProductPurchaseOriginService`): product
+    /// permission only, no ATT or advertising consent, no provider work.
+    @Sendable func prepareProductPurchaseIntent(req: Request) async throws -> Response {
+        let result = try await ProductPurchaseOriginService.prepare(
+            accountID: req.requireAuthenticatedUserId(),
+            input: try decode(MeasurementPurchaseIntentRequest.self, req),
+            app: req.application, on: req.db)
+        let response = Response(status: .created)
+        try response.content.encode(result)
+        response.headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+        return response
+    }
+
+    @Sendable func acceptProductPurchaseWitness(req: Request) async throws -> Response {
+        guard let text = req.parameters.get("intentId"), let intentID = UUID(uuidString: text) else {
+            throw Abort(.notFound)
+        }
+        let result = try await ProductPurchaseOriginService.complete(
+            accountID: req.requireAuthenticatedUserId(), intentID: intentID,
+            input: try decode(MeasurementPurchaseWitnessRequest.self, req),
+            app: req.application, on: req.db)
+        guard result == .accepted else {
+            throw Abort(.conflict, reason: "Purchase measurement evidence conflicts",
+                        identifier: "measurement_purchase_conflict")
         }
         return Response(status: .accepted)
     }

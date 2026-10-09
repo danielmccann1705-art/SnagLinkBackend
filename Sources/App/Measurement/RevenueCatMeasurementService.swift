@@ -80,11 +80,12 @@ enum RevenueCatMeasurementService {
                 """).run()
 
             var chargeID: UUID?
+            var chargeAccountID: UUID?
             var lifecycleResolution = initialResolution
             var chargeDispatchEligible = true
             if fact.isPositiveCharge, let currency = fact.currency, let amount = fact.monetaryDelta {
                 try await VerifiedIdentityService.lock("measurement-revenuecat-charge:\(fact.chargeKeyHash)", on: tx)
-                if let replay = try await sql.raw("SELECT id,fact_hash FROM measurement_revenuecat_events WHERE durable_key_hash=\(bind:fact.chargeKeyHash)").first() {
+                if let replay = try await sql.raw("SELECT id,fact_hash,account_id FROM measurement_revenuecat_events WHERE durable_key_hash=\(bind:fact.chargeKeyHash)").first() {
                     if try replay.decode(column: "fact_hash", as: String.self) != fact.chargeFactHash {
                         try await sql.raw("""
                             UPDATE measurement_revenuecat_lifecycle_events
@@ -96,6 +97,7 @@ enum RevenueCatMeasurementService {
                         return
                     }
                     chargeID = try replay.decode(column: "id", as: UUID.self)
+                    chargeAccountID = try replay.decode(column: "account_id", as: UUID?.self)
                 } else {
                     let sourceID = UUID()
                     try await sql.raw("""
@@ -108,6 +110,7 @@ enum RevenueCatMeasurementService {
                                 \(bind:now),\(bind:currency),\(bind:amount),\(bind:linkedInIngestEligible))
                         """).run()
                     chargeID = sourceID
+                    chargeAccountID = fact.accountID
                 }
                 chargeDispatchEligible = try await refreshAdjustment(chargeKeyHash: fact.chargeKeyHash,
                     accountID: fact.accountID, now: now, on: sql) != "unresolved"
@@ -115,6 +118,8 @@ enum RevenueCatMeasurementService {
                     try await ApplePurchaseOriginService.acceptRevenueCatCharge(
                         fact, chargeID: chargeID, app: app, now: now, on: tx)
                     try await PurchaseOriginService.acceptRevenueCatCharge(
+                        fact, chargeID: chargeID, app: app, now: now, on: tx)
+                    try await ProductPurchaseOriginService.acceptRevenueCatCharge(
                         fact, chargeID: chargeID, app: app, now: now, on: tx)
                 }
             } else if fact.effect == .refund || fact.effect == .refundReversal {
@@ -130,13 +135,23 @@ enum RevenueCatMeasurementService {
                                                              purchasedAt: fact.purchasedAt, on: sql) {
                 if let chargeID, chargeDispatchEligible,
                    let currency = fact.currency, let amount = fact.monetaryDelta {
-                    if relaysAsNewPurchase(fact) {
-                        let payload = try canonicalJSON(["event": "subscription_payment", "occurredAt": iso(fact.eventGeneratedAt),
-                                                         "currency": currency, "amount": amount,
-                                                         "lifecycleKind": fact.kind.rawValue])
+                    // A store transaction already in the ledger under another (or an erased)
+                    // account is recovered history for this one: never a second monetary event.
+                    if chargeAccountID == fact.accountID {
+                        var values = ["event": "subscription_payment", "occurredAt": iso(fact.eventGeneratedAt),
+                                      "currency": currency, "amount": amount, "lifecycleKind": fact.kind.rawValue]
+                        var availableAt = now
+                        if fact.kind == .initialPurchase {
+                            // New-money candidate: dispatch freezes `purchaseOrigin` once the
+                            // settle window has passed (ProductPurchaseOriginService).
+                            values["reportLag"] = ProductPurchaseOriginService.reportLag(fact)
+                            availableAt = try await ProductPurchaseOriginService.availableAt(
+                                chargeID: chargeID, accountID: fact.accountID, subjectID: permission.subjectID,
+                                revision: permission.revision, purchasedAt: fact.purchasedAt, now: now, on: sql)
+                        }
                         try await enqueue(destination: "posthog", sourceKind: "revenueCatLifecycle", sourceID: chargeID,
                                           accountID: fact.accountID, permission: permission, installationID: nil,
-                                          payload: payload, now: now, on: sql)
+                                          payload: try canonicalJSON(values), availableAt: availableAt, now: now, on: sql)
                     }
                     try await enqueueResolvedAdjustments(accountID: fact.accountID, chargeKeyHash: fact.chargeKeyHash,
                                                          now: now, on: sql)
@@ -146,12 +161,15 @@ enum RevenueCatMeasurementService {
                     // also handles reversal-before-refund arrival order.
                     try await enqueueResolvedAdjustments(accountID: fact.accountID, chargeKeyHash: fact.chargeKeyHash,
                                                          now: now, on: sql)
-                } else if fact.isResolved, fact.effect != .charge, lifecycleResolution == "resolved",
-                          relaysAsNewPurchase(fact) {
-                    let payload = try lifecyclePayload(fact)
+                } else if fact.isResolved, fact.effect != .charge, lifecycleResolution == "resolved" {
+                    // A zero-value initial purchase is not money and has no charge to witness:
+                    // it can be recovered or unknown, never confirmed.
+                    let initial = fact.kind == .initialPurchase
+                    let availableAt = initial ? max(now, fact.purchasedAt).addingTimeInterval(
+                        ProductPurchaseOriginService.settleWindow) : now
                     try await enqueue(destination: "posthog", sourceKind: "revenueCatEvent", sourceID: lifecycleID,
                                       accountID: fact.accountID, permission: permission, installationID: nil,
-                                      payload: payload, now: now, on: sql)
+                                      payload: try lifecyclePayload(fact), availableAt: availableAt, now: now, on: sql)
                 }
             }
             // RevenueCat does not identify the installation that originated the
@@ -165,20 +183,12 @@ enum RevenueCatMeasurementService {
         let revision: UUID
     }
 
-    /// How far an initial purchase may precede its provider event and still be relayed to
-    /// product analytics as a new purchase.
-    static let newPurchaseLag: TimeInterval = 72 * 3_600
-
-    /// Restore is never new money. A restore or transfer arrives as an unsupported type
-    /// and is refused by the normalizer; a restore on another app account reuses a charge
-    /// key that already exists. The remaining path is a store transaction RevenueCat
-    /// first learns about during a restore, which it reports as INITIAL_PURCHASE with the
-    /// original, older purchase time. Such a fact stays in the money ledger but is not
-    /// relayed to product analytics as `subscription_payment`/`subscription_zero_value`
-    /// with `lifecycleKind=initial_purchase`.
-    static func relaysAsNewPurchase(_ fact: RevenueCatLifecycleFact) -> Bool {
-        fact.kind != .initialPurchase || fact.purchasedAt >= fact.eventGeneratedAt.addingTimeInterval(-newPurchaseLag)
-    }
+    // Purchase classification (9 October correction). The former 72-hour rule treated a
+    // recent purchase time as proof of a new purchase. RevenueCat's event time is not the
+    // action time, so a recent restore-discovered transaction passed and a genuine purchase
+    // reported late was dropped. Every verified initial purchase is now relayed once with
+    // `purchaseOrigin` (confirmed_origin / recovered_history / unknown_origin) frozen at
+    // dispatch, and `reportLag` as a freshness label only. See ProductPurchaseOriginService.
 
     private struct LinkedInPurchaseAuthority {
         let accountID: UUID
@@ -335,7 +345,8 @@ enum RevenueCatMeasurementService {
     }
 
     private static func enqueue(destination: String, sourceKind: String, sourceID: UUID, accountID: UUID, permission: Permission,
-                                installationID: UUID?, payload: String, now: Date, on sql: SQLDatabase) async throws {
+                                installationID: UUID?, payload: String, availableAt: Date? = nil, now: Date,
+                                on sql: SQLDatabase) async throws {
         if destination == "singular" {
             guard let installationID,
                   try await sql.raw("""
@@ -350,7 +361,7 @@ enum RevenueCatMeasurementService {
                  state,available_at,payload,created_at)
             VALUES (\(bind:UUID()),\(bind:destination),\(bind:sourceKind),\(bind:sourceID),\(bind:accountID),
                     \(bind:permission.subjectID),\(bind:permission.revision),\(bind:installationID),
-                    'pending',\(bind:now),CAST(\(bind:payload) AS JSONB),\(bind:now))
+                    'pending',\(bind:availableAt ?? now),CAST(\(bind:payload) AS JSONB),\(bind:now))
             ON CONFLICT(account_id,destination,source_kind,source_id) DO NOTHING
             """).run()
     }
@@ -358,6 +369,7 @@ enum RevenueCatMeasurementService {
     private static func lifecyclePayload(_ fact: RevenueCatLifecycleFact) throws -> String {
         var value = ["event": "subscription_\(fact.effect.rawValue)",
                      "occurredAt": iso(fact.eventGeneratedAt), "lifecycleKind": fact.kind.rawValue]
+        if fact.kind == .initialPurchase { value["reportLag"] = ProductPurchaseOriginService.reportLag(fact) }
         if let reason = fact.reason { value["reason"] = reason }
         if let currency = fact.currency { value["currency"] = currency }
         if let amount = fact.monetaryDelta { value["amount"] = amount }

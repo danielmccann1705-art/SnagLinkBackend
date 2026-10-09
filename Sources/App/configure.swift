@@ -205,6 +205,9 @@ public func configure(_ app: Application,
         // PostHog delayed ingestion: dispatch lease-end bounds, per-subject in-flight
         // record at the barrier, quiet-period receipt phases and verification passes.
         app.migrations.add(AddPostHogDelayedIngestionControls())
+        // Product-purpose purchase-callback witness: confirmed purchase origin for product
+        // analytics without any advertising consent (constraint-only, reversible).
+        app.migrations.add(AddProductPurchaseOriginPurpose())
 
         try await app.autoMigrate()
     } else {

@@ -302,6 +302,9 @@ enum MeasurementPrivacyService {
         if purpose == .crossCompanyAds {
             try await PurchaseOriginService.revoke(subjectIDs: subjectIDs, now: now, on: sql)
         }
+        if purpose == .productAnalytics {
+            try await ProductPurchaseOriginService.revoke(subjectIDs: subjectIDs, on: sql)
+        }
         let destinations: [String]
         switch purpose {
         case .productAnalytics: destinations = ["posthog"]

@@ -194,7 +194,23 @@ enum MeasurementDispatchService {
             let sourceID = try row.decode(column: "source_id", as: UUID.self)
             guard let payloadText = try row.decode(column: "payload_text", as: String?.self),
                   let payloadData = payloadText.data(using: .utf8),
-                  let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: String] else { return .suppressed }
+                  var payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: String] else { return .suppressed }
+            if destination == "posthog", ["revenueCatLifecycle", "revenueCatEvent"].contains(sourceKind),
+               payload["lifecycleKind"] == RevenueCatLifecycleFact.Kind.initialPurchase.rawValue,
+               payload["purchaseOrigin"] == nil {
+                // Classification of a new-money candidate, frozen at its first attempt after
+                // the settle window so a retry resends exactly what PostHog may already hold.
+                let origin = try await ProductPurchaseOriginService.classify(
+                    sourceKind: sourceKind, sourceID: sourceID, accountID: accountID,
+                    subjectID: subjectID, revision: revision, on: sql)
+                guard try await sql.raw("""
+                    UPDATE measurement_dispatch_jobs
+                    SET payload=payload || jsonb_build_object('purchaseOrigin', CAST(\(bind:origin.rawValue) AS TEXT))
+                    WHERE id=\(bind:lease.id) AND lease_token=\(bind:lease.token) AND state='leased'
+                    RETURNING id
+                    """).first() != nil else { return .suppressed }
+                payload["purchaseOrigin"] = origin.rawValue
+            }
             if sourceKind == "signupFact" {
                 // Dedicated signup source: frozen eligibility, unwithdrawn fact, exact
                 // revision, and for LinkedIn the same installation's uninterrupted ATT
