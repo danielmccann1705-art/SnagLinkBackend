@@ -202,6 +202,9 @@ public func configure(_ app: Application,
         app.migrations.add(AddSignupAppleEvidenceSlot())
         // Server-issued sign-in and failure funnel events carry no client installation.
         app.migrations.add(AllowServerProductEventsWithoutInstallation())
+        // PostHog delayed ingestion: dispatch lease-end bounds, per-subject in-flight
+        // record at the barrier, quiet-period receipt phases and verification passes.
+        app.migrations.add(AddPostHogDelayedIngestionControls())
 
         try await app.autoMigrate()
     } else {

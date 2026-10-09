@@ -309,10 +309,14 @@ enum MeasurementPrivacyService {
         case .appleAds: destinations = []
         }
         if purpose == .productAnalytics {
+            // A leased row keeps its lease end: a send under it may still be in flight.
             try await sql.raw("""
                 UPDATE measurement_dispatch_jobs SET
                     state=CASE WHEN state='pending' THEN 'suppressed'
                                WHEN state IN ('leased','failing') THEN 'uncertain' ELSE state END,
+                    send_window_until=CASE WHEN state='leased'
+                        THEN GREATEST(COALESCE(send_window_until,lease_expires_at),lease_expires_at)
+                        ELSE send_window_until END,
                     payload=NULL,lease_token=NULL,lease_expires_at=NULL
                 WHERE account_id=\(bind:accountID) AND destination='posthog' AND state<>'delivered'
                 """).run()
@@ -329,6 +333,9 @@ enum MeasurementPrivacyService {
                 UPDATE measurement_dispatch_jobs SET
                     state=CASE WHEN state='pending' THEN 'suppressed'
                                WHEN state IN ('leased','failing') THEN 'uncertain' ELSE state END,
+                    send_window_until=CASE WHEN state='leased'
+                        THEN GREATEST(COALESCE(send_window_until,lease_expires_at),lease_expires_at)
+                        ELSE send_window_until END,
                     payload=NULL,lease_token=NULL,lease_expires_at=NULL
                 WHERE account_id=\(bind:accountID) AND destination IN ('singular','linkedin') AND state<>'delivered'
                 """).run()
@@ -338,6 +345,17 @@ enum MeasurementPrivacyService {
                 """).run()
         }
         for subjectID in subjectIDs {
+            // Per-subject in-flight record at the barrier: the last send attempt and
+            // the latest lease end under which a send could still be in flight.
+            // Account deletion removes the outbox rows right after this.
+            try await sql.raw("""
+                UPDATE measurement_subjects s SET
+                    last_send_started_at=(SELECT MAX(d.last_send_started_at) FROM measurement_dispatch_jobs d
+                        WHERE d.subject_id=s.id),
+                    send_in_flight_until=(SELECT MAX(COALESCE(d.send_window_until,d.delivered_at))
+                        FROM measurement_dispatch_jobs d WHERE d.subject_id=s.id)
+                WHERE s.id=\(bind:subjectID)
+                """).run()
             if purpose == .crossCompanyAds {
                 try await sql.raw("UPDATE measurement_device_bindings SET revoked_at=\(bind:now) WHERE subject_id=\(bind:subjectID) AND revoked_at IS NULL").run()
             }

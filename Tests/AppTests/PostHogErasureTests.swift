@@ -49,6 +49,31 @@ final class PostHogErasureContractTests: XCTestCase {
         if case .verified = try status([:]) {} else { XCTFail("Expected explicit verified receipt") }
     }
 
+    func testEventCountNeedsOneFreshIntegerAndQueryEmbedsOnlyACanonicalUUID() throws {
+        XCTAssertEqual(PostHogErasureService.eventCount(try data(["results": [[0]], "is_cached": false])), .count(0))
+        XCTAssertEqual(PostHogErasureService.eventCount(try data(["results": [[3]]])), .count(3))
+        XCTAssertEqual(PostHogErasureService.eventCount(try data(["results": [[0]], "is_cached": true])), .cached)
+        for invalid: [String: Any] in [["results": []], ["results": [[0, 1]]], ["results": [[true]]],
+                                       ["results": [["0"]]], ["results": [[-1]]], ["query_status": ["complete": false]],
+                                       ["results": [[0]], "is_cached": "no"]] {
+            XCTAssertEqual(PostHogErasureService.eventCount(try data(invalid)), .invalid)
+        }
+        let id = UUID().uuidString.lowercased()
+        let body = try XCTUnwrap(PostHogErasureService.eventCountQuery(distinctID: id))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(object["refresh"] as? String, "force_blocking")
+        let query = try XCTUnwrap(object["query"] as? [String: Any])
+        XCTAssertEqual(query["kind"] as? String, "HogQLQuery")
+        XCTAssertEqual(query["query"] as? String, "SELECT count() FROM events WHERE distinct_id = '\(id)'")
+        XCTAssertNil(PostHogErasureService.eventCountQuery(distinctID: id.uppercased()))
+        XCTAssertNil(PostHogErasureService.eventCountQuery(distinctID: "x' OR 1=1 --"))
+        let key = String(repeating: "x", count: 25)
+        XCTAssertFalse(PostHogErasureService.Configuration(projectID: "123", apiKey: key, ingestionLagWindow: 60).valid)
+        XCTAssertFalse(PostHogErasureService.Configuration(projectID: "123", apiKey: key, ingestionLagWindow: .nan).valid)
+        XCTAssertTrue(PostHogErasureService.Configuration(projectID: "123", apiKey: key).valid)
+        XCTAssertEqual(PostHogErasureService.Configuration(projectID: "123", apiKey: key).ingestionLagWindow, 86_400)
+    }
+
     func testConfigCannotRedirectProjectOrIncludeMalformedCredential() {
         XCTAssertFalse(PostHogErasureService.Configuration(projectID: "1/../../other", apiKey: String(repeating: "x", count: 25)).valid)
         XCTAssertFalse(PostHogErasureService.Configuration(projectID: "012", apiKey: String(repeating: "x", count: 25)).valid)
@@ -134,6 +159,16 @@ final class PostHogErasureTests: XCTestCase {
             "status": complete ? "completed" : "pending", "delete_verified_at": complete ? date as Any : NSNull()]],
             "next": NSNull()])
     }
+    private func noEvents() throws -> PostHogErasureService.Reply {
+        try reply(["results": [[0]], "columns": ["count()"], "is_cached": false])
+    }
+    /// Ends the ingestion-lag quiet period; only the clock moves.
+    private func endQuietPeriod() async throws {
+        try await sql.raw("""
+            UPDATE measurement_posthog_erasure_receipts SET quiet_until=NOW()-INTERVAL '1 second'
+            WHERE job_id=\(bind:job) AND phase='quiet'
+            """).run()
+    }
     private func runDue() async throws -> MeasurementErasureService.Counts {
         try await sql.raw("UPDATE measurement_erasure_jobs SET available_at=NOW() WHERE id=\(bind:job)").run()
         return await MeasurementErasureService.run(app: app, limit: 1, on: app.db)
@@ -162,16 +197,30 @@ final class PostHogErasureTests: XCTestCase {
         app = try await Application.make(.testing); try await configure(app)
         app.storage[PostHogErasureService.ConfigurationKey.self] = config
         let resumed = PostHogErasureRecorder([try status(complete: false), try status(complete: true),
-            try reply(["results": [], "next": NSNull()])])
+            try reply(["results": [], "next": NSNull()]), try noEvents(), try reply(["results": [], "next": NSNull()])])
         app.storage[PostHogErasureService.TransportKey.self] = resumed.transport
         counts = try await runDue(); XCTAssertEqual(counts.pending, 1)
+        counts = try await runDue(); XCTAssertEqual(counts.pending, 1); XCTAssertEqual(counts.completed, 0)
+        // Verified events plus an absent profile only start the quiet period.
+        counts = try await runDue(); XCTAssertEqual(counts.pending, 1); XCTAssertEqual(counts.completed, 0)
+        counts = try await runDue(); XCTAssertEqual(counts.pending, 1); XCTAssertEqual(counts.completed, 0)
+        let waitingCalls = await resumed.calls(); XCTAssertEqual(waitingCalls.count, 3, "no provider call inside the window")
+        try await endQuietPeriod()
         counts = try await runDue(); XCTAssertEqual(counts.pending, 1); XCTAssertEqual(counts.completed, 0)
         counts = try await runDue(); XCTAssertEqual(counts.completed, 1)
         let state = try await jobState(); XCTAssertEqual(state, "completed")
         let firstCalls = await first.calls(), resumedCalls = await resumed.calls()
         XCTAssertEqual(firstCalls.map(\.method), ["GET", "POST"])
-        XCTAssertEqual(resumedCalls.map(\.method), ["GET", "GET", "GET"])
-        XCTAssertTrue((firstCalls + resumedCalls).allSatisfy { $0.uri.hasPrefix("https://eu.posthog.com/api/projects/123456/persons/") })
+        XCTAssertEqual(resumedCalls.map(\.method), ["GET", "GET", "GET", "POST", "GET"])
+        let query = "https://eu.posthog.com/api/projects/123456/query/"
+        XCTAssertEqual(resumedCalls[3].uri, query)
+        XCTAssertTrue(resumedCalls[3].body?.contains("force_blocking") == true)
+        XCTAssertTrue(resumedCalls[3].body?.contains(opaque.uuidString.lowercased()) == true)
+        XCTAssertTrue((firstCalls + resumedCalls).allSatisfy {
+            $0.uri.hasPrefix("https://eu.posthog.com/api/projects/123456/persons/") || $0.uri == query })
+        let completed = try await sql.raw("SELECT completed_at,quiet_until FROM measurement_posthog_erasure_receipts WHERE job_id=\(bind:job)").first()!
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(completed.decode(column: "completed_at", as: Date?.self)),
+                                    try XCTUnwrap(completed.decode(column: "quiet_until", as: Date?.self)))
         let body = try XCTUnwrap(firstCalls.last?.body).data(using: .utf8)!
         let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(payload["distinct_ids"] as? [String], [opaque.uuidString.lowercased()])
@@ -182,7 +231,7 @@ final class PostHogErasureTests: XCTestCase {
 
     func testAmbiguousPostAndExpiredLeaseResumePollingWithoutSecondDelete() async throws {
         let recorder = PostHogErasureRecorder([try profile(), nil, try status(complete: true),
-            try reply(["results": []])])
+            try reply(["results": []]), try noEvents(), try reply(["results": []])])
         app.storage[PostHogErasureService.TransportKey.self] = recorder.transport
         _ = try await runDue(); let ambiguous = try await runDue()
         XCTAssertEqual(ambiguous.completed, 0); XCTAssertEqual(ambiguous.pending, 1)
@@ -191,8 +240,15 @@ final class PostHogErasureTests: XCTestCase {
             WHERE id=\(bind:job)
             """).run()
         let recovered = try await runDue(); XCTAssertEqual(recovered.pending, 1)
+        let quiet = try await runDue(); XCTAssertEqual(quiet.pending, 1); XCTAssertEqual(quiet.completed, 0)
+        try await endQuietPeriod()
+        let events = try await runDue(); XCTAssertEqual(events.pending, 1)
         let completed = try await runDue(); XCTAssertEqual(completed.completed, 1)
-        let calls = await recorder.calls(); XCTAssertEqual(calls.filter { $0.method == "POST" }.count, 1)
+        // The Query API check is also a POST; only one deletion request may exist.
+        let calls = await recorder.calls()
+        XCTAssertEqual(calls.filter { $0.method == "POST" && $0.uri.hasSuffix("/persons/bulk_delete/") }.count, 1)
+        XCTAssertEqual(calls.filter { $0.method == "POST" }.map(\.uri),
+            ["https://eu.posthog.com/api/projects/123456/persons/bulk_delete/", "https://eu.posthog.com/api/projects/123456/query/"])
     }
 
     func testEmptyStatusAndMissingVerificationNeverComplete() async throws {

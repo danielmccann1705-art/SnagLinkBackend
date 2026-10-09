@@ -22,7 +22,8 @@ final class MeasurementDirectHTTPClient: LifecycleHandler, @unchecked Sendable {
         request.method = .POST
         request.headers = headers
         request.body = .bytes(ByteBuffer(data: body))
-        let response = try await client.execute(request, timeout: .seconds(20), logger: logger)
+        let response = try await client.execute(request,
+            timeout: .seconds(Int64(MeasurementDispatchService.sendDeadline)), logger: logger)
         _ = try await response.body.collect(upTo: 65_536)
         return .init(status: Int(response.status.code), retryAfter: response.headers.first(name: .retryAfter))
     }
@@ -57,7 +58,17 @@ enum MeasurementDispatchService {
     private struct DirectHTTPKey: StorageKey { typealias Value = MeasurementDirectHTTPClient }
     private struct DirectHTTPLock: LockKey {}
 
-    private enum Outcome { case delivered, suppressed, retry, uncertain, manual }
+    /// Claim-time lease. Its end, kept as `send_window_until`, is the durable upper
+    /// bound for any provider request made under the lease.
+    static let leaseDuration: TimeInterval = 60
+    /// Whole-request deadline of `MeasurementDirectHTTPClient`.
+    static let sendDeadline: TimeInterval = 20
+    /// A send starts only while the lease still covers its deadline plus this
+    /// margin, so a send can never outlive `send_window_until`, even when the
+    /// process or its database session dies mid-request.
+    static let sendStartMargin: TimeInterval = 5
+
+    private enum Outcome { case delivered, suppressed, retry, uncertain, manual, deferred }
     private struct Lease {
         let id: UUID, token: UUID
     }
@@ -90,7 +101,7 @@ enum MeasurementDispatchService {
             switch outcome {
             case .delivered: counts.delivered += 1
             case .suppressed: counts.suppressed += 1
-            case .retry: counts.retrying += 1
+            case .retry, .deferred: counts.retrying += 1
             case .uncertain: counts.uncertain += 1
             case .manual: counts.manualRequired += 1
             }
@@ -101,9 +112,12 @@ enum MeasurementDispatchService {
     private static func claim(now: Date, on db: Database) async throws -> Lease? {
         try await db.transaction { tx in
             let sql = try VerifiedIdentityService.sql(tx)
+            // The expired lease end stays recorded: the attempt may have reached the
+            // provider, and erasure must wait out its possible ingestion.
             try await sql.raw("""
-                UPDATE measurement_dispatch_jobs SET state='uncertain',payload=NULL,lease_token=NULL,lease_expires_at=NULL,
-                    last_error_kind='expired_lease_ambiguous'
+                UPDATE measurement_dispatch_jobs SET state='uncertain',payload=NULL,
+                    send_window_until=GREATEST(COALESCE(send_window_until,lease_expires_at),lease_expires_at),
+                    lease_token=NULL,lease_expires_at=NULL,last_error_kind='expired_lease_ambiguous'
                 WHERE state='leased' AND lease_expires_at<=\(bind:now)
                 """).run()
             guard let row = try await sql.raw("""
@@ -112,9 +126,13 @@ enum MeasurementDispatchService {
                 ORDER BY available_at,id FOR UPDATE SKIP LOCKED LIMIT 1
                 """).first() else { return nil }
             let id = try row.decode(column: "id", as: UUID.self), token = UUID()
+            let expiry = now.addingTimeInterval(leaseDuration)
+            // Committed before any send can start under this lease.
             try await sql.raw("""
                 UPDATE measurement_dispatch_jobs SET state='leased',attempts=attempts+1,lease_token=\(bind:token),
-                    lease_expires_at=\(bind:now.addingTimeInterval(60)) WHERE id=\(bind:id)
+                    lease_expires_at=\(bind:expiry),
+                    send_window_until=GREATEST(COALESCE(send_window_until,\(bind:expiry)),\(bind:expiry))
+                WHERE id=\(bind:id)
                 """).run()
             return .init(id: id, token: token)
         }
@@ -142,7 +160,7 @@ enum MeasurementDispatchService {
             let gateNow = Date()
             guard let row = try await sql.raw("""
                 SELECT j.destination,j.source_kind,j.source_id,j.account_id,j.subject_id,j.consent_revision,j.installation_id,
-                       j.payload::text AS payload_text,s.opaque_subject,u.lifecycle_state
+                       j.payload::text AS payload_text,j.lease_expires_at,s.opaque_subject,u.lifecycle_state
                 FROM measurement_dispatch_jobs j JOIN measurement_subjects s ON s.id=j.subject_id
                 JOIN users u ON u.id=j.account_id
                 WHERE j.id=\(bind:lease.id) AND j.lease_token=\(bind:lease.token) AND j.state='leased'
@@ -197,6 +215,21 @@ enum MeasurementDispatchService {
                 else { return .suppressed }
             }
             let opaque = try row.decode(column: "opaque_subject", as: UUID.self).uuidString.lowercased()
+            // Dispatch cutoff barrier and in-flight record, the last statements before
+            // provider I/O and still under the purpose lock that withdrawal and account
+            // deletion take. The send starts only while the lease covers its whole
+            // deadline and the subject is still active; its start is recorded on the
+            // row. The claim-time `send_window_until` bounds it durably even if this
+            // transaction never commits.
+            let sendStart = Date()
+            guard try row.decode(column: "lease_expires_at", as: Date.self)
+                    >= sendStart.addingTimeInterval(sendDeadline + sendStartMargin) else { return .deferred }
+            guard try await sql.raw("""
+                UPDATE measurement_dispatch_jobs j SET last_send_started_at=\(bind:sendStart)
+                WHERE j.id=\(bind:lease.id) AND j.lease_token=\(bind:lease.token) AND j.state='leased'
+                  AND EXISTS(SELECT 1 FROM measurement_subjects s WHERE s.id=j.subject_id AND s.state='active')
+                RETURNING j.id
+                """).first() != nil else { return .suppressed }
             return await send(destination: destination, sourceKind: sourceKind, sourceID: sourceID,
                               accountID: accountID, subjectID: subjectID, revision: revision,
                               installationID: installationID, opaqueSubject: opaque, payload: payload,
@@ -355,6 +388,7 @@ enum MeasurementDispatchService {
         case .retry: (state, deliveredAt, payloadCleared, error) = ("failing", nil, false, "rate_limited")
         case .uncertain: (state, deliveredAt, payloadCleared, error) = ("uncertain", nil, true, "ambiguous_delivery")
         case .manual: (state, deliveredAt, payloadCleared, error) = ("manual_required", nil, true, "configuration_or_request")
+        case .deferred: (state, deliveredAt, payloadCleared, error) = ("failing", nil, false, "lease_window_short")
         }
         try await sql.raw("""
             UPDATE measurement_dispatch_jobs SET state=\(bind:state),delivered_at=\(bind:deliveredAt),
