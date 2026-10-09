@@ -87,8 +87,72 @@ export function containerEnvironment(env) {
     ...importPreparation(env, candidate, base),
     ...privateStorage(env, candidate),
     ...logStream(env),
-    ...capacity(env)
+    ...capacity(env),
+    ...measurementEnvironment(env, candidate)
   };
+}
+
+// Replacement 2.0.1 measurement on the unified candidate (9 Oct 2026,
+// outputs/measurement-2026-10-07/STAGING-PACKAGE-2.0.1-MEASUREMENT.md). Sandbox only, and only
+// what receiver testing needs: the product-analytics switch with the PostHog sandbox project,
+// the purchase-origin key behind the product purchase witness, and an optional sandbox
+// RevenueCat webhook. Cross-company, LinkedIn, Singular, Apple Ads and provider erasure cannot
+// be switched on through this adapter: their switches may only be absent or exactly "false",
+// and their credentials are refused outright. All absent: exactly the previous behaviour.
+/** @returns {Record<string, string>} */
+function measurementEnvironment(env, candidate) {
+  for (const key of ['POSTHOG_ERASURE_API_KEY', 'POSTHOG_ERASURE_PROJECT_ID', 'POSTHOG_ERASURE_INGESTION_LAG_SECONDS',
+    'LINKEDIN_CONVERSIONS_ACCESS_TOKEN', 'LINKEDIN_SIGNUP_CONVERSION_RULE_ID', 'LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID',
+    'SINGULAR_API_KEY', 'SINGULAR_SERVER_EVENT_URL', 'SINGULAR_ERASURE_URL',
+    'APPLE_ADSERVICES_OWNED_ORG_ID', 'APPLE_ADSERVICES_OWNED_CAMPAIGN_IDS', 'MEASUREMENT_CREDENTIAL_KEY']) {
+    if (env[key] !== undefined) throw new Error('Advertising and provider-erasure settings are disabled in staging');
+  }
+  const selected = {};
+  for (const key of ['FEATURE_CROSS_COMPANY_ADS_ENABLED', 'FEATURE_LINKEDIN_CONVERSIONS_ENABLED',
+    'FEATURE_AD_MEASUREMENT_ENABLED']) {
+    if (env[key] === undefined) continue;
+    if (env[key] !== 'false') throw new Error('Advertising measurement switches can only be "false" in staging');
+    selected[key] = 'false';
+  }
+  const product = ['FEATURE_PRODUCT_ANALYTICS_ENABLED', 'POSTHOG_PROJECT_API_KEY', 'POSTHOG_MEASUREMENT_ENVIRONMENT'];
+  const origin = ['MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY', 'MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT'];
+  const revenueCat = ['REVENUECAT_WEBHOOK_AUTHORIZATION', 'REVENUECAT_APP_ID'];
+  const supplied = keys => keys.some(key => env[key] !== undefined);
+  if (!supplied([...product, ...origin, ...revenueCat])) return selected;
+  if (!candidate || env.STAGING_PLATFORM_ENABLED !== 'true') {
+    throw new Error('Measurement configuration requires the enabled unified candidate');
+  }
+  if (supplied(product)) {
+    if (!['true', 'false'].includes(env.FEATURE_PRODUCT_ANALYTICS_ENABLED) ||
+        env.POSTHOG_MEASUREMENT_ENVIRONMENT !== 'sandbox' ||
+        typeof env.POSTHOG_PROJECT_API_KEY !== 'string' || !/^phc_[A-Za-z0-9_-]{20,80}$/.test(env.POSTHOG_PROJECT_API_KEY)) {
+      throw new Error('Staging product analytics needs its switch, the PostHog sandbox environment and a project ingestion key');
+    }
+    selected.FEATURE_PRODUCT_ANALYTICS_ENABLED = env.FEATURE_PRODUCT_ANALYTICS_ENABLED;
+    selected.POSTHOG_MEASUREMENT_ENVIRONMENT = 'sandbox';
+    selected.POSTHOG_PROJECT_API_KEY = env.POSTHOG_PROJECT_API_KEY;
+  }
+  if (supplied(origin)) {
+    const others = [env.JWT_SECRET, env.LINK_GRANT_TOKEN_KEY, env.LINK_GRANT_TOKEN_PREVIOUS_KEY,
+      env.APPLE_CREDENTIAL_KEY, env.APPLE_CREDENTIAL_PREVIOUS_KEY, env.MAINTENANCE_SECRET];
+    if (env.MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT !== 'sandbox' ||
+        !validCapabilityKey(env.MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY) ||
+        others.includes(env.MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY)) {
+      throw new Error('A separate 32-byte purchase-origin key in the sandbox environment is required');
+    }
+    selected.MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY = env.MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY;
+    selected.MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT = 'sandbox';
+  }
+  if (supplied(revenueCat)) {
+    if (typeof env.REVENUECAT_WEBHOOK_AUTHORIZATION !== 'string' ||
+        !/^Bearer [\x21-\x7e]{24,256}$/.test(env.REVENUECAT_WEBHOOK_AUTHORIZATION) ||
+        typeof env.REVENUECAT_APP_ID !== 'string' || !/^[A-Za-z0-9_-]{4,64}$/.test(env.REVENUECAT_APP_ID)) {
+      throw new Error('The sandbox RevenueCat webhook needs its authorization header value and app identifier together');
+    }
+    selected.REVENUECAT_WEBHOOK_AUTHORIZATION = env.REVENUECAT_WEBHOOK_AUTHORIZATION;
+    selected.REVENUECAT_APP_ID = env.REVENUECAT_APP_ID;
+  }
+  return selected;
 }
 
 // The one staging Durable Object, and so the one container, this Worker addresses (Lane 2, 28 Sep 2026).

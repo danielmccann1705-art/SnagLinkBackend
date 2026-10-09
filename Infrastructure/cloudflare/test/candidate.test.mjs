@@ -109,11 +109,28 @@ const adapterReads=new Set([
 // configuration must never carry them, which is what puts them in the image.
 const secretBindings=['DATABASE_URL','JWT_SECRET','LINK_GRANT_TOKEN_KEY','LINK_GRANT_TOKEN_PREVIOUS_KEY',
   'R2_ACCESS_KEY_ID','R2_SECRET_ACCESS_KEY','RESEND_API_KEY','MAINTENANCE_SECRET',
-  'APPLE_PRIVATE_KEY','APPLE_CREDENTIAL_KEY','APPLE_CREDENTIAL_PREVIOUS_KEY'];
+  'APPLE_PRIVATE_KEY','APPLE_CREDENTIAL_KEY','APPLE_CREDENTIAL_PREVIOUS_KEY',
+  // Replacement 2.0.1 measurement package (9 Oct): set by Codex as encrypted bindings, sandbox only.
+  'POSTHOG_PROJECT_API_KEY','MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY','REVENUECAT_WEBHOOK_AUTHORIZATION'];
 // Named in the adapter only so it can refuse them: staging has no purchase or push provider.
-const refusedInStaging=['REVENUECAT_SECRET_API_KEY','APNS_PRIVATE_KEY'];
+const refusedInStaging=['REVENUECAT_SECRET_API_KEY','APNS_PRIVATE_KEY',
+  // Measurement (9 Oct): advertising, device credentials and provider erasure stay off in staging.
+  'POSTHOG_ERASURE_API_KEY','POSTHOG_ERASURE_PROJECT_ID','POSTHOG_ERASURE_INGESTION_LAG_SECONDS',
+  'LINKEDIN_CONVERSIONS_ACCESS_TOKEN','LINKEDIN_SIGNUP_CONVERSION_RULE_ID','LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID',
+  'SINGULAR_API_KEY','SINGULAR_SERVER_EVENT_URL','SINGULAR_ERASURE_URL',
+  'APPLE_ADSERVICES_OWNED_ORG_ID','APPLE_ADSERVICES_OWNED_CAMPAIGN_IDS','MEASUREMENT_CREDENTIAL_KEY'];
 // Understood by the adapter and deliberately not configured on this candidate.
 const notCarried=new Map([
+  // Replacement 2.0.1 measurement (9 Oct): sandbox switches that only the approved staging
+  // package's deploy configuration sets (STAGING-PACKAGE-2.0.1-MEASUREMENT.md). Absent means off,
+  // so a configuration generated without them leaves measurement exactly as it is today.
+  ['FEATURE_PRODUCT_ANALYTICS_ENABLED','measurement package only; absent = off'],
+  ['POSTHOG_MEASUREMENT_ENVIRONMENT','measurement package only; must be sandbox'],
+  ['MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT','measurement package only; must be sandbox'],
+  ['REVENUECAT_APP_ID','measurement package only; optional sandbox webhook'],
+  ['FEATURE_CROSS_COMPANY_ADS_ENABLED','advertising stays off; the adapter accepts only "false"'],
+  ['FEATURE_LINKEDIN_CONVERSIONS_ENABLED','advertising stays off; the adapter accepts only "false"'],
+  ['FEATURE_AD_MEASUREMENT_ENABLED','Apple Ads measurement stays off; the adapter accepts only "false"'],
   ['EMAIL_FROM','candidate email is disabled; STAGING_EMAIL_ENABLED is false'],
   ['EMAIL_ALLOWED_RECIPIENTS','candidate email is disabled'],
   // Public identifiers, but installed on the candidate Worker as encrypted bindings

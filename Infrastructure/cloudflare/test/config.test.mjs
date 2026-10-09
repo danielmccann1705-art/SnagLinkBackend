@@ -327,3 +327,52 @@ test('the staging Durable Object name is "staging" unless another staging name i
   // The container's environment never carries it: it names the object, not a setting of the app.
   assert.equal(containerEnvironment({...sample(), BACKEND_INSTANCE: 'staging-lhr'}).BACKEND_INSTANCE, undefined);
 });
+
+// Replacement 2.0.1 measurement (9 Oct 2026). Synthetic values only.
+const measurement = () => ({FEATURE_PRODUCT_ANALYTICS_ENABLED:'true', POSTHOG_MEASUREMENT_ENVIRONMENT:'sandbox',
+  POSTHOG_PROJECT_API_KEY:'phc_synthetic0000000000000000000000',
+  MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY: btoa('h'.repeat(32)), MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT:'sandbox'});
+const measurementKeys = ['FEATURE_PRODUCT_ANALYTICS_ENABLED','POSTHOG_MEASUREMENT_ENVIRONMENT','POSTHOG_PROJECT_API_KEY',
+  'MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY','MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT','REVENUECAT_WEBHOOK_AUTHORIZATION',
+  'REVENUECAT_APP_ID','FEATURE_CROSS_COMPANY_ADS_ENABLED','FEATURE_LINKEDIN_CONVERSIONS_ENABLED','FEATURE_AD_MEASUREMENT_ENABLED'];
+
+test('measurement absent: the candidate forwards no measurement setting at all', () => {
+  const env=containerEnvironment(candidate());
+  for (const key of measurementKeys) assert.equal(env[key],undefined,key);
+});
+
+test('measurement forwards only the sandbox product analytics, purchase-origin and optional RevenueCat settings', () => {
+  const webhook={REVENUECAT_WEBHOOK_AUTHORIZATION:'Bearer synthetic-webhook-value-0000000000', REVENUECAT_APP_ID:'appsynthetic01'};
+  const env=containerEnvironment({...candidate(),...measurement(),...webhook,
+    FEATURE_CROSS_COMPANY_ADS_ENABLED:'false', FEATURE_LINKEDIN_CONVERSIONS_ENABLED:'false', FEATURE_AD_MEASUREMENT_ENABLED:'false'});
+  for (const [key,value] of Object.entries({...measurement(),...webhook})) assert.equal(env[key],value,key);
+  for (const key of ['FEATURE_CROSS_COMPANY_ADS_ENABLED','FEATURE_LINKEDIN_CONVERSIONS_ENABLED','FEATURE_AD_MEASUREMENT_ENABLED']) {
+    assert.equal(env[key],'false',key);
+  }
+  const productOnly=containerEnvironment({...candidate(),FEATURE_PRODUCT_ANALYTICS_ENABLED:'false',
+    POSTHOG_MEASUREMENT_ENVIRONMENT:'sandbox',POSTHOG_PROJECT_API_KEY:measurement().POSTHOG_PROJECT_API_KEY});
+  assert.equal(productOnly.FEATURE_PRODUCT_ANALYTICS_ENABLED,'false');
+  assert.equal(productOnly.MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY,undefined);
+  assert.equal(productOnly.REVENUECAT_WEBHOOK_AUTHORIZATION,undefined);
+});
+
+test('measurement cannot reach production, advertising or provider erasure from staging', () => {
+  for (const override of [{POSTHOG_MEASUREMENT_ENVIRONMENT:'production'}, {POSTHOG_MEASUREMENT_ENVIRONMENT:undefined},
+    {POSTHOG_PROJECT_API_KEY:'phx_personal_key_do_not_echo_000000000'}, {POSTHOG_PROJECT_API_KEY:undefined},
+    {FEATURE_PRODUCT_ANALYTICS_ENABLED:'yes'}, {FEATURE_PRODUCT_ANALYTICS_ENABLED:undefined},
+    {MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT:'production'}, {MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY:'short'},
+    {MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY:undefined}, {MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY: platform().LINK_GRANT_TOKEN_KEY},
+    {REVENUECAT_WEBHOOK_AUTHORIZATION:'Bearer synthetic-webhook-value-0000000000'},
+    {REVENUECAT_WEBHOOK_AUTHORIZATION:'synthetic-webhook-value-0000000000', REVENUECAT_APP_ID:'appsynthetic01'},
+    {FEATURE_CROSS_COMPANY_ADS_ENABLED:'true'}, {FEATURE_LINKEDIN_CONVERSIONS_ENABLED:'true'},
+    {FEATURE_AD_MEASUREMENT_ENABLED:'true'}, {POSTHOG_ERASURE_API_KEY:'synthetic'}, {POSTHOG_ERASURE_PROJECT_ID:'298161'},
+    {LINKEDIN_CONVERSIONS_ACCESS_TOKEN:'synthetic'}, {SINGULAR_API_KEY:'synthetic'}, {SINGULAR_SERVER_EVENT_URL:'https://example.test'},
+    {APPLE_ADSERVICES_OWNED_ORG_ID:'1'}, {MEASUREMENT_CREDENTIAL_KEY: btoa('c'.repeat(32))}]) {
+    const env={...candidate(),...measurement(),...override};
+    for (const [key,value] of Object.entries(override)) if (value === undefined) delete env[key];
+    assert.throws(() => containerEnvironment(env), error => !error.message.includes('do_not_echo'), JSON.stringify(Object.keys(override)));
+  }
+  // The recovery image and a disabled platform never accept measurement settings.
+  assert.throws(() => containerEnvironment({...sample(),...measurement()}));
+  assert.throws(() => containerEnvironment({...sample(),...platform(),...measurement()}));
+});
