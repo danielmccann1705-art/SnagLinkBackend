@@ -260,7 +260,10 @@ enum MeasurementPrivacyService {
 
     /// Called inside account deletion's transaction, before verified identities disappear.
     /// Provider failure cannot fail this step: only durable local revocation and queued work occur here.
-    static func eraseAccount(_ accountID: UUID, accountDeletionJobID: UUID, now: Date, on db: Database) async throws {
+    /// `accountDeletionJobID` is nil only when `MeasurementReconciliation` runs this barrier for an account
+    /// an earlier image already deleted with a completed job: its erasure work then runs unlinked, because
+    /// a completed deletion job can never return to a pending measurement state.
+    static func eraseAccount(_ accountID: UUID, accountDeletionJobID: UUID?, now: Date, on db: Database) async throws {
         let sql = try VerifiedIdentityService.sql(db)
         // The caller already owns the user row. Take purpose barriers in this
         // fixed order before exposure capture or outbox removal, matching dispatch
@@ -274,10 +277,12 @@ enum MeasurementPrivacyService {
             queued = try await revokeSubjects(accountID: accountID, purpose: purpose,
                                                accountDeletionJobID: accountDeletionJobID, now: now, on: sql) || queued
         }
-        try await sql.raw("""
-            UPDATE measurement_erasure_jobs SET account_deletion_job_id=\(bind:accountDeletionJobID)
-            WHERE account_id=\(bind:accountID) AND state<>'completed' AND account_deletion_job_id IS NULL
-            """).run()
+        if let accountDeletionJobID {
+            try await sql.raw("""
+                UPDATE measurement_erasure_jobs SET account_deletion_job_id=\(bind:accountDeletionJobID)
+                WHERE account_id=\(bind:accountID) AND state<>'completed' AND account_deletion_job_id IS NULL
+                """).run()
+        }
         queued = try await sql.raw("""
             SELECT 1 FROM measurement_erasure_jobs WHERE account_id=\(bind:accountID) AND state<>'completed' LIMIT 1
             """).first() != nil
@@ -305,13 +310,17 @@ enum MeasurementPrivacyService {
         // Erasure exposure was captured above, so the delivery ledger no longer
         // needs to retain an account/source join back to economic facts.
         try await sql.raw("DELETE FROM measurement_dispatch_jobs WHERE account_id=\(bind:accountID)").run()
+        // The product-event ledger only deduplicates a live account's uploads; its content was cleared
+        // above and provider erasure addresses the opaque subject, so nothing of it is needed now
+        // (CONSENT-RETENTION-LIFECYCLE.md).
+        try await sql.raw("DELETE FROM measurement_product_events WHERE account_id=\(bind:accountID)").run()
         // Pre-auth signup intents keep only their tombstone fields (pruned on schedule); the
         // per-account signup fact, the deduplication record of a live account, is deleted.
         try await SignupIntentService.eraseAccount(accountID, now: now, on: sql)
         try await sql.raw("UPDATE measurement_revenuecat_lifecycle_events SET account_id=NULL WHERE account_id=\(bind:accountID)").run()
         try await sql.raw("UPDATE measurement_revenuecat_adjustments SET account_id=NULL WHERE account_id=\(bind:accountID)").run()
         try await sql.raw("UPDATE measurement_revenuecat_events SET account_id=NULL WHERE account_id=\(bind:accountID)").run()
-        if queued {
+        if queued, let accountDeletionJobID {
             try await sql.raw("UPDATE account_deletion_jobs SET measurement_erasure_state='pending' WHERE id=\(bind:accountDeletionJobID)").run()
         }
     }

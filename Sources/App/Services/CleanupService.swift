@@ -47,6 +47,10 @@ struct CleanupService {
         var measurementPurchaseIntents: Int? = nil
         /// Expired or settled signup intents reduced to tombstones. Optional for the same reason.
         var measurementSignupIntents: Int? = nil
+        /// Deleted accounts' measurement consent, withdrawal and erasure receipts removed 30 days after
+        /// their provider erasure completed, plus the accounts still kept (`MeasurementConsentRetention`).
+        /// Optional for the same reason.
+        var measurementConsentReceipts: MeasurementConsentRetention.Counts? = nil
         /// The container's own numbers at the end of the pass (wave 3): CPU limit and use,
         /// memory, the database pool and round trips. Numbers only; optional for the same
         /// reason as the fields above, and never able to fail the pass.
@@ -163,6 +167,8 @@ struct CleanupService {
         removed.measurementSignupIntents = try await SignupIntentService.cleanup(on: db)
         removed.accountDeletionJobs = try await AccountDeletionWorker.run(app: app, on: db, transactionMode: .maintenanceConnection,
                                                                           budget: budget)
+        // After both workers: receipts go only once every provider erasure of a deleted account completed.
+        removed.measurementConsentReceipts = try await MeasurementConsentRetention.cleanup(on: db)
         try await SnagDeletionService.cleanupFiles(app: app, on: db)
         try await RateLimitService.cleanup(on: db)
 

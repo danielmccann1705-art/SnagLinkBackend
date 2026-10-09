@@ -218,6 +218,9 @@ public func configure(_ app: Application,
         // surface of each product event (portal gating), and finite signup tombstone retention.
         app.migrations.add(AddMeasurementNoticeVersions())
         app.asyncCommands.use(PostHogErasureResolveCommand(), as: "posthog-erasure-resolve")
+        // Rollback recovery: list and reconcile measurement and deletion work an older image left
+        // (ROLLBACK-RECONCILIATION.md). Never calls a provider.
+        app.asyncCommands.use(MeasurementReconcileCommand(), as: "measurement-reconcile")
 
         try await app.autoMigrate()
     } else {
