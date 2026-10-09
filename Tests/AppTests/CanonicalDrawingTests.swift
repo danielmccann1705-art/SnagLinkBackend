@@ -348,11 +348,16 @@ final class CanonicalDrawingTests: XCTestCase {
             if status == "archived" { current.archivedAt = Date() }
             current.revision += 1; current.workflowRevision += 1
             try await current.save(on:app.db)
+            // The stored row before the replay: Postgres keeps timestamps to the microsecond, so `archivedAt` is compared stored value
+            // to stored value. Comparing it with the in-memory nanosecond `Date()` failed on Linux Foundation (Docker swift:6.0-jammy,
+            // A213) while passing on macOS; the assertion is as strict as before - the replay must not change the stored row.
+            let stored = try await Snag.find(snag.requireID(),on:app.db)!
             let replay = try await CanonicalDrawingService.setPin(command,snagID:snag.requireID(),projectID:project.requireID(),actorID:owner.requireID(),on:app.db)
             XCTAssertEqual(try PlatformMutationService.encode(replay),try PlatformMutationService.encode(first))
             let after = try await Snag.find(snag.requireID(),on:app.db)!
             XCTAssertEqual(after.revision,current.revision); XCTAssertEqual(after.status,current.status)
-            XCTAssertEqual(after.workflowRevision,current.workflowRevision); XCTAssertEqual(after.archivedAt,current.archivedAt)
+            XCTAssertEqual(after.workflowRevision,current.workflowRevision); XCTAssertEqual(after.archivedAt,stored.archivedAt)
+            if status == "archived" { XCTAssertNotNil(after.archivedAt) } else { XCTAssertNil(after.archivedAt) }
             await fails(.conflict) { _ = try await CanonicalDrawingService.setPin(.init(mutation:self.mutation(),expectedSnagRevision:current.revision,expectedPinRevision:1,pin:nil),snagID:snag.requireID(),projectID:project.requireID(),actorID:owner.requireID(),on:self.app.db) }
         }
         let events = try await count("drawing_pin_events",project:project); XCTAssertEqual(events,1)
