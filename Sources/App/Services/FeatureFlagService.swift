@@ -17,6 +17,9 @@ struct FeatureFlagService {
         ("adMeasurementEnabled", "FEATURE_AD_MEASUREMENT_ENABLED", false),
         ("productAnalyticsEnabled", "FEATURE_PRODUCT_ANALYTICS_ENABLED", false),
         ("crossCompanyAdsEnabled", "FEATURE_CROSS_COMPANY_ADS_ENABLED", false),
+        // LinkedIn customer conversions. In production this resolves true only while
+        // LINKEDIN_ERASURE_RESOLUTION_ACCEPTED names the accepted LinkedIn erasure resolution
+        // (`LinkedInErasureResolution`, release gate); an override row or the environment alone cannot.
         ("linkedInConversionsEnabled", "FEATURE_LINKEDIN_CONVERSIONS_ENABLED", false),
         // Portal product analytics (FINAL-PRIVACY-NOTICE-2.0.1.md): web-surface product events count
         // only while this is on, and only for a grant recorded under a portal-covering notice. It
@@ -44,6 +47,15 @@ struct FeatureFlagService {
             } else {
                 result[flag.key] = flag.hardDefault
             }
+        }
+        // Release gate: production LinkedIn dispatch is refused until the erasure resolution for
+        // conversions already sent has been reviewed and accepted by its exact version. Every enqueue
+        // and dispatch path reads this resolved value; dispatch also checks its own configuration.
+        if result["linkedInConversionsEnabled"] == true,
+           !LinkedInErasureResolution.productionDispatchPermitted(
+               platformEnvironment: lookup("PLATFORM_ENVIRONMENT"),
+               accepted: lookup(LinkedInErasureResolution.acceptanceVariable)) {
+            result["linkedInConversionsEnabled"] = false
         }
         return result
     }

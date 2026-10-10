@@ -50,6 +50,9 @@ enum MeasurementDispatchService {
         var linkedInSignupRule: String?
         var linkedInSubscriptionRule: String?
         var linkedInEnvironment: LinkedInConversion.Environment?
+        /// `LINKEDIN_ERASURE_RESOLUTION_ACCEPTED`: production LinkedIn sends need the accepted
+        /// erasure resolution's exact version (`LinkedInErasureResolution`).
+        var linkedInErasureResolutionAccepted: String? = nil
     }
     struct ConfigurationKey: StorageKey { typealias Value = Configuration }
     struct Reply: Sendable { let status: Int; let retryAfter: String? }
@@ -82,7 +85,8 @@ enum MeasurementDispatchService {
                      linkedInAccessToken: Environment.get("LINKEDIN_CONVERSIONS_ACCESS_TOKEN"),
                      linkedInSignupRule: Environment.get("LINKEDIN_SIGNUP_CONVERSION_RULE_ID"),
                      linkedInSubscriptionRule: Environment.get("LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID"),
-                     linkedInEnvironment: Environment.get("PLATFORM_ENVIRONMENT") == "production" ? .production : .sandbox)
+                     linkedInEnvironment: Environment.get("PLATFORM_ENVIRONMENT") == "production" ? .production : .sandbox,
+                     linkedInErasureResolutionAccepted: Environment.get(LinkedInErasureResolution.acceptanceVariable))
     }
 
     static func run(app: Application, limit: Int = 50, on db: Database) async -> Counts {
@@ -181,6 +185,14 @@ enum MeasurementDispatchService {
                   (destination == "singular" && flags["crossCompanyAdsEnabled"] == true) ||
                   (destination == "linkedin" && flags["crossCompanyAdsEnabled"] == true && flags["linkedInConversionsEnabled"] == true)
             else { return .suppressed }
+            if destination == "linkedin" {
+                // Release gate, independent of the resolved switch: no production LinkedIn send
+                // without the accepted erasure resolution.
+                let config = configuration(app)
+                guard LinkedInErasureResolution.productionDispatchPermitted(
+                    environment: config.linkedInEnvironment, accepted: config.linkedInErasureResolutionAccepted)
+                else { return .suppressed }
+            }
             let installationID = try row.decode(column: "installation_id", as: UUID?.self)
             if purpose == .crossCompanyAds {
                 guard let installationID else { return .suppressed }

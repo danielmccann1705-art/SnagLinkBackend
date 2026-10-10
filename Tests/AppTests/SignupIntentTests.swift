@@ -1263,6 +1263,53 @@ final class SignupIntentTests: XCTestCase {
         XCTAssertEqual(thirdJobs.map(\.state), ["suppressed"])
     }
 
+    /// Release gate (outputs/measurement-2026-10-07/LINKEDIN-ERASURE-RESOLUTION.md): an otherwise eligible
+    /// PRODUCTION LinkedIn signup is suppressed while the LinkedIn erasure resolution has not been accepted by
+    /// its exact version, and goes out once it has. Only the injected recorder is called.
+    func testProductionLinkedInSignupIsRefusedWithoutTheAcceptedErasureResolution() async throws {
+        try await enable("crossCompanyAdsEnabled", "linkedInConversionsEnabled")
+        let recorder = SignupHTTPRecorder()
+        configureDelivery(recorder)
+        func production(accepted: String?) {
+            app.storage[MeasurementDispatchService.ConfigurationKey.self] = .init(
+                postHogProjectKey: "phc_synthetic", postHogEnvironment: .sandbox, singularURL: nil, singularAPIKey: nil,
+                linkedInAccessToken: "synthetic-linkedin-token", linkedInSignupRule: "31231706",
+                linkedInSubscriptionRule: "31231714", linkedInEnvironment: .production,
+                linkedInErasureResolutionAccepted: accepted)
+        }
+        func productionSignup(_ label: String) async throws -> UUID {
+            let intent = try await issue("apple", product: false, cross: true)
+            let auth = try signedIn(try await apple(try appleToken(subject: "\(label)-\(UUID())", nonce: intent.nonce, email: address()),
+                                                    context: context(intent, att: "authorized")), new: true)
+            // The fact a production deployment records (this test platform is local).
+            try await sql.raw("UPDATE measurement_signup_facts SET environment='production' WHERE account_id=\(bind:auth.user.id)").run()
+            return auth.user.id
+        }
+        production(accepted: nil)
+        let refused = try await productionSignup("signup-linkedin-gate-refused")
+        _ = await MeasurementDispatchService.run(app: app, on: app.db)
+        let none = await recorder.calls().filter { $0.uri == "https://api.linkedin.com/rest/conversionEvents" }
+        XCTAssertTrue(none.isEmpty, "no production LinkedIn request without the accepted resolution")
+        let refusedJobs = try await jobs(refused)
+        XCTAssertEqual(refusedJobs.filter { $0.destination == "linkedin" }.map(\.state), ["suppressed"])
+
+        production(accepted: "linkedin-erasure-unreviewed")
+        let wrong = try await productionSignup("signup-linkedin-gate-wrong")
+        _ = await MeasurementDispatchService.run(app: app, on: app.db)
+        let stillNone = await recorder.calls().filter { $0.uri == "https://api.linkedin.com/rest/conversionEvents" }
+        XCTAssertTrue(stillNone.isEmpty, "acceptance names the exact reviewed version")
+        let wrongJobs = try await jobs(wrong)
+        XCTAssertEqual(wrongJobs.filter { $0.destination == "linkedin" }.map(\.state), ["suppressed"])
+
+        production(accepted: LinkedInErasureResolution.version)
+        let accepted = try await productionSignup("signup-linkedin-gate-accepted")
+        _ = await MeasurementDispatchService.run(app: app, on: app.db)
+        let sent = await recorder.calls().filter { $0.uri == "https://api.linkedin.com/rest/conversionEvents" }
+        XCTAssertEqual(sent.count, 1, "the same eligible production signup is sent once the resolution is accepted")
+        let acceptedJobs = try await jobs(accepted)
+        XCTAssertEqual(acceptedJobs.filter { $0.destination == "linkedin" }.map(\.state), ["delivered"])
+    }
+
     // MARK: - ATT: no later activation after sign-up (Dan, 9 October 2026, section 3)
 
     func testRefusedCrossCompanyChoiceAdoptsNothingForItAndLaterAuthorisedATTCannotAddIt() async throws {
