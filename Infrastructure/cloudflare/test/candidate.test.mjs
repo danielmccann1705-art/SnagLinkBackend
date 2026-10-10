@@ -111,12 +111,15 @@ const secretBindings=['DATABASE_URL','JWT_SECRET','LINK_GRANT_TOKEN_KEY','LINK_G
   'R2_ACCESS_KEY_ID','R2_SECRET_ACCESS_KEY','RESEND_API_KEY','MAINTENANCE_SECRET',
   'APPLE_PRIVATE_KEY','APPLE_CREDENTIAL_KEY','APPLE_CREDENTIAL_PREVIOUS_KEY',
   // Replacement 2.0.1 measurement package (9 Oct): set by Codex as encrypted bindings, sandbox only.
-  'POSTHOG_PROJECT_API_KEY','MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY','REVENUECAT_WEBHOOK_AUTHORIZATION'];
+  'POSTHOG_PROJECT_API_KEY','MEASUREMENT_PURCHASE_ORIGIN_HMAC_KEY','REVENUECAT_WEBHOOK_AUTHORIZATION',
+  // Synthetic LinkedIn test rule (10 Oct): set by Codex as an encrypted binding, only with the test rule.
+  'LINKEDIN_CONVERSIONS_ACCESS_TOKEN'];
 // Named in the adapter only so it can refuse them: staging has no purchase or push provider.
 const refusedInStaging=['REVENUECAT_SECRET_API_KEY','APNS_PRIVATE_KEY',
   // Measurement (9 Oct): advertising, device credentials and provider erasure stay off in staging.
   'POSTHOG_ERASURE_API_KEY','POSTHOG_ERASURE_PROJECT_ID','POSTHOG_ERASURE_INGESTION_LAG_SECONDS',
-  'LINKEDIN_CONVERSIONS_ACCESS_TOKEN','LINKEDIN_SIGNUP_CONVERSION_RULE_ID','LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID',
+  // The two rules are produced by the adapter from the one test rule, never set; production's acceptance never reaches staging.
+  'LINKEDIN_SIGNUP_CONVERSION_RULE_ID','LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID','LINKEDIN_ERASURE_RESOLUTION_ACCEPTED',
   'SINGULAR_API_KEY','SINGULAR_SERVER_EVENT_URL','SINGULAR_ERASURE_URL',
   'APPLE_ADSERVICES_OWNED_ORG_ID','APPLE_ADSERVICES_OWNED_CAMPAIGN_IDS','MEASUREMENT_CREDENTIAL_KEY'];
 // Understood by the adapter and deliberately not configured on this candidate.
@@ -129,8 +132,9 @@ const notCarried=new Map([
   ['POSTHOG_MEASUREMENT_ENVIRONMENT','measurement package only; must be sandbox'],
   ['MEASUREMENT_PURCHASE_ORIGIN_ENVIRONMENT','measurement package only; must be sandbox'],
   ['REVENUECAT_APP_ID','measurement package only; optional sandbox webhook'],
-  ['FEATURE_CROSS_COMPANY_ADS_ENABLED','advertising stays off; the adapter accepts only "false"'],
-  ['FEATURE_LINKEDIN_CONVERSIONS_ENABLED','advertising stays off; the adapter accepts only "false"'],
+  ['FEATURE_CROSS_COMPANY_ADS_ENABLED','advertising stays off; "true" only beside the isolated LinkedIn test rule'],
+  ['FEATURE_LINKEDIN_CONVERSIONS_ENABLED','advertising stays off; "true" only beside the isolated LinkedIn test rule'],
+  ['LINKEDIN_TEST_CONVERSION_RULE_ID','the synthetic LinkedIn test phase only; set in the reviewed deploy config; absent = LinkedIn off'],
   ['FEATURE_AD_MEASUREMENT_ENABLED','Apple Ads measurement stays off; the adapter accepts only "false"'],
   ['EMAIL_FROM','candidate email is disabled; STAGING_EMAIL_ENABLED is false'],
   ['EMAIL_ALLOWED_RECIPIENTS','candidate email is disabled'],

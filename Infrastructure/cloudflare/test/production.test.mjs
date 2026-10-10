@@ -277,3 +277,16 @@ test('production takes an optional database pool size and never the staging diag
     assert.throws(() => productionContainerEnvironment(configured({RUNTIME_DIAGNOSTICS: value})), /staging-only/);
   }
 });
+
+// Synthetic LinkedIn test rule (10 Oct 2026): a staging-only path. The production adapter forwards no LinkedIn or
+// cross-company setting, so neither the test rule nor the switches can reach a production container; the backend's
+// own production guard (LINKEDIN_ERASURE_RESOLUTION_ACCEPTED) stays the only way LinkedIn could ever be enabled there.
+test('production forwards no LinkedIn test rule, LinkedIn switch, token, rule or erasure acceptance', () => {
+  const linkedIn = {LINKEDIN_TEST_CONVERSION_RULE_ID: '987654321', FEATURE_LINKEDIN_CONVERSIONS_ENABLED: 'true',
+    FEATURE_CROSS_COMPANY_ADS_ENABLED: 'true', LINKEDIN_CONVERSIONS_ACCESS_TOKEN: 'synthetic-linkedin-token-0000',
+    LINKEDIN_SIGNUP_CONVERSION_RULE_ID: '987654321', LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID: '987654321',
+    LINKEDIN_ERASURE_RESOLUTION_ACCEPTED: 'linkedin-erasure-2026-10-10'};
+  let env;
+  try { env = productionContainerEnvironment(configured(linkedIn)); } catch { return; }  // a refusal is also acceptable
+  for (const key of Object.keys(linkedIn)) assert.equal(env[key], undefined, key);
+});

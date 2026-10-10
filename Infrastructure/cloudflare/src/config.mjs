@@ -95,22 +95,23 @@ export function containerEnvironment(env) {
 // Replacement 2.0.1 measurement on the unified candidate (9 Oct 2026,
 // outputs/measurement-2026-10-07/STAGING-PACKAGE-2.0.1-MEASUREMENT.md). Sandbox only, and only
 // what receiver testing needs: the product-analytics switch with the PostHog sandbox project,
-// the purchase-origin key behind the product purchase witness, and an optional sandbox
-// RevenueCat webhook. Cross-company, LinkedIn, Singular, Apple Ads and provider erasure cannot
-// be switched on through this adapter: their switches may only be absent or exactly "false",
-// and their credentials are refused outright. All absent: exactly the previous behaviour.
+// the purchase-origin key behind the product purchase witness, an optional sandbox RevenueCat
+// webhook and, since 10 Oct, synthetic LinkedIn conversions to ONE isolated test rule (below).
+// Singular, Apple Ads and provider erasure cannot be switched on through this adapter: their
+// switches may only be absent or exactly "false", and their credentials are refused outright.
+// All absent: exactly the previous behaviour.
 /** @returns {Record<string, string>} */
 function measurementEnvironment(env, candidate) {
   for (const key of ['POSTHOG_ERASURE_API_KEY', 'POSTHOG_ERASURE_PROJECT_ID', 'POSTHOG_ERASURE_INGESTION_LAG_SECONDS',
-    'LINKEDIN_CONVERSIONS_ACCESS_TOKEN', 'LINKEDIN_SIGNUP_CONVERSION_RULE_ID', 'LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID',
+    'LINKEDIN_SIGNUP_CONVERSION_RULE_ID', 'LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID', 'LINKEDIN_ERASURE_RESOLUTION_ACCEPTED',
     'SINGULAR_API_KEY', 'SINGULAR_SERVER_EVENT_URL', 'SINGULAR_ERASURE_URL',
     'APPLE_ADSERVICES_OWNED_ORG_ID', 'APPLE_ADSERVICES_OWNED_CAMPAIGN_IDS', 'MEASUREMENT_CREDENTIAL_KEY']) {
     if (env[key] !== undefined) throw new Error('Advertising and provider-erasure settings are disabled in staging');
   }
-  const selected = {};
+  const selected = linkedInTestEnvironment(env, candidate);
   for (const key of ['FEATURE_CROSS_COMPANY_ADS_ENABLED', 'FEATURE_LINKEDIN_CONVERSIONS_ENABLED',
     'FEATURE_AD_MEASUREMENT_ENABLED']) {
-    if (env[key] === undefined) continue;
+    if (env[key] === undefined || selected[key] !== undefined) continue;
     if (env[key] !== 'false') throw new Error('Advertising measurement switches can only be "false" in staging');
     selected[key] = 'false';
   }
@@ -165,6 +166,50 @@ function measurementEnvironment(env, candidate) {
     selected.REVENUECAT_APP_ID = env.REVENUECAT_APP_ID;
   }
   return selected;
+}
+
+// Synthetic LinkedIn conversions on staging (10 Oct 2026; Dan's approval item 4 of the measurement
+// package): ONE isolated LinkedIn test conversion rule, named by LINKEDIN_TEST_CONVERSION_RULE_ID.
+// Absent: LinkedIn and cross-company stay off ("false" or absent) and the access token is refused,
+// exactly as before. Present, on the enabled unified candidate only: the LinkedIn conversions switch
+// and the cross-company switch that the synthetic signup needs must both be exactly "true"; the
+// encrypted LINKEDIN_CONVERSIONS_ACCESS_TOKEN is required; and the rule is forwarded as both the
+// signup and the subscription rule, so every staging LinkedIn conversion reaches that one rule. The
+// rules themselves can never be set directly, the production rules are refused, and the production
+// acceptance LINKEDIN_ERASURE_RESOLUTION_ACCEPTED is refused above. The container runs with
+// PLATFORM_ENVIRONMENT=staging, so the backend's LinkedIn environment is sandbox and its production
+// guard does not apply; the production adapter forwards no LinkedIn setting at all.
+const LINKEDIN_PRODUCTION_RULES = ['31231706', '31231714'];
+/** @returns {Record<string, string>} */
+function linkedInTestEnvironment(env, candidate) {
+  const rule = env.LINKEDIN_TEST_CONVERSION_RULE_ID;
+  if (rule === undefined) {
+    if (env.LINKEDIN_CONVERSIONS_ACCESS_TOKEN !== undefined) {
+      throw new Error('Advertising and provider-erasure settings are disabled in staging');
+    }
+    return {};
+  }
+  if (!candidate || env.STAGING_PLATFORM_ENABLED !== 'true' || env.PLATFORM_ENVIRONMENT !== 'staging') {
+    throw new Error('The LinkedIn test rule requires the enabled unified candidate');
+  }
+  if (typeof rule !== 'string' || !/^[1-9][0-9]{0,19}$/.test(rule) || LINKEDIN_PRODUCTION_RULES.includes(rule)) {
+    throw new Error('LINKEDIN_TEST_CONVERSION_RULE_ID names one isolated LinkedIn test rule, never a production rule');
+  }
+  if (env.FEATURE_LINKEDIN_CONVERSIONS_ENABLED !== 'true' || env.FEATURE_CROSS_COMPANY_ADS_ENABLED !== 'true') {
+    throw new Error('The LinkedIn test rule needs the LinkedIn and cross-company switches both "true"');
+  }
+  const token = env.LINKEDIN_CONVERSIONS_ACCESS_TOKEN;
+  if (typeof token !== 'string' || !/^[\x21-\x7e]{16,4096}$/.test(token) ||
+      [env.JWT_SECRET, env.LINK_GRANT_TOKEN_KEY, env.MAINTENANCE_SECRET].includes(token)) {
+    throw new Error('The LinkedIn test rule needs its own LinkedIn access token');
+  }
+  return {
+    FEATURE_LINKEDIN_CONVERSIONS_ENABLED: 'true',
+    FEATURE_CROSS_COMPANY_ADS_ENABLED: 'true',
+    LINKEDIN_CONVERSIONS_ACCESS_TOKEN: token,
+    LINKEDIN_SIGNUP_CONVERSION_RULE_ID: rule,
+    LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID: rule
+  };
 }
 
 // The one staging Durable Object, and so the one container, this Worker addresses (Lane 2, 28 Sep 2026).

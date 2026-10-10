@@ -391,3 +391,48 @@ test('measurement cannot reach production, advertising or provider erasure from 
   assert.throws(() => containerEnvironment({...sample(),...measurement()}));
   assert.throws(() => containerEnvironment({...sample(),...platform(),...measurement()}));
 });
+
+// Synthetic LinkedIn conversions to ONE isolated test rule (10 Oct 2026). Synthetic values only.
+const linkedInTest = () => ({LINKEDIN_TEST_CONVERSION_RULE_ID:'987654321', FEATURE_LINKEDIN_CONVERSIONS_ENABLED:'true',
+  FEATURE_CROSS_COMPANY_ADS_ENABLED:'true', LINKEDIN_CONVERSIONS_ACCESS_TOKEN:'synthetic-linkedin-token-do_not_echo-0000'});
+
+test('one isolated LinkedIn test rule turns LinkedIn and cross-company on together, on the enabled candidate only', () => {
+  const env=containerEnvironment({...candidate(),...measurement(),...linkedInTest()});
+  assert.equal(env.FEATURE_LINKEDIN_CONVERSIONS_ENABLED,'true');
+  assert.equal(env.FEATURE_CROSS_COMPANY_ADS_ENABLED,'true');
+  assert.equal(env.LINKEDIN_CONVERSIONS_ACCESS_TOKEN,linkedInTest().LINKEDIN_CONVERSIONS_ACCESS_TOKEN);
+  // The one rule is both rules: every staging LinkedIn conversion reaches it, and no other rule exists.
+  assert.equal(env.LINKEDIN_SIGNUP_CONVERSION_RULE_ID,'987654321');
+  assert.equal(env.LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID,'987654321');
+  assert.equal(env.LINKEDIN_TEST_CONVERSION_RULE_ID,undefined);
+  assert.equal(env.PLATFORM_ENVIRONMENT,'staging', 'the backend derives its LinkedIn environment (sandbox) from this');
+  assert.equal(env.LINKEDIN_ERASURE_RESOLUTION_ACCEPTED,undefined);
+  // It needs no product-analytics configuration, and Apple Ads stays off.
+  const alone=containerEnvironment({...candidate(),...linkedInTest(),FEATURE_AD_MEASUREMENT_ENABLED:'false'});
+  assert.equal(alone.LINKEDIN_SIGNUP_CONVERSION_RULE_ID,'987654321');
+  assert.equal(alone.FEATURE_AD_MEASUREMENT_ENABLED,'false');
+  assert.equal(alone.POSTHOG_PROJECT_API_KEY,undefined);
+  for (const override of [
+    {FEATURE_LINKEDIN_CONVERSIONS_ENABLED:'false'}, {FEATURE_LINKEDIN_CONVERSIONS_ENABLED:undefined},
+    {FEATURE_CROSS_COMPANY_ADS_ENABLED:'false'}, {FEATURE_CROSS_COMPANY_ADS_ENABLED:undefined},
+    {LINKEDIN_TEST_CONVERSION_RULE_ID:'31231706'}, {LINKEDIN_TEST_CONVERSION_RULE_ID:'31231714'},
+    {LINKEDIN_TEST_CONVERSION_RULE_ID:'0123'}, {LINKEDIN_TEST_CONVERSION_RULE_ID:'12a4'}, {LINKEDIN_TEST_CONVERSION_RULE_ID:''},
+    {LINKEDIN_TEST_CONVERSION_RULE_ID:'1'.repeat(21)}, {LINKEDIN_TEST_CONVERSION_RULE_ID:'123,456'},
+    {LINKEDIN_CONVERSIONS_ACCESS_TOKEN:undefined}, {LINKEDIN_CONVERSIONS_ACCESS_TOKEN:'short'},
+    {LINKEDIN_CONVERSIONS_ACCESS_TOKEN:'has a space do_not_echo 000000'}, {LINKEDIN_CONVERSIONS_ACCESS_TOKEN: candidate().JWT_SECRET},
+    {LINKEDIN_SIGNUP_CONVERSION_RULE_ID:'987654321'}, {LINKEDIN_SUBSCRIPTION_CONVERSION_RULE_ID:'987654321'},
+    {LINKEDIN_ERASURE_RESOLUTION_ACCEPTED:'linkedin-erasure-2026-10-10'},
+    {FEATURE_AD_MEASUREMENT_ENABLED:'true'}, {SINGULAR_API_KEY:'synthetic'}, {MEASUREMENT_CREDENTIAL_KEY: btoa('c'.repeat(32))}]) {
+    const env={...candidate(),...measurement(),...linkedInTest(),...override};
+    for (const [key,value] of Object.entries(override)) if (value === undefined) delete env[key];
+    assert.throws(() => containerEnvironment(env), error => !error.message.includes('do_not_echo'), JSON.stringify(override));
+  }
+  // Without the test rule nothing changed: the switches and the token are refused as before.
+  for (const override of [{FEATURE_LINKEDIN_CONVERSIONS_ENABLED:'true',FEATURE_CROSS_COMPANY_ADS_ENABLED:'true'},
+    {LINKEDIN_CONVERSIONS_ACCESS_TOKEN:linkedInTest().LINKEDIN_CONVERSIONS_ACCESS_TOKEN}]) {
+    assert.throws(() => containerEnvironment({...candidate(),...measurement(),...override}));
+  }
+  // The recovery image and a disabled platform never accept it.
+  assert.throws(() => containerEnvironment({...sample(),...linkedInTest()}));
+  assert.throws(() => containerEnvironment({...sample(),...platform(),...linkedInTest()}));
+});
