@@ -258,7 +258,8 @@ enum MeasurementRelayService {
             if input.attStatus == .authorized, activatable, current.subjectID == nil {
                 let erasurePending = try await sql.raw("""
                     SELECT 1 FROM measurement_erasure_jobs e JOIN measurement_subjects s ON s.id=e.subject_id
-                    WHERE e.account_id=\(bind:accountID) AND s.purpose='crossCompanyAds' AND e.state<>'completed' LIMIT 1
+                    WHERE e.account_id=\(bind:accountID) AND s.purpose='crossCompanyAds'
+                      AND e.state NOT IN \(unsafeRaw: LinkedInErasureResolution.settledStates) LIMIT 1
                     """).first() != nil
                 if !erasurePending {
                     let subject = try await MeasurementPrivacyService.createSubject(accountID: accountID,
@@ -577,7 +578,8 @@ enum MeasurementRelayService {
         guard let row = try await sql.raw("""
             SELECT c.decision,c.subject_id,c.updated_at,
                    EXISTS(SELECT 1 FROM measurement_erasure_jobs e JOIN measurement_subjects s ON s.id=e.subject_id
-                          WHERE e.account_id=c.account_id AND s.purpose=c.purpose AND e.state<>'completed') AS erasure_pending
+                          WHERE e.account_id=c.account_id AND s.purpose=c.purpose
+                            AND e.state NOT IN \(unsafeRaw: LinkedInErasureResolution.settledStates)) AS erasure_pending
             FROM measurement_permission_current c
             WHERE c.account_id=\(bind:accountID) AND c.purpose=\(bind:purpose.rawValue) AND c.revision=\(bind:revision)
             """).first(), let decision = MeasurementDecision(rawValue: try row.decode(column: "decision", as: String.self)) else {

@@ -211,7 +211,8 @@ enum MeasurementPrivacyService {
             if mayCreate && subjectID == nil {
                 let erasurePending = try await sql.raw("""
                     SELECT 1 FROM measurement_erasure_jobs e JOIN measurement_subjects s ON s.id=e.subject_id
-                    WHERE e.account_id=\(bind:accountID) AND s.purpose=\(bind:purpose.rawValue) AND e.state<>'completed' LIMIT 1
+                    WHERE e.account_id=\(bind:accountID) AND s.purpose=\(bind:purpose.rawValue)
+                      AND e.state NOT IN \(unsafeRaw: LinkedInErasureResolution.settledStates) LIMIT 1
                     """).first() != nil
                 if !erasurePending {
                     subjectID = try await createSubject(accountID: accountID, purpose: purpose, now: now, on: sql)
@@ -284,7 +285,8 @@ enum MeasurementPrivacyService {
                 """).run()
         }
         queued = try await sql.raw("""
-            SELECT 1 FROM measurement_erasure_jobs WHERE account_id=\(bind:accountID) AND state<>'completed' LIMIT 1
+            SELECT 1 FROM measurement_erasure_jobs WHERE account_id=\(bind:accountID)
+              AND state NOT IN \(unsafeRaw: LinkedInErasureResolution.settledStates) LIMIT 1
             """).first() != nil
         try await sql.raw("DELETE FROM measurement_att_assertions WHERE account_id=\(bind:accountID)").run()
         try await ApplePurchaseOriginService.revoke(accountID: accountID, now: now, on: sql)
@@ -322,6 +324,14 @@ enum MeasurementPrivacyService {
         try await sql.raw("UPDATE measurement_revenuecat_events SET account_id=NULL WHERE account_id=\(bind:accountID)").run()
         if queued, let accountDeletionJobID {
             try await sql.raw("UPDATE account_deletion_jobs SET measurement_erasure_state='pending' WHERE id=\(bind:accountDeletionJobID)").run()
+        } else if let accountDeletionJobID {
+            // Only a LinkedIn copy that an earlier withdrawal already left to age out under LinkedIn's
+            // terms remains: the deletion says so rather than `completed` or `not_requested`.
+            try await sql.raw("""
+                UPDATE account_deletion_jobs SET measurement_erasure_state='provider_retention_bound'
+                WHERE id=\(bind:accountDeletionJobID) AND EXISTS(SELECT 1 FROM measurement_erasure_jobs
+                    WHERE account_deletion_job_id=\(bind:accountDeletionJobID) AND state='provider_retention_bound')
+                """).run()
         }
     }
 
@@ -474,7 +484,8 @@ enum MeasurementPrivacyService {
             SELECT c.purpose,c.revision,c.decision,c.updated_at,s.opaque_subject,choice.att_status AS choice_att_status,
                    choice.notice_version AS choice_notice_version,
                    EXISTS(SELECT 1 FROM measurement_erasure_jobs e JOIN measurement_subjects es ON es.id=e.subject_id
-                          WHERE e.account_id=c.account_id AND es.purpose=c.purpose AND e.state<>'completed') AS erasure_pending
+                          WHERE e.account_id=c.account_id AND es.purpose=c.purpose
+                            AND e.state NOT IN \(unsafeRaw: LinkedInErasureResolution.settledStates)) AS erasure_pending
             FROM measurement_permission_current c
             LEFT JOIN measurement_subjects s ON s.id=c.subject_id AND s.state='active'
             LEFT JOIN measurement_consent_events choice ON choice.account_id=c.account_id AND choice.id=c.revision

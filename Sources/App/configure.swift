@@ -217,6 +217,9 @@ public func configure(_ app: Application,
         // One final optional-measurement notice: the version on every consent revision, the
         // surface of each product event (portal gating), and finite signup tombstone retention.
         app.migrations.add(AddMeasurementNoticeVersions())
+        // LinkedIn erasure resolution: conversions already sent cannot be deleted at LinkedIn, so its erasure
+        // ends in `provider_retention_bound` with the basis and age-out date (LINKEDIN-ERASURE-RESOLUTION.md).
+        app.migrations.add(AddLinkedInErasureResolution())
         app.asyncCommands.use(PostHogErasureResolveCommand(), as: "posthog-erasure-resolve")
         // Rollback recovery: list and reconcile measurement and deletion work an older image left
         // (ROLLBACK-RECONCILIATION.md). Never calls a provider.

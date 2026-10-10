@@ -112,7 +112,8 @@ enum MeasurementReconciliation {
                              ORDER BY e.destination,e.created_at)
                              FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=d.id),'') AS jobs
             FROM account_deletion_jobs d
-            WHERE d.state<>'completed' AND d.measurement_erasure_state NOT IN ('not_requested','completed')
+            WHERE d.state<>'completed'
+              AND d.measurement_erasure_state NOT IN ('not_requested','completed','provider_retention_bound')
             ORDER BY d.requested_at LIMIT \(bind:bounded)
             """).all()
         for row in pending {

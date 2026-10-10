@@ -8,6 +8,8 @@ enum MeasurementErasureService {
         var retrying = 0
         var manualRequired = 0
         var pending = 0
+        /// LinkedIn jobs closed as `provider_retention_bound` (LinkedInErasureResolution).
+        var providerRetentionBound = 0
     }
     struct Configuration: Sendable {
         var singularURL: String?
@@ -17,7 +19,13 @@ enum MeasurementErasureService {
     struct Reply: Sendable { let status: Int }
     typealias Transport = @Sendable (URI, HTTPHeaders, Data) async throws -> Reply
     struct TransportKey: StorageKey { typealias Value = Transport }
-    private enum Outcome: Equatable { case completed, pending, retry, manual }
+    private enum Outcome: Equatable {
+        case completed, pending, retry, manual
+        /// LinkedIn: sends stopped, our copies gone, provider copy ages out under the recorded basis.
+        case providerRetentionBound(LinkedInErasureResolution.Bound)
+        /// A local step (no provider call) could not finish; it runs again later.
+        case localRetry
+    }
     private struct Job { let id, token, accountID, subjectID: UUID; let destination: String }
 
     static func configuration(_ app: Application) -> Configuration {
@@ -38,8 +46,9 @@ enum MeasurementErasureService {
             switch outcome {
             case .completed: counts.completed += 1
             case .pending: counts.pending += 1
-            case .retry: counts.retrying += 1
+            case .retry, .localRetry: counts.retrying += 1
             case .manual: counts.manualRequired += 1
+            case .providerRetentionBound: counts.providerRetentionBound += 1
             }
         }
         return counts
@@ -56,6 +65,16 @@ enum MeasurementErasureService {
                     available_at=\(bind:now),last_error_kind=NULL
                 WHERE j.state='leased' AND j.lease_expires_at<=\(bind:now) AND j.destination='posthog'
                   AND EXISTS(SELECT 1 FROM measurement_posthog_erasure_receipts r WHERE r.job_id=j.id)
+                """).run()
+            // The LinkedIn step never calls LinkedIn (LinkedInErasureResolution), so an expired lease is
+            // not an ambiguous provider attempt: the step simply runs again. A LinkedIn job an earlier image
+            // left `manual_required` stood for the missing LinkedIn contract, never for a provider request,
+            // so it re-enters the defined resolution.
+            try await sql.raw("""
+                UPDATE measurement_erasure_jobs SET state='pending',lease_token=NULL,lease_expires_at=NULL,
+                    available_at=\(bind:now),last_error_kind=NULL
+                WHERE destination='linkedin'
+                  AND ((state='leased' AND lease_expires_at<=\(bind:now)) OR state='manual_required')
                 """).run()
             try await sql.raw("""
                 UPDATE measurement_erasure_jobs SET state='manual_required',lease_token=NULL,lease_expires_at=NULL,
@@ -88,6 +107,14 @@ enum MeasurementErasureService {
     /// PostHog escalations carry their durable reason (POSTHOG-MANUAL-REMEDIATION.md).
     private static func erase(_ job: Job, app: Application,
                               on db: Database) async -> (Outcome, PostHogErasureService.ManualReason?) {
+        if job.destination == "linkedin" {
+            // No deletion contract exists at LinkedIn; the defined terminal state is not `completed`.
+            do {
+                guard let bound = try await LinkedInErasureResolution.settle(jobID: job.id, leaseToken: job.token,
+                    accountID: job.accountID, subjectID: job.subjectID, on: db) else { return (.localRetry, nil) }
+                return (.providerRetentionBound(bound), nil)
+            } catch { return (.localRetry, nil) }
+        }
         guard job.destination == "posthog" else { return (await eraseOther(job, app: app, on: db), nil) }
         switch await PostHogErasureService.step(jobID: job.id, leaseToken: job.token,
             accountID: job.accountID, subjectID: job.subjectID, app: app, on: db) {
@@ -99,11 +126,10 @@ enum MeasurementErasureService {
     }
 
     private static func eraseOther(_ job: Job, app: Application, on db: Database) async -> Outcome {
-        // The remaining Singular/LinkedIn deletion contracts are unverified.
-        // Production retains every manifest; the Singular test fixture only
-        // exercises existing durable local state transitions.
+        // The remaining Singular deletion contract is unverified (LinkedIn has its own
+        // resolution above). Production retains every manifest; the Singular test fixture
+        // only exercises existing durable local state transitions.
         guard app.environment == .testing else { return .manual }
-        guard job.destination != "linkedin" else { return .manual }
         let config = configuration(app)
         guard job.destination == "singular",
               let rawURL = config.singularURL, rawURL.hasPrefix("https://"),
@@ -155,17 +181,26 @@ enum MeasurementErasureService {
         try await db.transaction { tx in
             let sql = try VerifiedIdentityService.sql(tx)
             let state: String, completedAt: Date?, error: String?
+            var bound: LinkedInErasureResolution.Bound?
             switch outcome {
             case .completed: (state, completedAt, error) = ("completed", now, nil)
             case .pending: (state, completedAt, error) = ("pending", nil, nil)
             case .retry: (state, completedAt, error) = ("failing", nil, "provider_unavailable")
+            case .localRetry: (state, completedAt, error) = ("failing", nil, "local_step_unavailable")
             case .manual: (state, completedAt, error) = ("manual_required", nil,
                                                          postHogReason?.rawValue ?? "provider_configuration_required")
+            case .providerRetentionBound(let value):
+                (state, completedAt, error) = (LinkedInErasureResolution.terminalState, nil, nil)
+                bound = value
             }
+            let basis: String? = bound == nil ? nil : LinkedInErasureResolution.version
+            let boundAt: Date? = bound == nil ? nil : now
             let updated = try await sql.raw("""
                 UPDATE measurement_erasure_jobs SET state=\(bind:state),completed_at=\(bind:completedAt),
                     available_at=CASE WHEN \(bind:state) IN ('pending','failing') THEN \(bind:now.addingTimeInterval(900)) ELSE available_at END,
-                    lease_token=NULL,lease_expires_at=NULL,last_error_kind=\(bind:error)
+                    lease_token=NULL,lease_expires_at=NULL,last_error_kind=\(bind:error),
+                    provider_retention_basis=\(bind:basis),provider_last_send_by=\(bind:bound?.lastSendBy),
+                    provider_copy_expires_at=\(bind:bound?.expiresAt),retention_bound_at=\(bind:boundAt)
                 WHERE id=\(bind:job.id) AND lease_token=\(bind:job.token) AND state='leased'
                 RETURNING id
                 """).first() != nil
@@ -181,13 +216,18 @@ enum MeasurementErasureService {
 
     /// Recomputes `account_deletion_jobs.measurement_erasure_state` for every account
     /// deletion of this account from its erasure jobs. Shared by the worker and by a
-    /// recorded manual PostHog resolution (`PostHogManualResolution`).
+    /// recorded manual PostHog resolution (`PostHogManualResolution`). With nothing left to
+    /// do but a LinkedIn copy that ages out under LinkedIn's terms, the deletion's state is
+    /// `provider_retention_bound`, never `completed`.
     static func settleAccountDeletionState(accountID: UUID, on sql: SQLDatabase) async throws {
         try await sql.raw("""
             UPDATE account_deletion_jobs j SET measurement_erasure_state=CASE
                 WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id AND e.state='manual_required') THEN 'manual_required'
                 WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id AND e.state='failing') THEN 'failing'
-                WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id AND e.state<>'completed') THEN 'pending'
+                WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id
+                            AND e.state NOT IN \(unsafeRaw: LinkedInErasureResolution.settledStates)) THEN 'pending'
+                WHEN EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_deletion_job_id=j.id
+                            AND e.state='provider_retention_bound') THEN 'provider_retention_bound'
                 ELSE 'completed' END
             WHERE j.id IN (SELECT account_deletion_job_id FROM measurement_erasure_jobs
                            WHERE account_id=\(bind:accountID) AND account_deletion_job_id IS NOT NULL)

@@ -19,7 +19,10 @@ import FluentSQL
 ///
 /// Trigger: the account is deleted, its deletion barrier has run on this image (no
 /// `MeasurementReconciliation.residue` is left), and every provider-erasure job of the account is
-/// `completed`. The trigger time is the later of the deletion request and the last completion.
+/// settled: `completed`, or for LinkedIn `provider_retention_bound` (LinkedInErasureResolution). The
+/// trigger time is the latest of the deletion request, the last completion and the date each LinkedIn
+/// copy is due to age out under LinkedIn's terms: the consent receipt shows which notice a provider-held
+/// record was collected under while that record may still exist.
 /// Cleanup: `receiptRetention` after the trigger, the hourly pass deletes exactly those rows for that
 /// account. A `failing` or `manual_required` erasure job keeps all of them until a person resolves it;
 /// nothing here completes, skips or deletes unfinished erasure work. A live account's history is not
@@ -38,6 +41,9 @@ enum MeasurementConsentRetention {
         var rows = 0
         /// Deleted accounts kept because an erasure job is `failing` or `manual_required`.
         var blocked = 0
+        /// Deleted accounts whose erasure is settled but kept until a LinkedIn copy is due to age out
+        /// (`provider_retention_bound`) plus `receiptRetention`. Finite; no person is needed.
+        var providerRetentionBound = 0
         /// Deleted accounts kept because their deletion barrier has not run on this image
         /// (rollback residue; `App measurement-reconcile`).
         var unreconciled = 0
@@ -49,7 +55,8 @@ enum MeasurementConsentRetention {
     static func eligible(_ account: String) -> String {
         """
         NOT \(MeasurementReconciliation.unreconciled(account))
-        AND NOT EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_id=\(account) AND e.state<>'completed')
+        AND NOT EXISTS(SELECT 1 FROM measurement_erasure_jobs e WHERE e.account_id=\(account)
+            AND e.state NOT IN \(LinkedInErasureResolution.settledStates))
         AND NOT EXISTS(SELECT 1 FROM measurement_subjects s WHERE s.account_id=\(account) AND (
             (s.purpose='productAnalytics' AND NOT EXISTS(SELECT 1 FROM measurement_erasure_jobs e
                 WHERE e.subject_id=s.id AND e.destination='posthog'))
@@ -62,7 +69,8 @@ enum MeasurementConsentRetention {
     private static func triggerAt(_ account: String) -> String {
         """
         GREATEST((SELECT d.requested_at FROM account_deletion_jobs d WHERE d.user_id=\(account)),
-                 (SELECT MAX(e.completed_at) FROM measurement_erasure_jobs e WHERE e.account_id=\(account)))
+                 (SELECT MAX(e.completed_at) FROM measurement_erasure_jobs e WHERE e.account_id=\(account)),
+                 (SELECT MAX(e.provider_copy_expires_at) FROM measurement_erasure_jobs e WHERE e.account_id=\(account)))
         """
     }
 
@@ -95,10 +103,14 @@ enum MeasurementConsentRetention {
             SELECT
               count(*) FILTER (WHERE EXISTS(SELECT 1 FROM measurement_erasure_jobs e
                   WHERE e.account_id=u.id AND e.state IN ('failing','manual_required'))) AS blocked,
+              count(*) FILTER (WHERE EXISTS(SELECT 1 FROM measurement_erasure_jobs e
+                  WHERE e.account_id=u.id AND e.state='provider_retention_bound')
+                  AND \(unsafeRaw: eligible("u.id"))) AS retention_bound,
               count(*) FILTER (WHERE \(unsafeRaw: MeasurementReconciliation.unreconciled("u.id"))) AS unreconciled
             FROM users u WHERE u.lifecycle_state='deleted' AND \(unsafeRaw: holdsReceipts)
             """).first() {
             counts.blocked = try row.decode(column: "blocked", as: Int.self)
+            counts.providerRetentionBound = try row.decode(column: "retention_bound", as: Int.self)
             counts.unreconciled = try row.decode(column: "unreconciled", as: Int.self)
         }
         return counts

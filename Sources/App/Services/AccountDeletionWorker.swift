@@ -302,7 +302,7 @@ enum AccountDeletionWorker {
                 state=CASE WHEN database_cleanup_state='completed' AND object_cleanup_state='completed'
                         AND apple_revocation_state IN ('not_applicable','revoked','already_revoked')
                         AND revenuecat_state IN ('not_requested','deleted','not_found','skipped_environment')
-                        AND measurement_erasure_state IN ('not_requested','completed')
+                        AND measurement_erasure_state IN ('not_requested','completed','provider_retention_bound')
                         AND NOT EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND state<>'completed') THEN 'completed'
                     WHEN (database_cleanup_state<>'completed' AND NOT EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND mode='explicit' AND state IN ('pending','erasing'))) OR object_cleanup_state='blocked'
                         OR EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND state='blocked')
@@ -312,7 +312,7 @@ enum AccountDeletionWorker {
                 completed_at=CASE WHEN database_cleanup_state='completed' AND object_cleanup_state='completed'
                         AND apple_revocation_state IN ('not_applicable','revoked','already_revoked')
                         AND revenuecat_state IN ('not_requested','deleted','not_found','skipped_environment')
-                        AND measurement_erasure_state IN ('not_requested','completed')
+                        AND measurement_erasure_state IN ('not_requested','completed','provider_retention_bound')
                         AND NOT EXISTS(SELECT 1 FROM company_closure_jobs WHERE account_deletion_job_id=\(bind: lease.id) AND state<>'completed') THEN NOW() ELSE NULL END,
                 last_error_kind=CASE WHEN EXISTS(SELECT 1 FROM account_deletion_unresolved_objects WHERE job_id=\(bind: lease.id)) THEN \(DeletionReasonKind.unresolvedLegacyObjectOwnership.sql)
                     WHEN EXISTS(SELECT 1 FROM account_deletion_write_intents d JOIN object_write_intents i ON i.id=d.intent_id
